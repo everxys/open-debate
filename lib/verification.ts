@@ -1,11 +1,25 @@
 import { randomInt } from "node:crypto";
 
 import { query } from "@/lib/db";
+import { AppError } from "@/lib/http";
 import { hashVerificationCode, verifyVerificationCode } from "@/lib/password";
 
 export function generateSixDigitCode() {
   const value = randomInt(0, 1_000_000);
   return String(value).padStart(6, "0");
+}
+
+export function isSixDigitCode(value: string) {
+  return /^\d{6}$/.test(value.trim());
+}
+
+function isPgUndefinedTable(error: unknown) {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "42P01"
+  );
 }
 
 export async function createSignupVerificationCode(input: {
@@ -18,15 +32,34 @@ export async function createSignupVerificationCode(input: {
   const code = generateSixDigitCode();
   const hashed = hashVerificationCode(code, input.email);
 
-  await query(
-    `
-      insert into email_verification_codes
-        (email, purpose, code_salt, code_hash, sent_to, ip, user_agent, expires_at)
-      values
-        ($1, 'signup', $2, $3, $1, $4, $5, now() + ($6 || ' minutes')::interval)
-    `,
-    [input.email.trim().toLowerCase(), hashed.salt, hashed.hash, input.ip, input.userAgent, String(expiresInMinutes)]
-  );
+  try {
+    await query(
+      `
+        insert into email_verification_codes
+          (email, purpose, code_salt, code_hash, sent_to, ip, user_agent, expires_at)
+        values
+          ($1, 'signup', $2, $3, $1, $4, $5, now() + ($6 || ' minutes')::interval)
+      `,
+      [
+        input.email.trim().toLowerCase(),
+        hashed.salt,
+        hashed.hash,
+        input.ip,
+        input.userAgent,
+        String(expiresInMinutes)
+      ]
+    );
+  } catch (error) {
+    if (isPgUndefinedTable(error)) {
+      console.error("DB schema missing: email_verification_codes", error);
+      throw new AppError(
+        "DB_MIGRATION_REQUIRED",
+        500,
+        "数据库缺少 email_verification_codes 表：请把 docker/init.sql 里相关建表语句执行到当前数据库（或重建数据库/volume）"
+      );
+    }
+    throw error;
+  }
 
   return { code, expiresInMinutes };
 }
@@ -34,6 +67,7 @@ export async function createSignupVerificationCode(input: {
 export async function consumeSignupVerificationCode(input: { email: string; code: string }) {
   const email = input.email.trim().toLowerCase();
   const code = input.code.trim();
+  if (!isSixDigitCode(code)) return false;
 
   const candidates = await query<{
     id: string;
@@ -75,6 +109,7 @@ export async function consumeSignupVerificationCode(input: { email: string; code
 export async function checkSignupVerificationCode(input: { email: string; code: string }) {
   const email = input.email.trim().toLowerCase();
   const code = input.code.trim();
+  if (!isSixDigitCode(code)) return false;
 
   const candidates = await query<{
     code_salt: string;

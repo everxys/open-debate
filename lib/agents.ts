@@ -3,7 +3,13 @@ import { query } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { readSession } from "@/lib/session";
 import type { AgentRecord, Provider } from "@/lib/types";
-import { createAgentSchema, updateAgentSchema } from "@/lib/validation";
+import {
+  agentFileDeleteSchema,
+  agentFileUpsertSchema,
+  createAgentSchema,
+  testAgentConfigSchema,
+  updateAgentSchema
+} from "@/lib/validation";
 
 function toAgentView(agent: AgentRecord) {
   return {
@@ -47,7 +53,27 @@ async function requireSessionUser() {
 
 function resolveTestUrl(provider: Provider, baseUrl: string) {
   const normalized = baseUrl.replace(/\/+$/, "");
-  return provider === "openai" ? `${normalized}/models` : `${normalized}/messages`;
+  return provider === "openai"
+    ? `${normalized}/chat/completions`
+    : `${normalized}/messages`;
+}
+
+function resolveTestUrlCandidates(provider: Provider, baseUrl: string) {
+  const normalized = baseUrl.replace(/\/+$/, "");
+  const candidates = [normalized];
+
+  try {
+    const url = new URL(normalized);
+    const pathname = url.pathname.replace(/\/+$/, "");
+    const endsWithV1 = pathname === "/v1" || pathname.endsWith("/v1");
+    if (!endsWithV1) {
+      candidates.push(`${normalized}/v1`);
+    }
+  } catch {
+    // ignore malformed URL; schema validation should prevent this
+  }
+
+  return Array.from(new Set(candidates)).map((candidate) => resolveTestUrl(provider, candidate));
 }
 
 async function callProviderHealthCheck(input: {
@@ -56,7 +82,7 @@ async function callProviderHealthCheck(input: {
   apiKey: string;
   model: string;
 }) {
-  const url = resolveTestUrl(input.provider, input.baseUrl);
+  const urls = resolveTestUrlCandidates(input.provider, input.baseUrl);
   const headers = new Headers({ "Content-Type": "application/json" });
 
   if (input.provider === "openai") {
@@ -66,32 +92,88 @@ async function callProviderHealthCheck(input: {
     headers.set("anthropic-version", "2023-06-01");
   }
 
-  const response = await fetch(url, {
-    method: input.provider === "openai" ? "GET" : "POST",
-    headers,
-    body:
-      input.provider === "openai"
-        ? undefined
-        : JSON.stringify({
-            model: input.model,
-            max_tokens: 16,
-            messages: [{ role: "user", content: "Reply with OK" }]
-          })
-  });
+  let lastError: AppError | null = null;
 
-  if (!response.ok) {
+  for (let index = 0; index < urls.length; index += 1) {
+    const url = urls[index];
+    let response: Response;
+
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers,
+        body:
+          input.provider === "openai"
+            ? JSON.stringify({
+                model: input.model,
+                messages: [{ role: "user", content: "Reply with OK" }],
+                max_tokens: 8,
+                stream: false
+              })
+            : JSON.stringify({
+                model: input.model,
+                max_tokens: 16,
+                messages: [{ role: "user", content: "Reply with OK" }]
+              })
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new AppError(
+        "AI_NETWORK_ERROR",
+        502,
+        `Provider request failed for ${url}: ${message}`
+      );
+    }
+
+    if (response.ok) {
+      return {
+        connected: true,
+        message: `${input.provider} API is reachable`
+      };
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
     const text = await response.text();
-    throw new AppError(
+    let extractedMessage: string | null = null;
+
+    if (contentType.includes("application/json")) {
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>;
+        const openAiError = parsed.error as Record<string, unknown> | undefined;
+        const anthropicError = (parsed as { error?: Record<string, unknown> }).error;
+
+        extractedMessage =
+          (typeof openAiError?.message === "string" && openAiError.message) ||
+          (typeof anthropicError?.message === "string" && anthropicError.message) ||
+          (typeof parsed.message === "string" && parsed.message) ||
+          null;
+      } catch {
+        // ignore
+      }
+    }
+
+    const rawDetails = contentType.includes("application/json")
+      ? text.slice(0, 400)
+      : text.slice(0, 200);
+    const details = extractedMessage ?? rawDetails;
+
+    lastError = new AppError(
       "AI_API_ERROR",
       502,
-      `Provider test failed: ${response.status} ${text.slice(0, 200)}`
+      `Provider test failed: ${input.provider} ${url} -> ${response.status} ${
+        details || response.statusText
+      }`
     );
+
+    const hasNextCandidate = index < urls.length - 1;
+    if (response.status === 404 && hasNextCandidate) {
+      continue;
+    }
+
+    throw lastError;
   }
 
-  return {
-    connected: true,
-    message: `${input.provider} API is reachable`
-  };
+  throw lastError ?? new AppError("AI_API_ERROR", 502, "Provider test failed");
 }
 
 export async function listAgents() {
@@ -113,6 +195,84 @@ export async function getAgentById(id: string) {
     throw new AppError("NOT_FOUND", 404, "Agent not found");
   }
   return normalizeAgentRow(result.rows[0]);
+}
+
+function isMissingTableError(error: unknown, table: string) {
+  if (typeof error !== "object" || error === null) return false;
+  const anyError = error as { code?: unknown; message?: unknown };
+  if (anyError.code !== "42P01") return false;
+  const message = typeof anyError.message === "string" ? anyError.message : "";
+  return message.toLowerCase().includes(table.toLowerCase());
+}
+
+export async function listAgentFiles(agentId: string) {
+  await getAgentById(agentId);
+  try {
+    const result = await query<Record<string, unknown>>(
+      "select path, content, created_at, updated_at from ai_agent_files where ai_agent_id = $1 order by path asc",
+      [agentId]
+    );
+    return result.rows.map((row) => ({
+      path: String(row.path),
+      content: String(row.content ?? ""),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at)
+    }));
+  } catch (error) {
+    if (isMissingTableError(error, "ai_agent_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing ai_agent_files table");
+    }
+    throw error;
+  }
+}
+
+export async function upsertAgentFile(agentId: string, input: unknown) {
+  const data = agentFileUpsertSchema.parse(input);
+  await getAgentById(agentId);
+  const now = new Date().toISOString();
+
+  try {
+    const result = await query<Record<string, unknown>>(
+      `
+        insert into ai_agent_files (ai_agent_id, path, content, created_at, updated_at)
+        values ($1, $2, $3, $4, $4)
+        on conflict (ai_agent_id, path)
+        do update set content = excluded.content, updated_at = excluded.updated_at
+        returning path, content, created_at, updated_at
+      `,
+      [agentId, data.path, data.content, now]
+    );
+    return {
+      path: String(result.rows[0].path),
+      content: String(result.rows[0].content ?? ""),
+      createdAt: String(result.rows[0].created_at),
+      updatedAt: String(result.rows[0].updated_at)
+    };
+  } catch (error) {
+    if (isMissingTableError(error, "ai_agent_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing ai_agent_files table");
+    }
+    throw error;
+  }
+}
+
+export async function deleteAgentFile(agentId: string, input: unknown) {
+  const data = agentFileDeleteSchema.parse(input);
+  await getAgentById(agentId);
+  try {
+    const result = await query(
+      "delete from ai_agent_files where ai_agent_id = $1 and path = $2",
+      [agentId, data.path]
+    );
+    if ((result.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "File not found");
+    }
+  } catch (error) {
+    if (isMissingTableError(error, "ai_agent_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing ai_agent_files table");
+    }
+    throw error;
+  }
 }
 
 export async function createAgent(input: unknown) {
@@ -190,16 +350,17 @@ export async function deleteAgent(id: string) {
 
 export async function testAgentConnection(id: string) {
   const agent = await getAgentById(id);
-  return callProviderHealthCheck({
+  const result = await callProviderHealthCheck({
     provider: agent.provider,
     baseUrl: agent.baseUrl,
     apiKey: decryptSecret(agent.apiKeyEncrypted),
     model: agent.model
   });
+  return { ...result, message: `${agent.name} is reachable` };
 }
 
 export async function testAgentConfig(input: unknown) {
-  const data = createAgentSchema.parse(input);
+  const data = testAgentConfigSchema.parse(input);
   await requireSessionUser();
   return callProviderHealthCheck({
     provider: data.provider,

@@ -1,7 +1,20 @@
 import { NextResponse } from "next/server";
 
-import { deleteAgent, updateAgent } from "@/lib/agents";
+import { deleteAgent, getAgentById, updateAgent } from "@/lib/agents";
 import { toErrorResponse } from "@/lib/http";
+
+export async function GET(
+  _request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await context.params;
+    const agent = await getAgentById(id);
+    return NextResponse.json({ success: true, data: agent });
+  } catch (error) {
+    return toErrorResponse(error);
+  }
+}
 
 export async function PATCH(
   request: Request,

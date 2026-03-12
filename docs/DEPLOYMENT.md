@@ -87,6 +87,15 @@ docker compose up -d --build
 
 ## 故障排查
 
+### AI 配置测试返回 502（/api/agents/test-config）
+
+这通常表示服务端已收到请求，但在访问上游模型服务时失败（例如 Key/URL/模型名不对，或网络不可达）。
+
+检查项：
+- `Base URL`：建议填写到版本前缀，例如 OpenAI `https://api.openai.com/v1`、Anthropic `https://api.anthropic.com/v1`（如果只填到域名根路径，服务端会在 404 时自动重试追加 `/v1`）。
+- `API Key`：确认是对应 Provider 的有效 Key，且没有多余空格/换行。
+- `模型名`：连通性测试会实际发起一次请求（OpenAI 走 `POST /chat/completions`，Anthropic 走 `POST /messages`），模型名不正确会直接报错。
+
 ### 数据库连接失败
 
 ```bash

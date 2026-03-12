@@ -9,7 +9,33 @@ export const createAgentSchema = z.object({
   apiKey: z.string().min(1)
 });
 
+export const testAgentConfigSchema = createAgentSchema.pick({
+  provider: true,
+  model: true,
+  baseUrl: true,
+  systemPrompt: true,
+  apiKey: true
+});
+
 export const updateAgentSchema = createAgentSchema.partial();
+
+const filePathSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .refine((value) => !value.startsWith("/"), "Path must be relative")
+  .refine((value) => !value.includes("\\"), "Use / as separator")
+  .refine((value) => !value.includes(".."), "Path cannot contain ..")
+  .refine((value) => !value.endsWith("/"), "Path must be a file, not a directory");
+
+export const agentFileUpsertSchema = z.object({
+  path: filePathSchema,
+  content: z.string().max(100_000)
+});
+
+export const agentFileDeleteSchema = z.object({
+  path: filePathSchema
+});
 
 export const createDebateSchema = z.object({
   question: z.string().min(10).max(5000),

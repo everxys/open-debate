@@ -213,22 +213,7 @@ button {
 
 .authInner {
   width: 100%;
-  max-width: 960px;
-  display: grid;
-  grid-template-columns: 1.1fr 0.9fr;
-  gap: 18px;
-  align-items: stretch;
-}
-
-.authHero {
-  border-radius: 18px;
-  padding: 22px;
-  border: 1px solid var(--line);
-  background: radial-gradient(1200px 600px at 20% 20%, #e7efff 0%, #ffffff 45%, #ffffff 100%);
-  box-shadow: 0 16px 36px rgba(20, 38, 63, 0.08);
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
+  max-width: 460px;
 }
 
 .authCard {
@@ -287,12 +272,47 @@ button {
   color: var(--green);
 }
 
+.toast {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 50;
+  min-width: 640px;
+  max-width: min(880px, calc(100vw - 36px));
+  border-radius: 14px;
+  padding: 28px 32px;
+  border: 1px solid var(--line);
+  background: #fff;
+  box-shadow: 0 16px 40px rgba(20, 38, 63, 0.14);
+  font-size: 18px;
+  font-weight: 600;
+  text-align: center;
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.98);
+  animation: toast-in 180ms ease-out forwards;
+}
+
+.toast-success {
+  border-color: #cfeadf;
+  background: #f3fbf7;
+  color: var(--green);
+}
+
+.toast-error {
+  border-color: #f2c5c1;
+  background: #fff5f5;
+  color: var(--red);
+}
+
+@keyframes toast-in {
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
 @media (max-width: 900px) {
   .grid-2 {
-    grid-template-columns: 1fr;
-  }
-
-  .authInner {
     grid-template-columns: 1fr;
   }
 }

@@ -5,12 +5,15 @@ import { AppError, toErrorResponse } from "@/lib/http";
 import { verifyPassword } from "@/lib/password";
 import { createSessionToken, setSessionCookie } from "@/lib/session";
 import { getClientIp } from "@/lib/request";
+import { enforceIpRateLimit } from "@/lib/rate-limit";
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
 
 export async function POST(request: Request) {
   try {
+    await enforceIpRateLimit(request, { action: "auth_login", limit: 20, windowSeconds: 300 });
+
     const { email, password } = (await request.json()) as {
       email?: string;
       password?: string;

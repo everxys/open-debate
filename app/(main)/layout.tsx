@@ -11,20 +11,19 @@ export default async function MainLayout({ children }: { children: ReactNode }) 
     <div className="shell">
       <div className="topbar">
         <div>
-          <strong>Open Debate V1</strong>
+          <Link href="/debates">
+            <strong>Open Debate V1</strong>
+          </Link>
           <div className="muted">
             {user ? `已登录: ${user.email}` : "Docker Compose + Next.js + Postgres"}
           </div>
         </div>
         <div className="nav">
-          <Link className="btn" href="/">
-            首页
+          <Link className="btn" href="/debates">
+            辩论
           </Link>
           <Link className="btn" href="/agents">
             AI 配置
-          </Link>
-          <Link className="btn" href="/debates">
-            辩论
           </Link>
           {user ? (
             <LogoutButton />
@@ -39,4 +38,3 @@ export default async function MainLayout({ children }: { children: ReactNode }) 
     </div>
   );
 }
-

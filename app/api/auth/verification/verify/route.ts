@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { AppError, toErrorResponse } from "@/lib/http";
-import { checkSignupVerificationCode } from "@/lib/verification";
+import { checkSignupVerificationCode, isSixDigitCode } from "@/lib/verification";
 
 export async function POST(request: Request) {
   try {
@@ -13,6 +13,9 @@ export async function POST(request: Request) {
 
     if (!email || !code) {
       throw new AppError("VALIDATION_ERROR", 400, "Email and code are required");
+    }
+    if (!isSixDigitCode(code)) {
+      throw new AppError("VALIDATION_ERROR", 400, "Code must be 6 digits");
     }
     if (purpose && purpose !== "signup") {
       throw new AppError("VALIDATION_ERROR", 400, "Invalid purpose");

@@ -3,7 +3,8 @@ import { NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { AppError, toErrorResponse } from "@/lib/http";
 import { hashPassword } from "@/lib/password";
-import { consumeSignupVerificationCode } from "@/lib/verification";
+import { enforceIpRateLimit } from "@/lib/rate-limit";
+import { consumeSignupVerificationCode, isSixDigitCode } from "@/lib/verification";
 import { createSessionToken, setSessionCookie } from "@/lib/session";
 
 function isStrongEnoughPassword(value: string) {
@@ -15,6 +16,8 @@ function isStrongEnoughPassword(value: string) {
 
 export async function POST(request: Request) {
   try {
+    await enforceIpRateLimit(request, { action: "auth_signup", limit: 5, windowSeconds: 600 });
+
     const { email, password, code } = (await request.json()) as {
       email?: string;
       password?: string;
@@ -23,6 +26,9 @@ export async function POST(request: Request) {
 
     if (!email || !password || !code) {
       throw new AppError("VALIDATION_ERROR", 400, "Email, password, and code are required");
+    }
+    if (!isSixDigitCode(code)) {
+      throw new AppError("VALIDATION_ERROR", 400, "Code must be 6 digits");
     }
     if (!isStrongEnoughPassword(password)) {
       throw new AppError(

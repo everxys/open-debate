@@ -48,15 +48,27 @@ export async function POST(request: Request) {
       expiresInMinutes: 10
     });
 
-    await sendVerificationEmail({
-      email: normalizedEmail,
-      code: created.code,
-      purpose: "signup",
-      expiresInMinutes: created.expiresInMinutes
-    });
+    try {
+      await sendVerificationEmail({
+        email: normalizedEmail,
+        code: created.code,
+        purpose: "signup",
+        expiresInMinutes: created.expiresInMinutes
+      });
+    } catch (error) {
+      const detail =
+        process.env.NODE_ENV !== "production" && error instanceof Error ? ` (${error.message})` : "";
+      throw new AppError(
+        "EMAIL_SEND_FAILED",
+        502,
+        `邮件发送失败，请检查 SendCloud 的 From 域名是否完成 SPF/DKIM 配置${detail}`
+      );
+    }
 
+    const delivery = (process.env.EMAIL_DELIVERY ?? "console").toLowerCase();
     const shouldReturnCode =
-      process.env.NODE_ENV !== "production" && (process.env.EMAIL_DEBUG_RETURN_CODE ?? "1") === "1";
+      (process.env.EMAIL_DEBUG_RETURN_CODE ?? "1") === "1" &&
+      (process.env.NODE_ENV !== "production" || delivery === "console");
 
     return NextResponse.json({
       success: true,
@@ -70,4 +82,3 @@ export async function POST(request: Request) {
     return toErrorResponse(error);
   }
 }
-

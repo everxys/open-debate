@@ -105,13 +105,16 @@ export async function createDebate(input: unknown) {
 }
 
 export async function getDebateDetail(id: string) {
-  const { debate } = await getDebate(id);
+  const { debate, session } = await getDebate(id);
   const [agentRows, agentInfoRows] = await Promise.all([
     query<Record<string, unknown>>(
       "select * from debate_agents where debate_id = $1 order by turn_order asc",
       [debate.id]
     ),
-    query<Record<string, unknown>>("select id, name, provider from ai_agents")
+    query<Record<string, unknown>>(
+      "select id, name, provider from ai_agents where user_id = $1",
+      [session.userId]
+    )
   ]);
 
   const agentMap = new Map(agentInfoRows.rows.map((item) => [String(item.id), item]));
@@ -141,13 +144,16 @@ export async function getDebateDetail(id: string) {
 }
 
 export async function listDebateTurns(id: string) {
-  const { debate } = await getDebate(id);
+  const { debate, session } = await getDebate(id);
   const [turnRows, agentRows] = await Promise.all([
     query<Record<string, unknown>>(
       "select * from debate_turns where debate_id = $1 order by turn_number asc",
       [debate.id]
     ),
-    query<Record<string, unknown>>("select id, name, provider from ai_agents")
+    query<Record<string, unknown>>(
+      "select id, name, provider from ai_agents where user_id = $1",
+      [session.userId]
+    )
   ]);
 
   const agentMap = new Map(agentRows.rows.map((item) => [String(item.id), item]));
@@ -238,4 +244,53 @@ export async function stopDebate(id: string, reason: string) {
     throw new AppError("CONFLICT", 409, "Debate is already finished");
   }
   return toListItem(normalizeDebateRow(result.rows[0]));
+}
+
+export async function appendAgentToDebate(id: string, agentId: string) {
+  const { session, debate } = await getDebate(id);
+  if (!["running", "paused"].includes(debate.status)) {
+    throw new AppError("CONFLICT", 409, "Only running/paused debates can add new agents");
+  }
+
+  const currentAgents = await query<{ count: number }>(
+    "select count(1)::int as count from debate_agents where debate_id = $1",
+    [debate.id]
+  );
+  const count = currentAgents.rows[0]?.count ?? 0;
+  if (count >= 5) {
+    throw new AppError("CONFLICT", 409, "Debate already has 5 agents");
+  }
+
+  const agent = await query<{ id: string }>(
+    "select id from ai_agents where user_id = $1 and id = $2",
+    [session.userId, agentId]
+  );
+  if ((agent.rowCount ?? 0) !== 1) {
+    throw new AppError("NOT_FOUND", 404, "Agent not found");
+  }
+
+  const exists = await query<{ id: string }>(
+    "select id from debate_agents where debate_id = $1 and ai_agent_id = $2",
+    [debate.id, agentId]
+  );
+  if ((exists.rowCount ?? 0) > 0) {
+    throw new AppError("CONFLICT", 409, "Agent already joined this debate");
+  }
+
+  const maxOrderResult = await query<{ max: number }>(
+    "select coalesce(max(turn_order), 0)::int as max from debate_agents where debate_id = $1",
+    [debate.id]
+  );
+  const maxOrder = maxOrderResult.rows[0]?.max ?? 0;
+  const now = new Date().toISOString();
+
+  await query(
+    `insert into debate_agents (debate_id, ai_agent_id, turn_order, turn_count, created_at)
+     values ($1,$2,$3,0,$4)`,
+    [debate.id, agentId, maxOrder + 1, now]
+  );
+
+  await query("update debates set updated_at = $2 where id = $1", [debate.id, now]);
+
+  return getDebateDetail(debate.id);
 }

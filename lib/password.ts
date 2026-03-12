@@ -1,5 +1,13 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
+const DEFAULT_SCRYPT_MAXMEM = 64 * 1024 * 1024; // 64MiB
+const SCRYPT_MAXMEM = (() => {
+  const raw = process.env.SCRYPT_MAXMEM;
+  if (!raw) return DEFAULT_SCRYPT_MAXMEM;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_SCRYPT_MAXMEM;
+})();
+
 const SCRYPT_PARAMS = {
   // Keep these modest for serverless cold starts; adjust if you need stronger cost.
   N: 1 << 15,
@@ -18,7 +26,8 @@ export function hashPassword(password: string) {
   const hash = scryptSync(peppered, salt, SCRYPT_PARAMS.keylen, {
     N: SCRYPT_PARAMS.N,
     r: SCRYPT_PARAMS.r,
-    p: SCRYPT_PARAMS.p
+    p: SCRYPT_PARAMS.p,
+    maxmem: SCRYPT_MAXMEM
   }).toString("hex");
   return `scrypt$${SCRYPT_PARAMS.N}$${SCRYPT_PARAMS.r}$${SCRYPT_PARAMS.p}$${salt}$${hash}`;
 }
@@ -43,10 +52,19 @@ export function verifyPassword(password: string, stored: string) {
     const salt = parts[4];
     const hashHex = parts[5];
     if (!Number.isFinite(N) || !Number.isFinite(r) || !Number.isFinite(p)) return false;
+    if (!Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p)) return false;
+    if (N <= 1 || (N & (N - 1)) !== 0) return false; // must be power of two
+    if (r <= 0 || p <= 0) return false;
+    // Basic bounds to avoid pathological/DoS params from corrupted data.
+    if (N > (1 << 18)) return false;
+    if (r > 32) return false;
+    if (p > 8) return false;
+    const estimatedMem = 128 * r * N;
+    if (estimatedMem > SCRYPT_MAXMEM) return false;
     if (!salt || !hashHex) return false;
 
     const peppered = password + getPepper();
-    const candidate = scryptSync(peppered, salt, 64, { N, r, p });
+    const candidate = scryptSync(peppered, salt, 64, { N, r, p, maxmem: SCRYPT_MAXMEM });
     const existing = Buffer.from(hashHex, "hex");
     if (existing.length !== candidate.length) return false;
     return timingSafeEqual(candidate, existing);

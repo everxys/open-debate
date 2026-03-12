@@ -1,7 +1,17 @@
 "use client";
 
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
+
+import { useAutoDismissToast } from "@/components/ui/use-toast";
+
+type Agent = {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+};
 
 type DebateAgent = {
   id: string;
@@ -50,7 +60,10 @@ export default function DebateDetailPage() {
   const id = params.id;
   const [debate, setDebate] = useState<Debate | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [message, setMessage] = useState("");
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [newAgentId, setNewAgentId] = useState<string>("");
+  const [isAddingAgent, setIsAddingAgent] = useState(false);
+  const { toast, showToast } = useAutoDismissToast(1200);
 
   useEffect(() => {
     if (!id) {
@@ -78,28 +91,83 @@ export default function DebateDetailPage() {
     };
   }, [id]);
 
+  useEffect(() => {
+    if (!id) return;
+    async function loadAgents() {
+      const response = await fetch("/api/agents");
+      const payload = await response.json();
+      if (response.ok) {
+        setAgents(payload.data ?? []);
+      }
+    }
+    void loadAgents();
+  }, [id]);
+
   async function action(name: "start" | "pause" | "resume" | "stop") {
     if (!id) {
       return;
     }
-    setMessage("");
     const response = await fetch(`/api/debates/${id}/${name}`, { method: "POST" });
     const payload = await response.json();
     if (!response.ok) {
-      setMessage(payload.error?.message ?? "操作失败");
+      showToast("error", payload.error?.message ?? "操作失败");
       return;
     }
-    setMessage(`${name} 成功`);
+    showToast("success", "操作成功");
+  }
+
+  async function addAgent() {
+    if (!id || !newAgentId || isAddingAgent) return;
+    setIsAddingAgent(true);
+    try {
+      const response = await fetch(`/api/debates/${id}/agents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId: newAgentId })
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "加入失败");
+        return;
+      }
+      setDebate(payload.data);
+      setNewAgentId("");
+      showToast("success", "已加入（排在最后）");
+    } finally {
+      setIsAddingAgent(false);
+    }
   }
 
   if (!debate) {
     return <div className="panel">加载中...</div>;
   }
 
+  const joinedAgentIds = new Set(debate.agents.map((item) => item.id));
+  const availableAgents = agents.filter((agent) => !joinedAgentIds.has(agent.id));
+  const canAddAgent =
+    ["running", "paused"].includes(debate.status) &&
+    debate.agents.length < 5 &&
+    availableAgents.length > 0;
+
   return (
     <div className="grid grid-2">
+      {toast ? (
+        <div
+          className={`toast ${toast.type === "success" ? "toast-success" : "toast-error"}`}
+          role="status"
+          aria-live="polite"
+        >
+          {toast.text}
+        </div>
+      ) : null}
+
       <section className="panel stack">
-        <h2 style={{ margin: 0 }}>辩论状态</h2>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <h2 style={{ margin: 0 }}>辩论状态</h2>
+          <Link className="btn" href="/debates">
+            返回列表
+          </Link>
+        </div>
         <div>
           <span className={`badge badge-${debate.status}`}>{debate.status}</span>
         </div>
@@ -131,9 +199,34 @@ export default function DebateDetailPage() {
             停止
           </button>
         </div>
-        {message ? <div className="muted">{message}</div> : null}
         <div className="stack">
           <h3 style={{ marginBottom: 0 }}>参与者</h3>
+          {canAddAgent ? (
+            <div className="panel">
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <strong>加入新的 AI（会排在最后）</strong>
+                <span className="muted">当前 {debate.agents.length}/5</span>
+              </div>
+              <div className="row">
+                <select
+                  value={newAgentId}
+                  onChange={(event) => setNewAgentId(event.target.value)}
+                  style={{ flex: 1 }}
+                >
+                  <option value="">选择一个 AI 配置</option>
+                  {availableAgents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name} · {agent.provider} · {agent.model}
+                    </option>
+                  ))}
+                </select>
+                <button className="btn btn-primary" disabled={!newAgentId || isAddingAgent} onClick={() => void addAgent()}>
+                  加入
+                </button>
+              </div>
+              <div className="muted">仅支持进行中/暂停中的辩论加入，且最多 5 个参与者。</div>
+            </div>
+          ) : null}
           {debate.agents.map((agent) => (
             <div className="panel" key={agent.id}>
               #{agent.turnOrder} {agent.name} · {agent.provider} · 发言 {agent.turnCount}
@@ -185,4 +278,3 @@ export default function DebateDetailPage() {
     </div>
   );
 }
-

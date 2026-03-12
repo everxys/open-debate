@@ -105,3 +105,27 @@ create index if not exists idx_ai_agents_user_id on ai_agents(user_id);
 create index if not exists idx_debates_user_id on debates(user_id);
 create index if not exists idx_debate_agents_debate_id on debate_agents(debate_id);
 create index if not exists idx_debate_turns_debate_id on debate_turns(debate_id);
+
+create table if not exists rate_limit_counters (
+  key text not null,
+  window_id bigint not null,
+  count integer not null,
+  created_at timestamptz not null default now(),
+  primary key (key, window_id)
+);
+
+create index if not exists idx_rate_limit_counters_created_at
+  on rate_limit_counters (created_at desc);
+
+create table if not exists ai_agent_files (
+  id uuid primary key default gen_random_uuid(),
+  ai_agent_id uuid not null references ai_agents(id) on delete cascade,
+  path text not null,
+  content text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (ai_agent_id, path)
+);
+
+create index if not exists idx_ai_agent_files_agent_id_updated_at
+  on ai_agent_files (ai_agent_id, updated_at desc);

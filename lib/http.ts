@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
+import { ZodError } from "zod";
 
 export class AppError extends Error {
   constructor(
     public readonly code: string,
     public readonly status: number,
-    message: string
+    message: string,
+    public readonly headers?: Record<string, string>
   ) {
     super(message);
   }
@@ -20,7 +22,25 @@ export function toErrorResponse(error: unknown) {
           message: error.message
         }
       },
-      { status: error.status }
+      { status: error.status, headers: error.headers }
+    );
+  }
+
+  if (error instanceof ZodError) {
+    const firstIssue = error.issues[0];
+    const path = firstIssue?.path?.length ? firstIssue.path.join(".") : "input";
+    const message = firstIssue ? `${path}: ${firstIssue.message}` : "Invalid request";
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: {
+          code: "VALIDATION_ERROR",
+          message,
+          details: error.issues
+        }
+      },
+      { status: 400 }
     );
   }
 
