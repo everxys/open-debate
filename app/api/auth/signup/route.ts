@@ -1,0 +1,66 @@
+import { NextResponse } from "next/server";
+
+import { query } from "@/lib/db";
+import { AppError, toErrorResponse } from "@/lib/http";
+import { hashPassword } from "@/lib/password";
+import { consumeSignupVerificationCode } from "@/lib/verification";
+import { createSessionToken, setSessionCookie } from "@/lib/session";
+
+function isStrongEnoughPassword(value: string) {
+  if (value.length < 10 || value.length > 200) return false;
+  const hasLetter = /[A-Za-z]/.test(value);
+  const hasNumber = /\d/.test(value);
+  return hasLetter && hasNumber;
+}
+
+export async function POST(request: Request) {
+  try {
+    const { email, password, code } = (await request.json()) as {
+      email?: string;
+      password?: string;
+      code?: string;
+    };
+
+    if (!email || !password || !code) {
+      throw new AppError("VALIDATION_ERROR", 400, "Email, password, and code are required");
+    }
+    if (!isStrongEnoughPassword(password)) {
+      throw new AppError(
+        "VALIDATION_ERROR",
+        400,
+        "Password must be at least 10 chars and include letters + numbers"
+      );
+    }
+
+    const normalizedEmail = email.toLowerCase();
+    const existing = await query<{ id: string }>("select id from users where email = $1", [
+      normalizedEmail
+    ]);
+    if ((existing.rowCount ?? 0) > 0) {
+      throw new AppError("CONFLICT", 409, "Email already exists");
+    }
+
+    const verified = await consumeSignupVerificationCode({ email: normalizedEmail, code });
+    if (!verified) {
+      throw new AppError("CODE_INVALID", 400, "Invalid or expired verification code");
+    }
+
+    const inserted = await query<{ id: string; email: string }>(
+      "insert into users (email, password_hash, email_verified) values ($1, $2, true) returning id, email",
+      [normalizedEmail, hashPassword(password)]
+    );
+
+    const token = await createSessionToken({
+      userId: inserted.rows[0].id,
+      email: inserted.rows[0].email
+    });
+    await setSessionCookie(token);
+
+    return NextResponse.json({
+      success: true,
+      data: inserted.rows[0]
+    });
+  } catch (error) {
+    return toErrorResponse(error);
+  }
+}
