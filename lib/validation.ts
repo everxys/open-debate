@@ -37,6 +37,11 @@ export const agentFileDeleteSchema = z.object({
   path: filePathSchema
 });
 
+export const agentFileMoveSchema = z.object({
+  fromPath: filePathSchema,
+  toPath: filePathSchema
+});
+
 export const createDebateSchema = z.object({
   question: z.string().min(10).max(5000),
   agentIds: z.array(z.string()).min(2).max(5),

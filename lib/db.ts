@@ -2,6 +2,7 @@ import { Pool, type QueryResultRow } from "pg";
 
 const globalPool = globalThis as typeof globalThis & {
   openDebatePool?: Pool;
+  openDebateSchemaReady?: Promise<void>;
 };
 
 function getDbDiagnostics() {
@@ -68,9 +69,32 @@ export function getPool() {
   return globalPool.openDebatePool;
 }
 
+async function ensureSchema(pool: Pool) {
+  // Keep this minimal: make new columns backward-compatible with existing volumes.
+  await pool.query("alter table users add column if not exists role text not null default 'user'");
+  await pool.query(`
+    do $$
+    begin
+      if not exists (
+        select 1 from pg_constraint where conname = 'users_role_check'
+      ) then
+        alter table users add constraint users_role_check check (role in ('user', 'admin'));
+      end if;
+    exception when duplicate_object then
+      null;
+    end $$;
+  `);
+}
+
 export async function query<T extends QueryResultRow>(sql: string, params: unknown[] = []) {
+  const pool = getPool();
+  if (!globalPool.openDebateSchemaReady) {
+    globalPool.openDebateSchemaReady = ensureSchema(pool);
+  }
+  await globalPool.openDebateSchemaReady;
+
   try {
-    return await getPool().query<T>(sql, params);
+    return await pool.query<T>(sql, params);
   } catch (error) {
     const diagnostics = getDbDiagnostics();
     const details = getPgErrorDetails(error);

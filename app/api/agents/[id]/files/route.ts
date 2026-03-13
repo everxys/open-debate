@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { deleteAgentFile, listAgentFiles, upsertAgentFile } from "@/lib/agents";
+import { deleteAgentFile, listAgentFiles, moveAgentFile, upsertAgentFile } from "@/lib/agents";
 import { toErrorResponse } from "@/lib/http";
 
 export async function GET(
@@ -44,3 +44,16 @@ export async function DELETE(
   }
 }
 
+export async function PATCH(
+  request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await context.params;
+    const body = await request.json();
+    const file = await moveAgentFile(id, body);
+    return NextResponse.json({ success: true, data: file });
+  } catch (error) {
+    return toErrorResponse(error);
+  }
+}

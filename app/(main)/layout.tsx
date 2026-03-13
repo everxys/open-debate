@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
-import { LogoutButton } from "@/components/auth/logout-button";
+import { UserMenu } from "@/components/auth/user-menu";
 import { getOptionalUser } from "@/lib/auth";
 
 export default async function MainLayout({ children }: { children: ReactNode }) {
@@ -26,7 +26,7 @@ export default async function MainLayout({ children }: { children: ReactNode }) 
             AI 配置
           </Link>
           {user ? (
-            <LogoutButton />
+            <UserMenu email={user.email} role={user.role} />
           ) : (
             <Link className="btn btn-primary" href="/login">
               登录

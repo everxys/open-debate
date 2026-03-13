@@ -1,6 +1,8 @@
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 
+import { isAdminEmail, normalizeRole, type UserRole } from "@/lib/roles";
+
 const COOKIE_NAME = "open_debate_session";
 
 function getSecret() {
@@ -11,7 +13,9 @@ function getSecret() {
   return new TextEncoder().encode(value);
 }
 
-export async function createSessionToken(payload: { userId: string; email: string }) {
+export type Session = { userId: string; email: string; role: UserRole };
+
+export async function createSessionToken(payload: Session) {
   return new SignJWT(payload)
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
@@ -32,9 +36,13 @@ export async function readSession() {
 export async function verifySessionToken(token: string) {
   try {
     const { payload } = await jwtVerify(token, getSecret());
+    const email = String(payload.email);
+    const base = normalizeRole(payload.role);
+    const role = base === "admin" || isAdminEmail(email) ? "admin" : "user";
     return {
       userId: String(payload.userId),
-      email: String(payload.email)
+      email,
+      role
     };
   } catch {
     return null;

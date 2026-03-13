@@ -1,10 +1,11 @@
 import { decryptSecret, encryptSecret, maskSecret } from "@/lib/crypto";
-import { query } from "@/lib/db";
+import { getPool, query } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { readSession } from "@/lib/session";
 import type { AgentRecord, Provider } from "@/lib/types";
 import {
   agentFileDeleteSchema,
+  agentFileMoveSchema,
   agentFileUpsertSchema,
   createAgentSchema,
   testAgentConfigSchema,
@@ -197,6 +198,11 @@ export async function getAgentById(id: string) {
   return normalizeAgentRow(result.rows[0]);
 }
 
+export async function getAgentViewById(id: string) {
+  const agent = await getAgentById(id);
+  return toAgentView(agent);
+}
+
 function isMissingTableError(error: unknown, table: string) {
   if (typeof error !== "object" || error === null) return false;
   const anyError = error as { code?: unknown; message?: unknown };
@@ -272,6 +278,114 @@ export async function deleteAgentFile(agentId: string, input: unknown) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing ai_agent_files table");
     }
     throw error;
+  }
+}
+
+export async function moveAgentFile(agentId: string, input: unknown) {
+  const data = agentFileMoveSchema.parse(input);
+  await getAgentById(agentId);
+  if (data.fromPath === data.toPath) {
+    throw new AppError("VALIDATION_ERROR", 400, "fromPath and toPath must be different");
+  }
+  const now = new Date().toISOString();
+
+  try {
+    const exists = await query<{ path: string }>(
+      "select path from ai_agent_files where ai_agent_id = $1 and path = $2",
+      [agentId, data.toPath]
+    );
+    if ((exists.rowCount ?? 0) > 0) {
+      throw new AppError("CONFLICT", 409, "Target path already exists");
+    }
+
+    const updated = await query<Record<string, unknown>>(
+      `
+        update ai_agent_files
+        set path = $3,
+            updated_at = $4
+        where ai_agent_id = $1 and path = $2
+        returning path, content, created_at, updated_at
+      `,
+      [agentId, data.fromPath, data.toPath, now]
+    );
+    if ((updated.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "File not found");
+    }
+    return {
+      path: String(updated.rows[0].path),
+      content: String(updated.rows[0].content ?? ""),
+      createdAt: String(updated.rows[0].created_at),
+      updatedAt: String(updated.rows[0].updated_at)
+    };
+  } catch (error) {
+    if (isMissingTableError(error, "ai_agent_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing ai_agent_files table");
+    }
+    throw error;
+  }
+}
+
+export async function duplicateAgent(id: string) {
+  const session = await requireSessionUser();
+  const source = await getAgentById(id);
+  const now = new Date().toISOString();
+
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+
+    const inserted = await client.query<Record<string, unknown>>(
+      `
+        insert into ai_agents (
+          user_id, name, provider, model, base_url, api_key_encrypted, api_key_masked,
+          system_prompt, is_active, created_at, updated_at
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+        returning *
+      `,
+      [
+        session.userId,
+        `${source.name} (copy)`,
+        source.provider,
+        source.model,
+        source.baseUrl,
+        source.apiKeyEncrypted,
+        source.apiKeyMasked,
+        source.systemPrompt,
+        source.isActive,
+        now
+      ]
+    );
+
+    const created = normalizeAgentRow(inserted.rows[0]);
+
+    try {
+      await client.query(
+        `
+          insert into ai_agent_files (ai_agent_id, path, content, created_at, updated_at)
+          select $2, path, content, $3, $3
+          from ai_agent_files
+          where ai_agent_id = $1
+        `,
+        [source.id, created.id, now]
+      );
+    } catch (error) {
+      if (!isMissingTableError(error, "ai_agent_files")) {
+        throw error;
+      }
+    }
+
+    await client.query("commit");
+    return toAgentView(created);
+  } catch (error) {
+    try {
+      await client.query("rollback");
+    } catch {
+      // ignore
+    }
+    throw error;
+  } finally {
+    client.release();
   }
 }
 

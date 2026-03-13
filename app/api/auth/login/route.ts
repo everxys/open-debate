@@ -6,6 +6,7 @@ import { verifyPassword } from "@/lib/password";
 import { createSessionToken, setSessionCookie } from "@/lib/session";
 import { getClientIp } from "@/lib/request";
 import { enforceIpRateLimit } from "@/lib/rate-limit";
+import { isAdminEmail } from "@/lib/roles";
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
@@ -28,12 +29,13 @@ export async function POST(request: Request) {
     const result = await query<{
       id: string;
       email: string;
+      role: string;
       password_hash: string;
       email_verified: boolean;
       failed_login_attempts: number;
       locked_until: string | null;
     }>(
-      "select id, email, password_hash, email_verified, failed_login_attempts, locked_until from users where email = $1",
+      "select id, email, role, password_hash, email_verified, failed_login_attempts, locked_until from users where email = $1",
       [email.toLowerCase()]
     );
 
@@ -96,7 +98,8 @@ export async function POST(request: Request) {
 
     const token = await createSessionToken({
       userId: user.id,
-      email: user.email
+      email: user.email,
+      role: user.role === "admin" || isAdminEmail(user.email) ? "admin" : "user"
     });
     await setSessionCookie(token);
 
@@ -104,7 +107,8 @@ export async function POST(request: Request) {
       success: true,
       data: {
         id: user.id,
-        email: user.email
+        email: user.email,
+        role: user.role === "admin" || isAdminEmail(user.email) ? "admin" : "user"
       }
     });
   } catch (error) {

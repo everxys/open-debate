@@ -3,16 +3,11 @@ import { NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { AppError, toErrorResponse } from "@/lib/http";
 import { hashPassword } from "@/lib/password";
+import { isStrongEnoughPassword } from "@/lib/password-policy";
 import { enforceIpRateLimit } from "@/lib/rate-limit";
 import { consumeSignupVerificationCode, isSixDigitCode } from "@/lib/verification";
 import { createSessionToken, setSessionCookie } from "@/lib/session";
-
-function isStrongEnoughPassword(value: string) {
-  if (value.length < 10 || value.length > 200) return false;
-  const hasLetter = /[A-Za-z]/.test(value);
-  const hasNumber = /\d/.test(value);
-  return hasLetter && hasNumber;
-}
+import { isAdminEmail } from "@/lib/roles";
 
 export async function POST(request: Request) {
   try {
@@ -51,14 +46,17 @@ export async function POST(request: Request) {
       throw new AppError("CODE_INVALID", 400, "Invalid or expired verification code");
     }
 
-    const inserted = await query<{ id: string; email: string }>(
-      "insert into users (email, password_hash, email_verified) values ($1, $2, true) returning id, email",
-      [normalizedEmail, hashPassword(password)]
+    const role = isAdminEmail(normalizedEmail) ? "admin" : "user";
+
+    const inserted = await query<{ id: string; email: string; role: string }>(
+      "insert into users (email, password_hash, role, email_verified) values ($1, $2, $3, true) returning id, email, role",
+      [normalizedEmail, hashPassword(password), role]
     );
 
     const token = await createSessionToken({
       userId: inserted.rows[0].id,
-      email: inserted.rows[0].email
+      email: inserted.rows[0].email,
+      role: inserted.rows[0].role === "admin" ? "admin" : "user"
     });
     await setSessionCookie(token);
 

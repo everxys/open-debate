@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { deleteAgent, getAgentById, updateAgent } from "@/lib/agents";
+import { deleteAgent, getAgentViewById, updateAgent } from "@/lib/agents";
 import { toErrorResponse } from "@/lib/http";
 
 export async function GET(
@@ -9,7 +9,7 @@ export async function GET(
 ) {
   try {
     const { id } = await context.params;
-    const agent = await getAgentById(id);
+    const agent = await getAgentViewById(id);
     return NextResponse.json({ success: true, data: agent });
   } catch (error) {
     return toErrorResponse(error);

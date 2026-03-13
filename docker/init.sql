@@ -4,6 +4,7 @@ create table if not exists users (
   id uuid primary key default gen_random_uuid(),
   email text not null unique,
   password_hash text not null,
+  role text not null default 'user',
   email_verified boolean not null default false,
   failed_login_attempts integer not null default 0,
   locked_until timestamptz null,
@@ -14,12 +15,24 @@ create table if not exists users (
 );
 
 -- Backfill / upgrade existing databases created before these columns existed.
+alter table users add column if not exists role text not null default 'user';
 alter table users add column if not exists email_verified boolean not null default false;
 alter table users add column if not exists failed_login_attempts integer not null default 0;
 alter table users add column if not exists locked_until timestamptz null;
 alter table users add column if not exists last_failed_login_at timestamptz null;
 alter table users add column if not exists last_login_at timestamptz null;
 alter table users add column if not exists last_login_ip text null;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'users_role_check'
+  ) then
+    alter table users add constraint users_role_check check (role in ('user', 'admin'));
+  end if;
+exception when duplicate_object then
+  null;
+end $$;
 
 create table if not exists email_verification_codes (
   id uuid primary key default gen_random_uuid(),

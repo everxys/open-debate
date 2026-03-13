@@ -57,6 +57,7 @@ button {
 .nav {
   display: flex;
   gap: 12px;
+  align-items: center;
 }
 
 .panel {
@@ -127,6 +128,315 @@ button {
   background: #fff5f5;
   color: var(--red);
   border-color: #f2c5c1;
+}
+
+.btn-muted {
+  background: #f4f6fa;
+  color: #3f4c5f;
+  border-color: #d7dfeb;
+}
+
+.userMenu {
+  position: relative;
+}
+
+.userMenuTrigger {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 999px;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+.userAvatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(180deg, #2b6cff, #1a47d6);
+  box-shadow: 0 10px 26px rgba(38, 99, 235, 0.22);
+}
+
+.userMenuPanel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 10px);
+  min-width: 220px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 18px 46px rgba(20, 38, 63, 0.16);
+  overflow: hidden;
+  z-index: 30;
+}
+
+.userMenuHeader {
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.userMenuEmail {
+  font-weight: 700;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.userMenuItems {
+  display: grid;
+}
+
+.userMenuItem {
+  padding: 10px 12px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.userMenuItem:hover {
+  background: #f3f6fb;
+}
+
+.userMenuDanger {
+  color: var(--red);
+}
+
+.softBox {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px;
+  background: #fbfdff;
+}
+
+.agentCard {
+  position: relative;
+}
+
+.agentCardEditing {
+  border-color: rgba(38, 99, 235, 0.55);
+  background: #f7faff;
+  box-shadow: 0 16px 40px rgba(20, 38, 63, 0.12);
+}
+
+.agentCardEditing::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: -1px;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(38, 99, 235, 0.0), rgba(38, 99, 235, 0.9), rgba(38, 99, 235, 0.0));
+}
+
+.agentEditor {
+  position: relative;
+}
+
+.agentEditorEditing {
+  border-color: rgba(38, 99, 235, 0.55);
+  background: #f7faff;
+  box-shadow: 0 16px 40px rgba(20, 38, 63, 0.12);
+}
+
+.agentEditorEditing::before {
+  content: "";
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  top: -1px;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(38, 99, 235, 0.0), rgba(38, 99, 235, 0.85), rgba(38, 99, 235, 0.0));
+}
+
+.filesTreeBox {
+  flex: 1;
+  min-height: 640px;
+}
+
+.treeHeader {
+  user-select: none;
+}
+
+.treeRoot {
+  user-select: none;
+  padding: 6px 0;
+  overflow: auto;
+  flex: 1;
+}
+
+.treeItem {
+  width: 100%;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 10px;
+  text-align: left;
+  font-weight: 600;
+}
+
+.treeItem:hover {
+  background: #f3f6fb;
+}
+
+.treeRow {
+  width: 100%;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.treeRow:hover {
+  background: #f3f6fb;
+}
+
+.treeItemActive {
+  border-color: rgba(38, 99, 235, 0.45);
+  background: rgba(38, 99, 235, 0.06);
+}
+
+.treeDropActive {
+  border-color: rgba(38, 99, 235, 0.35);
+  background: rgba(38, 99, 235, 0.05);
+}
+
+.treeDir {
+  color: var(--muted);
+}
+
+.treeIcon {
+  width: 14px;
+  flex: 0 0 14px;
+  color: #8a9bb2;
+}
+
+.treeIconFile {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: #b8c4d6;
+  margin-left: 3px;
+}
+
+.treeLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.treeDirLabel {
+  color: var(--muted);
+}
+
+.contextOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+
+.contextMenu {
+  position: fixed;
+  min-width: 200px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 18px 46px rgba(20, 38, 63, 0.16);
+  overflow: hidden;
+}
+
+.contextMenuItem {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 10px 12px;
+  font-weight: 700;
+}
+
+.contextMenuItem:hover {
+  background: #f3f6fb;
+}
+
+.contextMenuItem:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.contextMenuDanger {
+  color: var(--red);
+}
+
+.tabsBar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #fff;
+  max-width: 320px;
+}
+
+.tabActive {
+  border-color: rgba(38, 99, 235, 0.45);
+  background: rgba(38, 99, 235, 0.06);
+}
+
+.tabName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+  font-weight: 700;
+}
+
+.tabDirtyDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--yellow);
+  box-shadow: 0 0 0 2px rgba(173, 122, 0, 0.15);
+}
+
+.tabClose {
+  color: var(--muted);
+  font-weight: 800;
+  padding: 0 4px;
+  border-radius: 8px;
+}
+
+.tabClose:hover {
+  background: #f3f6fb;
+  color: var(--text);
+}
+
+.editorBox {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
 }
 
 .badge {
