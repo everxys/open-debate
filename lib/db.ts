@@ -72,6 +72,9 @@ export function getPool() {
 async function ensureSchema(pool: Pool) {
   // Keep this minimal: make new columns backward-compatible with existing volumes.
   await pool.query("alter table users add column if not exists role text not null default 'user'");
+  await pool.query(
+    "alter table debates add column if not exists enable_shared_facts boolean not null default true"
+  );
   await pool.query(`
     do $$
     begin

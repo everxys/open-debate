@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { UserMenu } from "@/components/auth/user-menu";
+import { MainNav } from "@/components/nav/main-nav";
 import { getOptionalUser } from "@/lib/auth";
 
 export default async function MainLayout({ children }: { children: ReactNode }) {
@@ -19,12 +20,13 @@ export default async function MainLayout({ children }: { children: ReactNode }) 
           </div>
         </div>
         <div className="nav">
-          <Link className="btn" href="/debates">
-            辩论
-          </Link>
-          <Link className="btn" href="/agents">
-            AI 配置
-          </Link>
+          <MainNav
+            items={[
+              { href: "/debates", label: "辩论" },
+              { href: "/strategies", label: "策略" },
+              { href: "/agents", label: "AI 配置" }
+            ]}
+          />
           {user ? (
             <UserMenu email={user.email} role={user.role} />
           ) : (

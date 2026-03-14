@@ -1,3 +1,5 @@
+import { randomUUID } from "crypto";
+
 import { query } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { runDebate } from "@/lib/runtime";
@@ -15,6 +17,7 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
     currentTurn: Number(row.current_turn),
     tokenBudget: row.token_budget === null ? null : Number(row.token_budget),
     tokenUsed: Number(row.token_used),
+    enableSharedFacts: row.enable_shared_facts === undefined ? true : Boolean(row.enable_shared_facts),
     consensusReached: Boolean(row.consensus_reached),
     consensusSummary: (row.consensus_summary as DebateRecord["consensusSummary"]) ?? null,
     lastErrorCode: (row.last_error_code as string | null) ?? null,
@@ -48,6 +51,14 @@ async function requireSessionUser() {
   return session;
 }
 
+function isMissingTableError(error: unknown, table: string) {
+  if (typeof error !== "object" || error === null) return false;
+  const anyError = error as { code?: unknown; message?: unknown };
+  if (anyError.code !== "42P01") return false;
+  const message = typeof anyError.message === "string" ? anyError.message : "";
+  return message.toLowerCase().includes(table.toLowerCase());
+}
+
 async function getDebate(id: string) {
   const session = await requireSessionUser();
   const result = await query<Record<string, unknown>>(
@@ -72,33 +83,157 @@ export async function listDebates() {
 export async function createDebate(input: unknown) {
   const data = createDebateSchema.parse(input);
   const session = await requireSessionUser();
+
+  if ("agentIds" in data) {
+    const agents = await query<{ id: string }>(
+      "select id from ai_agents where user_id = $1 and id = any($2::uuid[])",
+      [session.userId, data.agentIds]
+    );
+
+    if ((agents.rowCount ?? 0) !== data.agentIds.length) {
+      throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid");
+    }
+
+    const now = new Date().toISOString();
+    const insertedDebate = await query<Record<string, unknown>>(
+      `insert into debates (
+        user_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
+        consensus_reached, consensus_summary, last_error_code, last_error_message,
+        started_at, finished_at, stopped_reason, created_at, updated_at
+      ) values ($1,$2,'pending',$3,0,$4,0,$5,false,null,null,null,null,null,null,$6,$6)
+      returning *`,
+      [session.userId, data.question, data.maxTurns, data.tokenBudget ?? null, data.enableSharedFacts, now]
+    );
+
+    const debate = normalizeDebateRow(insertedDebate.rows[0]);
+    for (let index = 0; index < data.agentIds.length; index += 1) {
+      await query(
+        `insert into debate_agents (debate_id, ai_agent_id, turn_order, turn_count, created_at)
+         values ($1,$2,$3,0,$4)`,
+        [debate.id, data.agentIds[index], index + 1, now]
+      );
+    }
+
+    return toListItem(debate);
+  }
+
+  const bindings = data.strategy.bindings;
+  const roleIds = bindings.map((binding) => binding.roleId);
+  const agentIds = bindings.map((binding) => binding.agentId);
+
+  if (new Set(roleIds).size !== roleIds.length) {
+    throw new AppError("VALIDATION_ERROR", 400, "Duplicate role bindings");
+  }
+  if (new Set(agentIds).size !== agentIds.length) {
+    throw new AppError("VALIDATION_ERROR", 400, "Duplicate agent bindings");
+  }
+
+  let strategyVisible: { id: string } | null = null;
+  try {
+    const strategyResult = await query<{ id: string }>(
+      "select id from strategies where id = $1 and (owner_user_id = $2 or is_shared = true)",
+      [data.strategy.strategyId, session.userId]
+    );
+    strategyVisible = strategyResult.rows[0] ?? null;
+  } catch (error) {
+    if (isMissingTableError(error, "strategies")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+
+  if (!strategyVisible) {
+    throw new AppError("NOT_FOUND", 404, "Strategy not found");
+  }
+
   const agents = await query<{ id: string }>(
     "select id from ai_agents where user_id = $1 and id = any($2::uuid[])",
-    [session.userId, data.agentIds]
+    [session.userId, agentIds]
   );
-
-  if ((agents.rowCount ?? 0) !== data.agentIds.length) {
+  if ((agents.rowCount ?? 0) !== agentIds.length) {
     throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid");
+  }
+
+  let rolesById = new Map<string, { id: string; systemPrompt: string | null }>();
+  try {
+    const roleResult = await query<Record<string, unknown>>(
+      "select id, system_prompt from strategy_roles where strategy_id = $1 and id = any($2::uuid[])",
+      [data.strategy.strategyId, roleIds]
+    );
+    rolesById = new Map(
+      roleResult.rows.map((row) => [
+        String(row.id),
+        { id: String(row.id), systemPrompt: (row.system_prompt as string | null) ?? null }
+      ])
+    );
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_roles")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+
+  if (rolesById.size !== roleIds.length) {
+    throw new AppError("VALIDATION_ERROR", 400, "Selected strategy roles are invalid");
   }
 
   const now = new Date().toISOString();
   const insertedDebate = await query<Record<string, unknown>>(
     `insert into debates (
-      user_id, question, status, max_turns, current_turn, token_budget, token_used,
+      user_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
       consensus_reached, consensus_summary, last_error_code, last_error_message,
       started_at, finished_at, stopped_reason, created_at, updated_at
-    ) values ($1,$2,'pending',$3,0,$4,0,false,null,null,null,null,null,null,$5,$5)
+    ) values ($1,$2,'pending',$3,0,$4,0,$5,false,null,null,null,null,null,null,$6,$6)
     returning *`,
-    [session.userId, data.question, data.maxTurns, data.tokenBudget ?? null, now]
+    [session.userId, data.question, data.maxTurns, data.tokenBudget ?? null, data.enableSharedFacts, now]
   );
 
   const debate = normalizeDebateRow(insertedDebate.rows[0]);
-  for (let index = 0; index < data.agentIds.length; index += 1) {
-    await query(
-      `insert into debate_agents (debate_id, ai_agent_id, turn_order, turn_count, created_at)
-       values ($1,$2,$3,0,$4)`,
-      [debate.id, data.agentIds[index], index + 1, now]
-    );
+
+  try {
+    for (let index = 0; index < bindings.length; index += 1) {
+      const binding = bindings[index];
+      const insertParticipant = await query<{ id: string }>(
+        `insert into debate_agents (debate_id, ai_agent_id, turn_order, turn_count, created_at)
+         values ($1,$2,$3,0,$4)
+         returning id`,
+        [debate.id, binding.agentId, index + 1, now]
+      );
+
+      const debateAgentId = insertParticipant.rows[0]?.id;
+      if (!debateAgentId) {
+        throw new AppError("INTERNAL_ERROR", 500, "Failed to create debate agent");
+      }
+
+      const role = rolesById.get(binding.roleId);
+      await query(
+        `insert into debate_agent_overrides (debate_agent_id, system_prompt, created_at, updated_at)
+         values ($1,$2,$3,$3)`,
+        [debateAgentId, role?.systemPrompt ?? null, now]
+      );
+
+      const roleFiles = await query<{ path: string; content: string }>(
+        "select path, content from strategy_role_files where strategy_role_id = $1 order by path asc",
+        [binding.roleId]
+      );
+
+      for (const file of roleFiles.rows) {
+        await query(
+          `insert into debate_agent_files (id, debate_agent_id, path, content, created_at, updated_at)
+           values ($1,$2,$3,$4,$5,$5)`,
+          [randomUUID(), debateAgentId, file.path, file.content ?? "", now]
+        );
+      }
+    }
+  } catch (error) {
+    if (
+      isMissingTableError(error, "strategy_role_files") ||
+      isMissingTableError(error, "debate_agent_overrides") ||
+      isMissingTableError(error, "debate_agent_files")
+    ) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
   }
 
   return toListItem(debate);

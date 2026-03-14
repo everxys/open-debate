@@ -44,6 +44,7 @@ export type DebateRecord = {
   currentTurn: number;
   tokenBudget: number | null;
   tokenUsed: number;
+  enableSharedFacts: boolean;
   consensusReached: boolean;
   consensusSummary: {
     leadingSolution: string;

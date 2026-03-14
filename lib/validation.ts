@@ -19,7 +19,7 @@ export const testAgentConfigSchema = createAgentSchema.pick({
 
 export const updateAgentSchema = createAgentSchema.partial();
 
-const filePathSchema = z
+export const relativeFilePathSchema = z
   .string()
   .min(1)
   .max(200)
@@ -29,22 +29,63 @@ const filePathSchema = z
   .refine((value) => !value.endsWith("/"), "Path must be a file, not a directory");
 
 export const agentFileUpsertSchema = z.object({
-  path: filePathSchema,
+  path: relativeFilePathSchema,
   content: z.string().max(100_000)
 });
 
 export const agentFileDeleteSchema = z.object({
-  path: filePathSchema
+  path: relativeFilePathSchema
 });
 
 export const agentFileMoveSchema = z.object({
-  fromPath: filePathSchema,
-  toPath: filePathSchema
+  fromPath: relativeFilePathSchema,
+  toPath: relativeFilePathSchema
 });
 
-export const createDebateSchema = z.object({
+const debateCommonSchema = z.object({
   question: z.string().min(10).max(5000),
-  agentIds: z.array(z.string()).min(2).max(5),
   maxTurns: z.number().int().min(1).max(50),
-  tokenBudget: z.number().int().positive().max(1000000).nullable().optional()
+  tokenBudget: z.number().int().positive().max(1000000).nullable().optional(),
+  enableSharedFacts: z.boolean().optional().default(true)
 });
+
+export const createDebateSchema = z.union([
+  debateCommonSchema.extend({
+    agentIds: z.array(z.string()).min(2).max(5)
+  }),
+  debateCommonSchema.extend({
+    strategy: z.object({
+      strategyId: z.string().min(1),
+      bindings: z
+        .array(
+          z.object({
+            roleId: z.string().min(1),
+            agentId: z.string().min(1)
+          })
+        )
+        .min(2)
+        .max(5)
+    })
+  })
+]);
+
+const strategyRoleFileSchema = z.object({
+  path: relativeFilePathSchema,
+  content: z.string().max(100_000)
+});
+
+export const strategyRoleSchema = z.object({
+  id: z.string().min(1).optional(),
+  name: z.string().min(1).max(80),
+  systemPrompt: z.string().max(4000).nullable().optional(),
+  files: z.array(strategyRoleFileSchema).max(50).optional().default([])
+});
+
+export const createStrategySchema = z.object({
+  name: z.string().min(1).max(80),
+  description: z.string().max(2000).nullable().optional(),
+  isShared: z.boolean().optional().default(false),
+  roles: z.array(strategyRoleSchema).min(2).max(5)
+});
+
+export const updateStrategySchema = createStrategySchema;

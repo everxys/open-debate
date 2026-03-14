@@ -77,6 +77,7 @@ create table if not exists debates (
   current_turn integer not null default 0,
   token_budget integer null,
   token_used integer not null default 0,
+  enable_shared_facts boolean not null default true,
   consensus_reached boolean not null default false,
   consensus_summary jsonb null,
   last_error_code text null,
@@ -142,3 +143,78 @@ create table if not exists ai_agent_files (
 
 create index if not exists idx_ai_agent_files_agent_id_updated_at
   on ai_agent_files (ai_agent_id, updated_at desc);
+
+create table if not exists strategies (
+  id uuid primary key default gen_random_uuid(),
+  owner_user_id uuid not null references users(id) on delete cascade,
+  name text not null,
+  description text null,
+  is_shared boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_strategies_owner_user_id_updated_at
+  on strategies (owner_user_id, updated_at desc);
+create index if not exists idx_strategies_is_shared_updated_at
+  on strategies (is_shared, updated_at desc);
+
+create table if not exists strategy_roles (
+  id uuid primary key default gen_random_uuid(),
+  strategy_id uuid not null references strategies(id) on delete cascade,
+  name text not null,
+  system_prompt text null,
+  role_order integer not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (strategy_id, role_order)
+);
+
+create index if not exists idx_strategy_roles_strategy_id_role_order
+  on strategy_roles (strategy_id, role_order);
+
+create table if not exists strategy_role_files (
+  id uuid primary key default gen_random_uuid(),
+  strategy_role_id uuid not null references strategy_roles(id) on delete cascade,
+  path text not null,
+  content text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (strategy_role_id, path)
+);
+
+create index if not exists idx_strategy_role_files_role_id_updated_at
+  on strategy_role_files (strategy_role_id, updated_at desc);
+
+create table if not exists debate_agent_overrides (
+  debate_agent_id uuid primary key references debate_agents(id) on delete cascade,
+  system_prompt text null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists debate_agent_files (
+  id uuid primary key default gen_random_uuid(),
+  debate_agent_id uuid not null references debate_agents(id) on delete cascade,
+  path text not null,
+  content text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (debate_agent_id, path)
+);
+
+create index if not exists idx_debate_agent_files_agent_id_updated_at
+  on debate_agent_files (debate_agent_id, updated_at desc);
+
+create table if not exists debate_files (
+  id uuid primary key default gen_random_uuid(),
+  debate_id uuid not null references debates(id) on delete cascade,
+  path text not null,
+  content text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (debate_id, path)
+);
+
+create index if not exists idx_debate_files_debate_id_updated_at
+  on debate_files (debate_id, updated_at desc);
