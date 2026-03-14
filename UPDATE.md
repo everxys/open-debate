@@ -2,6 +2,7 @@
 
 - 辩论支持长时记忆（按参与者独立）：自动维护 `memory/log.jsonl`（追加）与 `memory/summary.md`（压缩摘要）
 - 辩论增加全场共享“事实板”：可在创建辩论时选择开启；开启后自动维护 `facts/board.md` 并注入后续上下文
+- 构建提速：`next build` 跳过 ESLint 与 TypeScript 校验（可改为在 CI/本地单独跑）
 
 ## 2026-03-13
 
