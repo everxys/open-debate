@@ -387,15 +387,6 @@ export async function appendAgentToDebate(id: string, agentId: string) {
     throw new AppError("CONFLICT", 409, "Only running/paused debates can add new agents");
   }
 
-  const currentAgents = await query<{ count: number }>(
-    "select count(1)::int as count from debate_agents where debate_id = $1",
-    [debate.id]
-  );
-  const count = currentAgents.rows[0]?.count ?? 0;
-  if (count >= 5) {
-    throw new AppError("CONFLICT", 409, "Debate already has 5 agents");
-  }
-
   const agent = await query<{ id: string }>(
     "select id from ai_agents where user_id = $1 and id = $2",
     [session.userId, agentId]

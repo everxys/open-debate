@@ -13,6 +13,8 @@
 | 认证 | 应用自有邮箱密码 + HttpOnly session cookie |
 | 部署 | 本地部署（Docker Compose） |
 
+补充：当前功能现状以 `FEATURES_CURRENT.md` 为准（含策略、辩论级覆盖、长时记忆与共享事实板等）。
+
 ## 系统架构（MVP）
 
 ```

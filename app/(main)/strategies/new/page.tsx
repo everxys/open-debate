@@ -53,7 +53,7 @@ export default function NewStrategyPage() {
 
   const canSave = useMemo(() => {
     if (draft.name.trim().length === 0) return false;
-    if (draft.roles.length < 2 || draft.roles.length > 5) return false;
+    if (draft.roles.length < 2) return false;
     if (draft.roles.some((role) => role.name.trim().length === 0)) return false;
     return true;
   }, [draft]);
@@ -67,7 +67,6 @@ export default function NewStrategyPage() {
 
   function addRole() {
     setDraft((current) => {
-      if (current.roles.length >= 5) return current;
       setActiveRoleIndex(current.roles.length);
       return {
         ...current,
@@ -207,10 +206,9 @@ export default function NewStrategyPage() {
       <div className="grid grid-3" style={{ gap: 16, alignItems: "start" }}>
         <section className="panel stack">
           <div className="row" style={{ justifyContent: "space-between" }}>
-            <strong>角色（{draft.roles.length}/5）</strong>
+            <strong>角色（{draft.roles.length}）</strong>
             <button
               className="btn btn-primary"
-              disabled={draft.roles.length >= 5}
               onClick={addRole}
             >
               新增角色

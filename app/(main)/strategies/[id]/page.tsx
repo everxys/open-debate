@@ -90,7 +90,7 @@ export default function StrategyDetailPage() {
   const canSave = useMemo(() => {
     if (!detail?.canEdit) return false;
     if (name.trim().length === 0) return false;
-    if (roles.length < 2 || roles.length > 5) return false;
+    if (roles.length < 2) return false;
     if (roles.some((role) => role.name.trim().length === 0)) return false;
     return true;
   }, [name, roles, detail?.canEdit]);
@@ -102,7 +102,6 @@ export default function StrategyDetailPage() {
   function addRole() {
     if (!detail?.canEdit) return;
     setRoles((current) => {
-      if (current.length >= 5) return current;
       const next = [...current, { id: "", name: `角色 ${current.length + 1}`, systemPrompt: "" }];
       setActiveRoleIndex(next.length - 1);
       return next;
@@ -254,8 +253,8 @@ export default function StrategyDetailPage() {
       <div className="grid grid-3" style={{ gap: 16, alignItems: "start" }}>
         <section className="panel stack">
           <div className="row" style={{ justifyContent: "space-between" }}>
-            <strong>角色（{roles.length}/5）</strong>
-            <button className="btn btn-primary" disabled={!detail.canEdit || roles.length >= 5} onClick={addRole}>
+            <strong>角色（{roles.length}）</strong>
+            <button className="btn btn-primary" disabled={!detail.canEdit} onClick={addRole}>
               新增角色
             </button>
           </div>

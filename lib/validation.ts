@@ -51,7 +51,7 @@ const debateCommonSchema = z.object({
 
 export const createDebateSchema = z.union([
   debateCommonSchema.extend({
-    agentIds: z.array(z.string()).min(2).max(5)
+    agentIds: z.array(z.string()).min(2)
   }),
   debateCommonSchema.extend({
     strategy: z.object({
@@ -64,7 +64,6 @@ export const createDebateSchema = z.union([
           })
         )
         .min(2)
-        .max(5)
     })
   })
 ]);
@@ -85,7 +84,7 @@ export const createStrategySchema = z.object({
   name: z.string().min(1).max(80),
   description: z.string().max(2000).nullable().optional(),
   isShared: z.boolean().optional().default(false),
-  roles: z.array(strategyRoleSchema).min(2).max(5)
+  roles: z.array(strategyRoleSchema).min(2)
 });
 
 export const updateStrategySchema = createStrategySchema;

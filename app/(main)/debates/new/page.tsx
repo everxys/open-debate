@@ -135,10 +135,9 @@ export default function NewDebatePage() {
     form.maxTurns >= 1 &&
     (strategyId
       ? enabledRoleIds.length >= 2 &&
-        enabledRoleIds.length <= 5 &&
         enabledBindings.length === enabledRoleIds.length &&
         !hasDuplicateStrategyAgentIds
-      : selectedAgentIds.length >= 2 && selectedAgentIds.length <= 5) &&
+      : selectedAgentIds.length >= 2) &&
     !isSubmitting;
 
   async function createDebate() {
@@ -197,8 +196,8 @@ export default function NewDebatePage() {
             <h2 style={{ margin: 0 }}>新增辩论</h2>
             <div className="muted">
               {strategyId
-                ? "已选择策略：映射角色到你的 AI 配置（2-5 个）。"
-                : "选择 2-5 个 AI，创建后可在详情页开始运行。"}
+                ? "已选择策略：映射角色到你的 AI 配置（至少 2 个）。"
+                : "选择至少 2 个 AI，创建后可在详情页开始运行。"}
             </div>
           </div>
           <Link className="btn" href="/debates">
@@ -280,7 +279,7 @@ export default function NewDebatePage() {
           <div className="stack">
             <div className="row" style={{ justifyContent: "space-between" }}>
               <label style={{ fontWeight: 600 }}>
-                策略角色映射（{enabledRoleIds.length}/5）
+                策略角色映射（已选 {enabledRoleIds.length}）
               </label>
               <span className="muted">至少选择 2 个角色；同一个 AI 配置不能重复绑定</span>
             </div>
@@ -350,7 +349,7 @@ export default function NewDebatePage() {
         ) : (
           <div className="stack">
             <div className="row" style={{ justifyContent: "space-between" }}>
-              <label style={{ fontWeight: 600 }}>参与 AI（{selectedAgentIds.length}/5）</label>
+              <label style={{ fontWeight: 600 }}>参与 AI（已选 {selectedAgentIds.length}）</label>
               <span className="muted">至少选择 2 个</span>
             </div>
             {agents.map((agent) => (
@@ -359,9 +358,6 @@ export default function NewDebatePage() {
                   checked={selectedAgentIds.includes(agent.id)}
                   type="checkbox"
                   onChange={() => toggleAgent(agent.id)}
-                  disabled={
-                    !selectedAgentIds.includes(agent.id) && selectedAgentIds.length >= 5
-                  }
                 />
                 <span>
                   <strong>{agent.name}</strong> · {agent.provider} · {agent.model}

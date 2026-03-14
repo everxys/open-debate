@@ -146,7 +146,6 @@ export default function DebateDetailPage() {
   const availableAgents = agents.filter((agent) => !joinedAgentIds.has(agent.id));
   const canAddAgent =
     ["running", "paused"].includes(debate.status) &&
-    debate.agents.length < 5 &&
     availableAgents.length > 0;
 
   return (
@@ -205,7 +204,7 @@ export default function DebateDetailPage() {
             <div className="panel">
               <div className="row" style={{ justifyContent: "space-between" }}>
                 <strong>加入新的 AI（会排在最后）</strong>
-                <span className="muted">当前 {debate.agents.length}/5</span>
+                <span className="muted">当前 {debate.agents.length}</span>
               </div>
               <div className="row">
                 <select
@@ -224,7 +223,7 @@ export default function DebateDetailPage() {
                   加入
                 </button>
               </div>
-              <div className="muted">仅支持进行中/暂停中的辩论加入，且最多 5 个参与者。</div>
+              <div className="muted">仅支持进行中/暂停中的辩论加入。</div>
             </div>
           ) : null}
           {debate.agents.map((agent) => (
