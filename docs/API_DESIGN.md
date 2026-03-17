@@ -75,8 +75,7 @@
 公共字段：
 
 - `question: string`
-- `maxTurns: number`
-- `tokenBudget?: number | null`
+- `maxTurns: number`（`0` 表示无限轮次，直到达成共识或用户停止）
 - `enableSharedFacts?: boolean`（默认 `true`）
 
 模式 1：直接选 AI（至少 2 个）

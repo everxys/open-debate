@@ -62,7 +62,6 @@ create table if not exists ai_agents (
   base_url text not null,
   api_key_encrypted text not null,
   api_key_masked text not null,
-  system_prompt text null,
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -78,6 +77,7 @@ create table if not exists debates (
   token_budget integer null,
   token_used integer not null default 0,
   enable_shared_facts boolean not null default true,
+  is_shared boolean not null default false,
   consensus_reached boolean not null default false,
   consensus_summary jsonb null,
   last_error_code text null,
@@ -117,6 +117,7 @@ create table if not exists debate_turns (
 
 create index if not exists idx_ai_agents_user_id on ai_agents(user_id);
 create index if not exists idx_debates_user_id on debates(user_id);
+create index if not exists idx_debates_is_shared_updated_at on debates(is_shared, updated_at desc);
 create index if not exists idx_debate_agents_debate_id on debate_agents(debate_id);
 create index if not exists idx_debate_turns_debate_id on debate_turns(debate_id);
 
@@ -154,10 +155,25 @@ create table if not exists strategies (
   updated_at timestamptz not null default now()
 );
 
+alter table strategies
+  add column if not exists forked_from_strategy_id uuid null references strategies(id) on delete set null;
+
 create index if not exists idx_strategies_owner_user_id_updated_at
   on strategies (owner_user_id, updated_at desc);
 create index if not exists idx_strategies_is_shared_updated_at
   on strategies (is_shared, updated_at desc);
+create index if not exists idx_strategies_forked_from_strategy_id
+  on strategies (forked_from_strategy_id);
+
+create table if not exists strategy_favorites (
+  user_id uuid not null references users(id) on delete cascade,
+  strategy_id uuid not null references strategies(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (user_id, strategy_id)
+);
+
+create index if not exists idx_strategy_favorites_strategy_id_created_at
+  on strategy_favorites (strategy_id, created_at desc);
 
 create table if not exists strategy_roles (
   id uuid primary key default gen_random_uuid(),

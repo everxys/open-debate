@@ -5,7 +5,8 @@ import { AppError } from "@/lib/http";
 import { runDebate } from "@/lib/runtime";
 import { readSession } from "@/lib/session";
 import type { DebateRecord } from "@/lib/types";
-import { createDebateSchema } from "@/lib/validation";
+import { createDebateSchema, updateDebateQuestionSchema, updateDebateSharingSchema } from "@/lib/validation";
+import { normalizeDebateWorkflow } from "@/lib/workflow";
 
 function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
   return {
@@ -15,9 +16,9 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
     status: row.status as DebateRecord["status"],
     maxTurns: Number(row.max_turns),
     currentTurn: Number(row.current_turn),
-    tokenBudget: row.token_budget === null ? null : Number(row.token_budget),
     tokenUsed: Number(row.token_used),
     enableSharedFacts: row.enable_shared_facts === undefined ? true : Boolean(row.enable_shared_facts),
+    isShared: row.is_shared === undefined ? false : Boolean(row.is_shared),
     consensusReached: Boolean(row.consensus_reached),
     consensusSummary: (row.consensus_summary as DebateRecord["consensusSummary"]) ?? null,
     lastErrorCode: (row.last_error_code as string | null) ?? null,
@@ -38,6 +39,7 @@ function toListItem(debate: DebateRecord) {
     currentTurn: debate.currentTurn,
     maxTurns: debate.maxTurns,
     tokenUsed: debate.tokenUsed,
+    isShared: debate.isShared,
     consensusReached: debate.consensusReached,
     createdAt: debate.createdAt
   };
@@ -59,6 +61,14 @@ function isMissingTableError(error: unknown, table: string) {
   return message.toLowerCase().includes(table.toLowerCase());
 }
 
+function isMissingColumnError(error: unknown, column: string) {
+  if (typeof error !== "object" || error === null) return false;
+  const anyError = error as { code?: unknown; message?: unknown };
+  if (anyError.code !== "42703") return false;
+  const message = typeof anyError.message === "string" ? anyError.message : "";
+  return message.toLowerCase().includes(column.toLowerCase());
+}
+
 async function getDebate(id: string) {
   const session = await requireSessionUser();
   const result = await query<Record<string, unknown>>(
@@ -71,13 +81,73 @@ async function getDebate(id: string) {
   return { session, debate: normalizeDebateRow(result.rows[0]) };
 }
 
-export async function listDebates() {
+async function getDebateForView(id: string, userId: string) {
+  try {
+    const result = await query<Record<string, unknown>>(
+      `
+        select d.*,
+               (d.user_id = $2) as is_owner
+          from debates d
+         where d.id = $1
+           and (d.user_id = $2 or d.is_shared = true)
+      `,
+      [id, userId]
+    );
+    if ((result.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "Debate not found");
+    }
+    return {
+      debate: normalizeDebateRow(result.rows[0]),
+      isOwner: Boolean((result.rows[0] as { is_owner?: unknown }).is_owner)
+    };
+  } catch (error) {
+    if (isMissingColumnError(error, "is_shared")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing debates.is_shared column");
+    }
+    throw error;
+  }
+}
+
+export async function listDebates(scope: "mine" | "shared" = "mine") {
   const session = await requireSessionUser();
+  if (scope === "shared") {
+    try {
+      const result = await query<Record<string, unknown>>(
+        `
+          select d.*,
+                 (select count(*)::int from debate_agents da where da.debate_id = d.id) as agent_count
+            from debates d
+           where d.is_shared = true
+           order by d.updated_at desc
+           limit 200
+        `
+      );
+      return result.rows.map((row: Record<string, unknown>) => ({
+        ...toListItem(normalizeDebateRow(row)),
+        agentCount: Number(row.agent_count ?? 0)
+      }));
+    } catch (error) {
+      if (isMissingColumnError(error, "is_shared")) {
+        throw new AppError("MIGRATION_REQUIRED", 500, "Missing debates.is_shared column");
+      }
+      throw error;
+    }
+  }
+
   const result = await query<Record<string, unknown>>(
-    "select * from debates where user_id = $1 order by created_at desc",
+    `
+      select d.*,
+             (select count(*)::int from debate_agents da where da.debate_id = d.id) as agent_count
+        from debates d
+       where d.user_id = $1
+       order by d.created_at desc
+    `,
     [session.userId]
   );
-  return result.rows.map((row: Record<string, unknown>) => toListItem(normalizeDebateRow(row)));
+  return result.rows.map((row: Record<string, unknown>) => ({
+    ...toListItem(normalizeDebateRow(row)),
+    agentCount: Number(row.agent_count ?? 0)
+  }));
 }
 
 export async function createDebate(input: unknown) {
@@ -86,7 +156,7 @@ export async function createDebate(input: unknown) {
 
   if ("agentIds" in data) {
     const agents = await query<{ id: string }>(
-      "select id from ai_agents where user_id = $1 and id = any($2::uuid[])",
+      "select id from ai_agents where user_id = $1 and deleted_at is null and id = any($2::uuid[])",
       [session.userId, data.agentIds]
     );
 
@@ -100,9 +170,9 @@ export async function createDebate(input: unknown) {
         user_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
         consensus_reached, consensus_summary, last_error_code, last_error_message,
         started_at, finished_at, stopped_reason, created_at, updated_at
-      ) values ($1,$2,'pending',$3,0,$4,0,$5,false,null,null,null,null,null,null,$6,$6)
+      ) values ($1,$2,'pending',$3,0,null,0,$4,false,null,null,null,null,null,null,$5,$5)
       returning *`,
-      [session.userId, data.question, data.maxTurns, data.tokenBudget ?? null, data.enableSharedFacts, now]
+      [session.userId, data.question, data.maxTurns, data.enableSharedFacts, now]
     );
 
     const debate = normalizeDebateRow(insertedDebate.rows[0]);
@@ -120,13 +190,7 @@ export async function createDebate(input: unknown) {
   const bindings = data.strategy.bindings;
   const roleIds = bindings.map((binding) => binding.roleId);
   const agentIds = bindings.map((binding) => binding.agentId);
-
-  if (new Set(roleIds).size !== roleIds.length) {
-    throw new AppError("VALIDATION_ERROR", 400, "Duplicate role bindings");
-  }
-  if (new Set(agentIds).size !== agentIds.length) {
-    throw new AppError("VALIDATION_ERROR", 400, "Duplicate agent bindings");
-  }
+  const uniqueAgentIds = Array.from(new Set(agentIds));
 
   let strategyVisible: { id: string } | null = null;
   try {
@@ -147,10 +211,10 @@ export async function createDebate(input: unknown) {
   }
 
   const agents = await query<{ id: string }>(
-    "select id from ai_agents where user_id = $1 and id = any($2::uuid[])",
-    [session.userId, agentIds]
+    "select id from ai_agents where user_id = $1 and deleted_at is null and id = any($2::uuid[])",
+    [session.userId, uniqueAgentIds]
   );
-  if ((agents.rowCount ?? 0) !== agentIds.length) {
+  if ((agents.rowCount ?? 0) !== uniqueAgentIds.length) {
     throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid");
   }
 
@@ -173,7 +237,7 @@ export async function createDebate(input: unknown) {
     throw error;
   }
 
-  if (rolesById.size !== roleIds.length) {
+  if (rolesById.size !== new Set(roleIds).size) {
     throw new AppError("VALIDATION_ERROR", 400, "Selected strategy roles are invalid");
   }
 
@@ -183,14 +247,40 @@ export async function createDebate(input: unknown) {
       user_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
       consensus_reached, consensus_summary, last_error_code, last_error_message,
       started_at, finished_at, stopped_reason, created_at, updated_at
-    ) values ($1,$2,'pending',$3,0,$4,0,$5,false,null,null,null,null,null,null,$6,$6)
+    ) values ($1,$2,'pending',$3,0,null,0,$4,false,null,null,null,null,null,null,$5,$5)
     returning *`,
-    [session.userId, data.question, data.maxTurns, data.tokenBudget ?? null, data.enableSharedFacts, now]
+    [session.userId, data.question, data.maxTurns, data.enableSharedFacts, now]
   );
 
   const debate = normalizeDebateRow(insertedDebate.rows[0]);
 
   try {
+    const uniqueRoleIds = Array.from(new Set(roleIds));
+    const workflow = await query<{ content: string }>(
+      `
+        select content
+          from strategy_role_files
+         where strategy_role_id = any($1::uuid[])
+           and lower(path) = 'debate/workflow.json'
+         limit 1
+      `,
+      [uniqueRoleIds]
+    );
+    if ((workflow.rowCount ?? 0) >= 1) {
+      const content = String(workflow.rows[0]?.content ?? "").trim();
+      if (content) {
+        await query(
+          `
+            insert into debate_files (debate_id, path, content, created_at, updated_at)
+            values ($1, 'workflow.json', $2, $3, $3)
+            on conflict (debate_id, path)
+            do update set content = excluded.content, updated_at = excluded.updated_at
+          `,
+          [debate.id, content, now]
+        );
+      }
+    }
+
     for (let index = 0; index < bindings.length; index += 1) {
       const binding = bindings[index];
       const insertParticipant = await query<{ id: string }>(
@@ -218,10 +308,14 @@ export async function createDebate(input: unknown) {
       );
 
       for (const file of roleFiles.rows) {
+        const path = String(file.path ?? "");
+        const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").trim().toLowerCase();
+        if (normalized.startsWith("memory/")) continue;
+        if (normalized === "debate/workflow.json") continue;
         await query(
           `insert into debate_agent_files (id, debate_agent_id, path, content, created_at, updated_at)
            values ($1,$2,$3,$4,$5,$5)`,
-          [randomUUID(), debateAgentId, file.path, file.content ?? "", now]
+          [randomUUID(), debateAgentId, path, file.content ?? "", now]
         );
       }
     }
@@ -229,7 +323,8 @@ export async function createDebate(input: unknown) {
     if (
       isMissingTableError(error, "strategy_role_files") ||
       isMissingTableError(error, "debate_agent_overrides") ||
-      isMissingTableError(error, "debate_agent_files")
+      isMissingTableError(error, "debate_agent_files") ||
+      isMissingTableError(error, "debate_files")
     ) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
@@ -240,29 +335,34 @@ export async function createDebate(input: unknown) {
 }
 
 export async function getDebateDetail(id: string) {
-  const { debate, session } = await getDebate(id);
-  const [agentRows, agentInfoRows] = await Promise.all([
-    query<Record<string, unknown>>(
-      "select * from debate_agents where debate_id = $1 order by turn_order asc",
-      [debate.id]
-    ),
-    query<Record<string, unknown>>(
-      "select id, name, provider from ai_agents where user_id = $1",
-      [session.userId]
-    )
-  ]);
+  const session = await requireSessionUser();
+  const { debate, isOwner } = await getDebateForView(id, session.userId);
+  const agentRows = await query<Record<string, unknown>>(
+    `
+      select da.id as debate_agent_id,
+             da.ai_agent_id,
+             da.turn_order,
+             da.turn_count,
+             a.name as agent_name,
+             a.provider as agent_provider,
+             a.context_length as context_length
+        from debate_agents da
+        join ai_agents a on a.id = da.ai_agent_id
+       where da.debate_id = $1
+       order by da.turn_order asc
+    `,
+    [debate.id]
+  );
 
-  const agentMap = new Map(agentInfoRows.rows.map((item) => [String(item.id), item]));
-  const agents = agentRows.rows.map((item) => {
-    const agent = agentMap.get(String(item.ai_agent_id));
-    return {
-      id: String(item.ai_agent_id),
-      name: agent?.name ? String(agent.name) : "Unknown",
-      provider: agent?.provider ? String(agent.provider) : "openai",
-      turnOrder: Number(item.turn_order),
-      turnCount: Number(item.turn_count)
-    };
-  });
+  const agents = agentRows.rows.map((item) => ({
+    id: String(item.ai_agent_id),
+    debateAgentId: String(item.debate_agent_id),
+    name: item.agent_name ? String(item.agent_name) : "Unknown",
+    provider: item.agent_provider ? String(item.agent_provider) : "openai",
+    contextLength: item.context_length === null ? null : Number(item.context_length),
+    turnOrder: Number(item.turn_order),
+    turnCount: Number(item.turn_count)
+  }));
 
   return {
     id: debate.id,
@@ -271,47 +371,719 @@ export async function getDebateDetail(id: string) {
     currentTurn: debate.currentTurn,
     maxTurns: debate.maxTurns,
     tokenUsed: debate.tokenUsed,
-    tokenBudget: debate.tokenBudget,
+    isShared: debate.isShared,
+    isOwner,
     consensusReached: debate.consensusReached,
     consensusSummary: debate.consensusSummary,
     agents
   };
 }
 
-export async function listDebateTurns(id: string) {
-  const { debate, session } = await getDebate(id);
-  const [turnRows, agentRows] = await Promise.all([
-    query<Record<string, unknown>>(
-      "select * from debate_turns where debate_id = $1 order by turn_number asc",
-      [debate.id]
-    ),
-    query<Record<string, unknown>>(
-      "select id, name, provider from ai_agents where user_id = $1",
-      [session.userId]
-    )
-  ]);
+export async function updateDebateQuestion(id: string, input: unknown) {
+  const session = await requireSessionUser();
+  const data = updateDebateQuestionSchema.parse(input);
+  const now = new Date().toISOString();
 
-  const agentMap = new Map(agentRows.rows.map((item) => [String(item.id), item]));
-  return turnRows.rows.map((turn) => {
-    const agent = agentMap.get(String(turn.ai_agent_id));
-    return {
-      id: String(turn.id),
-      turnNumber: Number(turn.turn_number),
-      content: String(turn.content),
-      structuredOutput: (turn.structured_output as Record<string, unknown> | null) ?? null,
-      parseStatus: String(turn.parse_status),
-      tokenUsed: Number(turn.token_used),
-      createdAt: String(turn.created_at),
-      agent: {
-        name: agent?.name ? String(agent.name) : "Unknown",
-        provider: agent?.provider ? String(agent.provider) : "openai"
+  const existing = await query<{ status: string; question: string }>(
+    "select status, question from debates where id = $1 and user_id = $2",
+    [id, session.userId]
+  );
+  if ((existing.rowCount ?? 0) !== 1) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+  const status = String(existing.rows[0].status ?? "");
+  const previousQuestion = String(existing.rows[0].question ?? "");
+  if (status === "running") {
+    throw new AppError("CONFLICT", 409, "Please pause the debate before editing the question");
+  }
+  if (!["pending", "paused"].includes(status)) {
+    throw new AppError("CONFLICT", 409, "Debate question cannot be edited in current status");
+  }
+
+  const result = await query<Record<string, unknown>>(
+    `update debates
+        set question = $3,
+            updated_at = $4
+      where id = $1 and user_id = $2 and status in ('pending','paused')
+      returning *`,
+    [id, session.userId, data.question, now]
+  );
+  if ((result.rowCount ?? 0) !== 1) {
+    throw new AppError("CONFLICT", 409, "Debate question update failed");
+  }
+
+  // Persist latest diff and versions for runtime injection.
+  const prevLines = previousQuestion.replace(/\r\n/g, "\n").split("\n");
+  const nextLines = data.question.replace(/\r\n/g, "\n").split("\n");
+  let prefix = 0;
+  while (prefix < prevLines.length && prefix < nextLines.length && prevLines[prefix] === nextLines[prefix]) {
+    prefix += 1;
+  }
+  let suffix = 0;
+  while (
+    suffix < prevLines.length - prefix &&
+    suffix < nextLines.length - prefix &&
+    prevLines[prevLines.length - 1 - suffix] === nextLines[nextLines.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  const removed = prevLines.slice(prefix, prevLines.length - suffix);
+  const added = nextLines.slice(prefix, nextLines.length - suffix);
+  const limit = 120;
+  const removedShown = removed.slice(0, limit);
+  const addedShown = added.slice(0, limit);
+  const diffLines = [
+    ...removedShown.map((line) => `- ${line}`),
+    ...addedShown.map((line) => `+ ${line}`)
+  ];
+  const truncatedNote =
+    removed.length > removedShown.length || added.length > addedShown.length
+      ? "\n\n（diff 过长，已截断展示）"
+      : "";
+
+  try {
+    type HistoryItem = { version: number; path: string; at: string };
+    const historyPath = "question/history.json";
+    const versionPrefix = "question/versions/";
+    const pad = (n: number) => String(n).padStart(4, "0");
+
+    const historyRes = await query<{ content: string }>(
+      "select content from debate_files where debate_id = $1 and path = $2 limit 1",
+      [id, historyPath]
+    );
+    let history: HistoryItem[] = [];
+    if ((historyRes.rowCount ?? 0) === 1) {
+      try {
+        const parsed = JSON.parse(String(historyRes.rows[0].content ?? "")) as unknown;
+        if (Array.isArray(parsed)) {
+          history = parsed
+            .map((item) => ({
+              version: Number((item as { version?: unknown }).version),
+              path: String((item as { path?: unknown }).path ?? ""),
+              at: String((item as { at?: unknown }).at ?? "")
+            }))
+            .filter((item) => Number.isFinite(item.version) && item.version > 0 && item.path);
+        }
+      } catch {
       }
+    }
+
+    // If no history yet, seed v0001 from previous question (best-effort).
+    if (history.length === 0) {
+      const seededPath = `${versionPrefix}v${pad(1)}.md`;
+      await query(
+        `
+          insert into debate_files (debate_id, path, content, created_at, updated_at)
+          values ($1, $2, $3, $4, $4)
+          on conflict (debate_id, path)
+          do update set content = excluded.content, updated_at = excluded.updated_at
+        `,
+        [id, seededPath, previousQuestion, now]
+      );
+      history.push({ version: 1, path: seededPath, at: now });
+    }
+
+    const previousVersion = history[history.length - 1]?.version ?? 1;
+    const nextVersion = previousVersion + 1;
+    const nextVersionPath = `${versionPrefix}v${pad(nextVersion)}.md`;
+
+    await query(
+      `
+        insert into debate_files (debate_id, path, content, created_at, updated_at)
+        values ($1, $2, $3, $4, $4)
+        on conflict (debate_id, path)
+        do update set content = excluded.content, updated_at = excluded.updated_at
+      `,
+      [id, nextVersionPath, data.question, now]
+    );
+    history.push({ version: nextVersion, path: nextVersionPath, at: now });
+
+    await query(
+      `
+        insert into debate_files (debate_id, path, content, created_at, updated_at)
+        values ($1, $2, $3, $4, $4)
+        on conflict (debate_id, path)
+        do update set content = excluded.content, updated_at = excluded.updated_at
+      `,
+      [id, historyPath, JSON.stringify(history, null, 2), now]
+    );
+
+    const diffMarkdown = [
+      "# QUESTION UPDATED",
+      "",
+      `- At: ${now}`,
+      `- From: v${previousVersion}`,
+      `- To: v${nextVersion}`,
+      "",
+      "```diff",
+      ...diffLines,
+      "```",
+      truncatedNote
+    ]
+      .join("\n")
+      .trim();
+
+    await query(
+      `
+        insert into debate_files (debate_id, path, content, created_at, updated_at)
+        values ($1, $2, $3, $4, $4)
+        on conflict (debate_id, path)
+        do update set content = excluded.content, updated_at = excluded.updated_at
+      `,
+      [id, "question/latest_diff.md", diffMarkdown, now]
+    );
+  } catch (error) {
+    if (!isMissingTableError(error, "debate_files")) throw error;
+  }
+
+  return toListItem(normalizeDebateRow(result.rows[0]));
+}
+
+export async function updateDebateSharing(id: string, input: unknown) {
+  const session = await requireSessionUser();
+  const data = updateDebateSharingSchema.parse(input);
+  const now = new Date().toISOString();
+
+  try {
+    const result = await query<Record<string, unknown>>(
+      `update debates
+          set is_shared = $3,
+              updated_at = $4
+        where id = $1 and user_id = $2
+        returning *`,
+      [id, session.userId, data.isShared, now]
+    );
+
+    if ((result.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "Debate not found");
+    }
+
+    return toListItem(normalizeDebateRow(result.rows[0]));
+  } catch (error) {
+    if (isMissingColumnError(error, "is_shared")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing debates.is_shared column");
+    }
+    throw error;
+  }
+}
+
+export async function deleteDebate(id: string) {
+  const session = await requireSessionUser();
+
+  const existing = await query<{ status: string }>(
+    "select status from debates where id = $1 and user_id = $2",
+    [id, session.userId]
+  );
+  if ((existing.rowCount ?? 0) !== 1) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+  if (String(existing.rows[0].status) === "running") {
+    throw new AppError("CONFLICT", 409, "Please stop the debate before deleting");
+  }
+
+  await query("delete from debates where id = $1 and user_id = $2", [id, session.userId]);
+  return { id };
+}
+
+export async function listDebateTurns(
+  id: string,
+  options?: {
+    afterTurnNumber?: number;
+    limit?: number;
+  }
+) {
+  const session = await requireSessionUser();
+  const { debate } = await getDebateForView(id, session.userId);
+  const afterRaw = options?.afterTurnNumber ?? null;
+  const afterTurnNumber = typeof afterRaw === "number" && Number.isFinite(afterRaw) && afterRaw >= 0 ? Math.floor(afterRaw) : null;
+  const limitRaw = options?.limit ?? null;
+  const limit = typeof limitRaw === "number" && Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : null;
+  const turnRows = await query<Record<string, unknown>>(
+    `
+      select t.*,
+             a.name as agent_name,
+             a.provider as agent_provider
+        from debate_turns t
+        join ai_agents a on a.id = t.ai_agent_id
+       where t.debate_id = $1
+         and ($2::int is null or t.turn_number > $2::int)
+       order by t.turn_number asc
+       ${limit ? "limit $3::int" : ""}
+    `,
+    limit ? [debate.id, afterTurnNumber, limit] : [debate.id, afterTurnNumber]
+  );
+
+  return turnRows.rows.map((turn) => ({
+    id: String(turn.id),
+    turnNumber: Number(turn.turn_number),
+    content: String(turn.content),
+    structuredOutput: (turn.structured_output as Record<string, unknown> | null) ?? null,
+    parseStatus: String(turn.parse_status),
+    tokenUsed: Number(turn.token_used),
+    createdAt: String(turn.created_at),
+    agent: {
+      name: turn.agent_name ? String(turn.agent_name) : "Unknown",
+      provider: turn.agent_provider ? String(turn.agent_provider) : "openai"
+    }
+  }));
+}
+
+export type DebateAllFileEntry =
+  | {
+      scope: "debate";
+      path: string;
+      updatedAt: string | null;
+    }
+  | {
+      scope: "agent";
+      debateAgentId: string;
+      turnOrder: number | null;
+      agentName: string;
+      path: string;
+      updatedAt: string | null;
     };
-  });
+
+export async function listDebateAllFiles(debateId: string): Promise<DebateAllFileEntry[]> {
+  const session = await requireSessionUser();
+  const { isOwner } = await getDebateForView(debateId, session.userId);
+  if (!isOwner) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+
+  const entries: DebateAllFileEntry[] = [];
+
+  try {
+    const debateFiles = await query<{ path: string; updated_at: string | null }>(
+      `
+        select f.path, f.updated_at
+          from debate_files f
+         where f.debate_id = $1
+         order by f.path asc
+         limit 5000
+      `,
+      [debateId]
+    );
+    for (const row of debateFiles.rows) {
+      entries.push({
+        scope: "debate",
+        path: String(row.path),
+        updatedAt: row.updated_at ? String(row.updated_at) : null
+      });
+    }
+  } catch (error) {
+    if (isMissingTableError(error, "debate_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_files table");
+    }
+    throw error;
+  }
+
+  try {
+    const agentFiles = await query<{ debate_agent_id: string; turn_order: number | null; agent_name: string | null; path: string; updated_at: string | null }>(
+      `
+        select da.id as debate_agent_id,
+               da.turn_order as turn_order,
+               a.name as agent_name,
+               f.path as path,
+               f.updated_at as updated_at
+          from debate_agent_files f
+          join debate_agents da on da.id = f.debate_agent_id
+          join ai_agents a on a.id = da.ai_agent_id
+         where da.debate_id = $1
+         order by da.turn_order asc nulls last, a.name asc, f.path asc
+         limit 20000
+      `,
+      [debateId]
+    );
+    for (const row of agentFiles.rows) {
+      entries.push({
+        scope: "agent",
+        debateAgentId: String(row.debate_agent_id),
+        turnOrder: row.turn_order === null ? null : Number(row.turn_order),
+        agentName: row.agent_name ? String(row.agent_name) : "Unknown",
+        path: String(row.path),
+        updatedAt: row.updated_at ? String(row.updated_at) : null
+      });
+    }
+  } catch (error) {
+    if (isMissingTableError(error, "debate_agent_files")) {
+      // Keep debate files available even if agent files table doesn't exist yet.
+      return entries;
+    }
+    throw error;
+  }
+
+  return entries;
+}
+
+export async function listDebateFiles(id: string, prefix?: string) {
+  const session = await requireSessionUser();
+  const { isOwner } = await getDebateForView(id, session.userId);
+  if (!isOwner) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+
+  try {
+    const result = await query<{ path: string }>(
+      `
+        select f.path
+          from debate_files f
+         where f.debate_id = $1
+           and f.path like $2
+         order by f.path asc
+         limit 500
+      `,
+      [id, `${(prefix ?? "").trim()}%`]
+    );
+    return result.rows.map((row) => String(row.path));
+  } catch (error) {
+    if (isMissingTableError(error, "debate_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_files table");
+    }
+    throw error;
+  }
+}
+
+export async function readDebateFile(id: string, path: string) {
+  const session = await requireSessionUser();
+  const { isOwner } = await getDebateForView(id, session.userId);
+  if (!isOwner) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+
+  try {
+    const result = await query<{ content: string; updated_at: string }>(
+      `
+        select f.content, f.updated_at
+          from debate_files f
+         where f.debate_id = $1
+           and f.path = $2
+         limit 1
+      `,
+      [id, path]
+    );
+    if ((result.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "File not found");
+    }
+    return {
+      path,
+      content: String(result.rows[0].content ?? ""),
+      updatedAt: String(result.rows[0].updated_at ?? "")
+    };
+  } catch (error) {
+    if (isMissingTableError(error, "debate_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_files table");
+    }
+    throw error;
+  }
+}
+
+export async function listDebateAgentFiles(debateId: string, debateAgentId: string, prefix?: string) {
+  const session = await requireSessionUser();
+  const { isOwner } = await getDebateForView(debateId, session.userId);
+  if (!isOwner) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+
+  try {
+    const result = await query<{ path: string }>(
+      `
+        select f.path
+          from debate_agent_files f
+          join debate_agents da on da.id = f.debate_agent_id
+         where da.debate_id = $1
+           and f.debate_agent_id = $2
+           and f.path like $3
+         order by f.path asc
+         limit 500
+      `,
+      [debateId, debateAgentId, `${(prefix ?? "").trim()}%`]
+    );
+    return result.rows.map((row) => String(row.path));
+  } catch (error) {
+    if (isMissingTableError(error, "debate_agent_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_agent_files table");
+    }
+    throw error;
+  }
+}
+
+export async function readDebateAgentFile(debateId: string, debateAgentId: string, path: string) {
+  const session = await requireSessionUser();
+  const { isOwner } = await getDebateForView(debateId, session.userId);
+  if (!isOwner) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+
+  try {
+    const result = await query<{ content: string; updated_at: string }>(
+      `
+        select f.content, f.updated_at
+          from debate_agent_files f
+          join debate_agents da on da.id = f.debate_agent_id
+         where da.debate_id = $1
+           and f.debate_agent_id = $2
+           and f.path = $3
+         limit 1
+      `,
+      [debateId, debateAgentId, path]
+    );
+    if ((result.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "File not found");
+    }
+    return {
+      path,
+      content: String(result.rows[0].content ?? ""),
+      updatedAt: String(result.rows[0].updated_at ?? "")
+    };
+  } catch (error) {
+    if (isMissingTableError(error, "debate_agent_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_agent_files table");
+    }
+    throw error;
+  }
+}
+
+export async function reorderDebateSeats(id: string, input: unknown) {
+  const session = await requireSessionUser();
+  const body = input as { order?: unknown };
+  const order = Array.isArray(body?.order) ? body.order.map((x) => String(x)) : [];
+  if (order.length < 2) {
+    throw new AppError("VALIDATION_ERROR", 400, "order must include at least 2 debateAgentIds");
+  }
+
+  const debateRes = await query<{ status: string; current_turn: number }>(
+    "select status, current_turn from debates where id = $1 and user_id = $2",
+    [id, session.userId]
+  );
+  if ((debateRes.rowCount ?? 0) !== 1) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+  const status = String(debateRes.rows[0].status ?? "");
+  const currentTurn = Number(debateRes.rows[0].current_turn ?? 0);
+  if (!["pending", "paused"].includes(status)) {
+    throw new AppError("CONFLICT", 409, "Please pause the debate before reordering seats");
+  }
+
+  const agentsRes = await query<{ id: string; turn_order: number }>(
+    "select id, turn_order from debate_agents where debate_id = $1 order by turn_order asc",
+    [id]
+  );
+  const debateAgentIds = agentsRes.rows.map((row) => String(row.id));
+  const participantCount = debateAgentIds.length;
+  if (participantCount !== order.length) {
+    throw new AppError("VALIDATION_ERROR", 400, "order length must match participant count");
+  }
+
+  if (status === "paused" && participantCount > 0 && currentTurn % participantCount !== 0) {
+    throw new AppError("CONFLICT", 409, "Please reorder seats at a round boundary (after a full round ends)");
+  }
+
+  const expected = new Set(debateAgentIds);
+  for (const item of order) {
+    if (!expected.has(item)) {
+      throw new AppError("VALIDATION_ERROR", 400, "order includes invalid debateAgentId");
+    }
+  }
+  if (new Set(order).size !== order.length) {
+    throw new AppError("VALIDATION_ERROR", 400, "order contains duplicates");
+  }
+
+  // Two-phase update to avoid unique(debate_id, turn_order) conflicts.
+  const now = new Date().toISOString();
+  await query("update debate_agents set turn_order = turn_order + 1000 where debate_id = $1", [id]);
+  for (let index = 0; index < order.length; index += 1) {
+    await query(
+      "update debate_agents set turn_order = $3 where debate_id = $1 and id = $2",
+      [id, order[index], index + 1]
+    );
+  }
+  await query("update debates set updated_at = $2 where id = $1 and user_id = $3", [id, now, session.userId]);
+
+  return { id, order };
+}
+
+export async function startDebateSegment(id: string, input: unknown) {
+  const session = await requireSessionUser();
+  const body = input as { reason?: unknown };
+  const reason = typeof body?.reason === "string" ? body.reason.trim() : "";
+
+  const debateRes = await query<{ status: string; current_turn: number; question: string }>(
+    "select status, current_turn, question from debates where id = $1 and user_id = $2",
+    [id, session.userId]
+  );
+  if ((debateRes.rowCount ?? 0) !== 1) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+
+  const status = String(debateRes.rows[0].status ?? "");
+  const currentTurn = Number(debateRes.rows[0].current_turn ?? 0);
+  const question = String(debateRes.rows[0].question ?? "");
+  if (status !== "paused") {
+    throw new AppError("CONFLICT", 409, "Please pause the debate before starting a new segment");
+  }
+
+  const participants = await query<{ debate_agent_id: string; turn_order: number; agent_name: string }>(
+    `
+      select da.id as debate_agent_id,
+             da.turn_order,
+             a.name as agent_name
+        from debate_agents da
+        join ai_agents a on a.id = da.ai_agent_id
+       where da.debate_id = $1
+       order by da.turn_order asc
+       limit 50
+    `,
+    [id]
+  );
+  const participantCount = participants.rows.length;
+  if (participantCount < 2) {
+    throw new AppError("VALIDATION_ERROR", 400, "Debate requires at least 2 agents");
+  }
+  if (participantCount > 0 && currentTurn % participantCount !== 0) {
+    throw new AppError("CONFLICT", 409, "Please start a new segment at a round boundary (after a full round ends)");
+  }
+
+  const now = new Date().toISOString();
+  const completedRounds = Math.floor(currentTurn / participantCount);
+  const minTurnNumber = currentTurn + 1;
+
+  let workflow: ReturnType<typeof normalizeDebateWorkflow> | null = null;
+  try {
+    const workflowRes = await query<{ content: string }>(
+      "select content from debate_files where debate_id = $1 and path = 'workflow.json' limit 1",
+      [id]
+    );
+    const workflowRaw = (workflowRes.rowCount ?? 0) === 1 ? String(workflowRes.rows[0]?.content ?? "") : "";
+    workflow = workflowRaw ? normalizeDebateWorkflow(JSON.parse(workflowRaw) as unknown) : null;
+  } catch {
+    workflow = null;
+  }
+
+  let directive = "";
+  try {
+    const directiveRes = await query<{ content: string }>(
+      "select content from debate_files where debate_id = $1 and path = 'votes/directive.md' limit 1",
+      [id]
+    );
+    directive = (directiveRes.rowCount ?? 0) === 1 ? String(directiveRes.rows[0]?.content ?? "") : "";
+  } catch {
+    directive = "";
+  }
+
+  const checkpointPrefix = "context/checkpoints/seg-";
+  const existing = await query<{ path: string }>(
+    "select path from debate_files where debate_id = $1 and path like $2 order by path asc limit 200",
+    [id, `${checkpointPrefix}%`]
+  );
+  const nextIndex = (existing.rowCount ?? 0) + 1;
+  const pad = (n: number) => String(n).padStart(4, "0");
+  const seg = `seg-${pad(nextIndex)}`;
+  const checkpointPath = `${checkpointPrefix}${pad(nextIndex)}.md`;
+
+  const lines: string[] = [];
+  lines.push(`# Segment Checkpoint · ${seg}`);
+  lines.push("");
+  lines.push(`- At: ${now}`);
+  lines.push(`- Completed rounds: ${completedRounds}`);
+  lines.push(`- Current turn: ${currentTurn}`);
+  lines.push(`- Context window reset: next model calls will inject recent turns from Turn >= ${minTurnNumber}.`);
+  if (reason) lines.push(`- Reason: ${reason}`);
+  lines.push("");
+  lines.push("## Question");
+  lines.push(question ? question : "(empty)");
+  lines.push("");
+  lines.push("## Seats (current order)");
+  for (const row of participants.rows) {
+    lines.push(`- Seat-${Number(row.turn_order)}: ${String(row.agent_name ?? "Unknown")}`);
+  }
+
+  lines.push("");
+  lines.push("## Workflow (summary)");
+  if (!workflow?.enabled) {
+    lines.push("- disabled (no workflow.json or enabled=false)");
+  } else {
+    lines.push(`- version: v${workflow.workflowVersion}`);
+    lines.push(`- election startRound: ${workflow.election.startRound}`);
+    lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
+    const first = workflow.election.speakingOrder.firstRole;
+    const last = workflow.election.speakingOrder.lastRole;
+    lines.push(`- speakingOrder (after election, next-round boundary): first=${first ?? "(none)"}; last=${last ?? "(none)"}`);
+    if (workflow.seatOrderRules.length === 0) {
+      lines.push("- seatOrderRules: (none)");
+    } else {
+      lines.push("- seatOrderRules:");
+      for (const rule of workflow.seatOrderRules) {
+        lines.push(
+          `  - afterRound=${rule.afterRound}: ${rule.policy.type}${rule.policy.type === "rotate" ? ` offset=${rule.policy.offset}` : ""}`
+        );
+      }
+    }
+  }
+
+  if (directive.trim()) {
+    lines.push("");
+    lines.push("## Latest official directive");
+    lines.push(directive.trim());
+  }
+
+  lines.push("");
+  lines.push("## Notes");
+  lines.push("- This checkpoint is injected to all seats as a shared segment context.");
+  lines.push("- Long-term memory (per seat) and shared facts (if enabled) are still used.");
+
+  const checkpointContent = lines.join("\n").trim() + "\n";
+
+  try {
+    await query(
+      `
+        insert into debate_files (debate_id, path, content, created_at, updated_at)
+        values ($1, $2, $3, $4, $4)
+        on conflict (debate_id, path)
+        do update set content = excluded.content, updated_at = excluded.updated_at
+      `,
+      [id, "context/window.json", JSON.stringify({ enabled: true, minTurnNumber, at: now, seg, reason }, null, 2), now]
+    );
+    await query(
+      `
+        insert into debate_files (debate_id, path, content, created_at, updated_at)
+        values ($1, $2, $3, $4, $4)
+        on conflict (debate_id, path)
+        do update set content = excluded.content, updated_at = excluded.updated_at
+      `,
+      [id, "context/segment.md", checkpointContent, now]
+    );
+    await query(
+      `
+        insert into debate_files (debate_id, path, content, created_at, updated_at)
+        values ($1, $2, $3, $4, $4)
+        on conflict (debate_id, path)
+        do update set content = excluded.content, updated_at = excluded.updated_at
+      `,
+      [id, checkpointPath, checkpointContent, now]
+    );
+  } catch (error) {
+    if (isMissingTableError(error, "debate_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_files table");
+    }
+    throw error;
+  }
+
+  return { ok: true, seg, minTurnNumber, checkpointPath };
 }
 
 export async function startDebate(id: string) {
   const session = await requireSessionUser();
+
+  const before = await query<{ status: string; current_turn: number }>(
+    "select status, current_turn from debates where id = $1 and user_id = $2",
+    [id, session.userId]
+  );
+  if ((before.rowCount ?? 0) !== 1) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+  const beforeStatus = String(before.rows[0].status ?? "");
+  const beforeTurn = Number(before.rows[0].current_turn ?? 0);
+
   const now = new Date().toISOString();
   const result = await query<Record<string, unknown>>(
     `update debates
@@ -325,6 +1097,24 @@ export async function startDebate(id: string) {
   if ((result.rowCount ?? 0) !== 1) {
     throw new AppError("CONFLICT", 409, "Debate cannot be started");
   }
+
+  // Safety: older versions could accidentally seed memory/* into a brand-new debate (via strategy role files).
+  // Ensure a new debate starts with a fresh context.
+  if (beforeStatus === "pending" && beforeTurn === 0) {
+    await query(
+      `
+        delete from debate_agent_files f
+        using debate_agents da
+        where f.debate_agent_id = da.id
+          and da.debate_id = $1
+          and lower(replace(f.path, '\\\\', '/')) like 'memory/%'
+      `,
+      [id]
+    );
+
+    await query("delete from debate_files where debate_id = $1 and path = $2", [id, "facts/board.md"]);
+  }
+
   void runDebate(id, session.userId);
   return toListItem(normalizeDebateRow(result.rows[0]));
 }
@@ -388,7 +1178,7 @@ export async function appendAgentToDebate(id: string, agentId: string) {
   }
 
   const agent = await query<{ id: string }>(
-    "select id from ai_agents where user_id = $1 and id = $2",
+    "select id from ai_agents where user_id = $1 and deleted_at is null and id = $2",
     [session.userId, agentId]
   );
   if ((agent.rowCount ?? 0) !== 1) {

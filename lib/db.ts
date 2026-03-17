@@ -75,6 +75,21 @@ async function ensureSchema(pool: Pool) {
   await pool.query(
     "alter table debates add column if not exists enable_shared_facts boolean not null default true"
   );
+  await pool.query("alter table ai_agents add column if not exists context_length int null");
+  await pool.query("alter table ai_agents add column if not exists deleted_at timestamptz null");
+  // Allow reusing the same AI config for multiple seats within one debate.
+  await pool.query(`
+    do $$
+    begin
+      if exists (
+        select 1 from pg_constraint where conname = 'debate_agents_debate_id_ai_agent_id_key'
+      ) then
+        alter table debate_agents drop constraint debate_agents_debate_id_ai_agent_id_key;
+      end if;
+    exception when undefined_table then
+      null;
+    end $$;
+  `);
   await pool.query(`
     do $$
     begin

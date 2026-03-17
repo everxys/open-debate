@@ -107,6 +107,25 @@ export default function NewStrategyPage() {
     });
   }
 
+  function duplicateRole(index: number) {
+    setDraft((current) => {
+      const source = current.roles[index];
+      if (!source) return current;
+      const copy = {
+        name: `${source.name || `角色 ${index + 1}`} (copy)`,
+        systemPrompt: source.systemPrompt ?? "",
+        files: (source.files ?? []).map((file) => ({ ...file }))
+      };
+      const nextRoles = [
+        ...current.roles.slice(0, index + 1),
+        copy,
+        ...current.roles.slice(index + 1)
+      ];
+      setActiveRoleIndex(index + 1);
+      return { ...current, roles: nextRoles };
+    });
+  }
+
   async function save() {
     if (!canSave || isSaving) return;
     setIsSaving(true);
@@ -203,7 +222,7 @@ export default function NewStrategyPage() {
         </div>
       </section>
 
-      <div className="grid grid-3" style={{ gap: 16, alignItems: "start" }}>
+      <div className="grid" style={{ gap: 16, alignItems: "start" }}>
         <section className="panel stack">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <strong>角色（{draft.roles.length}）</strong>
@@ -247,6 +266,9 @@ export default function NewStrategyPage() {
                   >
                     下移
                   </button>
+                  <button className="btn" onClick={() => duplicateRole(activeRoleIndex)}>
+                    复制
+                  </button>
                   <button
                     className="btn btn-danger"
                     disabled={draft.roles.length <= 2}
@@ -281,11 +303,13 @@ export default function NewStrategyPage() {
           ) : null}
         </section>
 
-        <DraftRoleFilesManagerColumns
-          key={activeRoleIndex}
-          files={draft.roles[activeRoleIndex]?.files ?? []}
-          onFilesChange={(next) => updateRole(activeRoleIndex, { files: next })}
-        />
+        <div className="grid grid-2" style={{ gap: 16, alignItems: "start" }}>
+          <DraftRoleFilesManagerColumns
+            key={activeRoleIndex}
+            files={draft.roles[activeRoleIndex]?.files ?? []}
+            onFilesChange={(next) => updateRole(activeRoleIndex, { files: next })}
+          />
+        </div>
       </div>
     </div>
   );

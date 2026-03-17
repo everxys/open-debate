@@ -101,7 +101,6 @@ function calculateConsensusScore(snapshot: SolutionSnapshot): number {
 
 - 达到 `max_turns`
 - 用户停止
-- token 预算耗尽
 - 运行失败
 
 ---

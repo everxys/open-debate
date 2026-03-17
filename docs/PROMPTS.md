@@ -2,17 +2,13 @@
 
 本文档描述辩论运行时对模型输出的约定，以及建议的 system prompt 写法（以当前代码实现为准）。
 
-## 1) 结构化输出约定
+## 1) 输出格式约定
 
-每轮输出应为 **JSON object**（不是 Markdown 代码块），字段如下：
+每轮输出应为 **给人看的 Markdown**（推荐），方便阅读与回溯。
 
-- `proposed_solution?: string`：本轮主张的方案名（简短）
-- `arguments?: Array<{ type: "support" | "rebuttal"; content: string }>`：论据列表（1-3 句）
-- `agreement_score?: number`：对当前主张/共识的同意度（0-10）
+系统仍支持（可选）结构化字段：如果模型输出的是 JSON（`proposed_solution / arguments / agreement_score`），运行时会尝试解析并把它转换为可读 Markdown，同时把结构化字段存到数据库里；解析失败会保留原文并标记 fallback，不会中断整场辩论。
 
-解析失败时系统会保留原文并标记 fallback，不会中断整场辩论。
-
-### 示例
+### 示例（可选 JSON：系统会自动转成可读 Markdown）
 
 ```json
 {
@@ -32,9 +28,9 @@ You are a rigorous debate participant.
 
 Rules:
 1) Stay on-topic and avoid repetition.
-2) Always respond in JSON object format with keys: proposed_solution, arguments, agreement_score.
-3) arguments[*].type must be "support" or "rebuttal".
-4) Keep arguments concise (1-3 sentences each).
+ 2) Respond in readable Markdown for humans.
+ 3) Do not output raw JSON objects. If you need structure, use headings and bullet points.
+ 4) Stay concise and avoid repetition.
 ```
 
 ## 3) 运行时上下文注入（概念说明）
@@ -46,4 +42,3 @@ Rules:
 - 全场共享事实板（可选）：`facts/board.md`
 
 这些注入内容用于“长时辩论上下文恢复”，不要求你在 prompt 中固定引用格式。
-

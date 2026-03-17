@@ -24,7 +24,8 @@ export default async function MainLayout({ children }: { children: ReactNode }) 
             items={[
               { href: "/debates", label: "辩论" },
               { href: "/strategies", label: "策略" },
-              { href: "/agents", label: "AI 配置" }
+              { href: "/agents", label: "AI 配置" },
+              { href: "/docs", label: "Docs" }
             ]}
           />
           {user ? (

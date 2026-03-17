@@ -4,8 +4,8 @@ export const createAgentSchema = z.object({
   name: z.string().min(1).max(50),
   provider: z.enum(["openai", "anthropic"]),
   model: z.string().min(1).max(100),
+  contextLength: z.number().int().min(1).max(2_000_000).nullable().optional(),
   baseUrl: z.string().url().min(1),
-  systemPrompt: z.string().max(4000).optional().default(""),
   apiKey: z.string().min(1)
 });
 
@@ -13,7 +13,6 @@ export const testAgentConfigSchema = createAgentSchema.pick({
   provider: true,
   model: true,
   baseUrl: true,
-  systemPrompt: true,
   apiKey: true
 });
 
@@ -42,10 +41,32 @@ export const agentFileMoveSchema = z.object({
   toPath: relativeFilePathSchema
 });
 
+export const agentPortableSchema = z.object({
+  name: z.string().min(1).max(50),
+  provider: z.enum(["openai", "anthropic"]),
+  model: z.string().min(1).max(100),
+  contextLength: z.number().int().min(1).max(2_000_000).nullable().optional(),
+  baseUrl: z.string().url().min(1),
+  isActive: z.boolean().optional().default(true),
+  apiKey: z.string().min(1),
+  files: z.array(agentFileUpsertSchema).optional().default([])
+});
+
+export const exportAgentsRequestSchema = z.object({
+  agentIds: z.array(z.string()).min(1)
+});
+
+export const agentsExportPackSchema = z.object({
+  formatVersion: z.literal(1),
+  exportedAt: z.string().min(1),
+  agents: z.array(agentPortableSchema).min(1)
+});
+
+export const importAgentsPackSchema = agentsExportPackSchema;
+
 const debateCommonSchema = z.object({
-  question: z.string().min(10).max(5000),
-  maxTurns: z.number().int().min(1).max(50),
-  tokenBudget: z.number().int().positive().max(1000000).nullable().optional(),
+  question: z.string().min(10).max(50_000),
+  maxTurns: z.number().int().min(0).max(50),
   enableSharedFacts: z.boolean().optional().default(true)
 });
 
@@ -67,6 +88,14 @@ export const createDebateSchema = z.union([
     })
   })
 ]);
+
+export const updateDebateQuestionSchema = z.object({
+  question: debateCommonSchema.shape.question
+});
+
+export const updateDebateSharingSchema = z.object({
+  isShared: z.boolean()
+});
 
 const strategyRoleFileSchema = z.object({
   path: relativeFilePathSchema,

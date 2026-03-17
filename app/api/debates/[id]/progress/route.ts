@@ -1,0 +1,46 @@
+import { query } from "@/lib/db";
+import { getDebateLiveProgress } from "@/lib/debate-live";
+import { toErrorResponse } from "@/lib/http";
+import { readSession } from "@/lib/session";
+
+export const runtime = "nodejs";
+
+export async function GET(
+  _request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
+  try {
+    const session = await readSession();
+    if (!session) {
+      return new Response(JSON.stringify({ success: false, error: { code: "AUTH_REQUIRED" } }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    const { id } = await context.params;
+    const ownership = await query<{ user_id: string; is_shared: boolean }>(
+      "select user_id, is_shared from debates where id = $1",
+      [id]
+    );
+    if ((ownership.rowCount ?? 0) !== 1) {
+      return new Response(JSON.stringify({ success: false, error: { code: "NOT_FOUND" } }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    const row = ownership.rows[0];
+    if (String(row.user_id) !== session.userId && !Boolean(row.is_shared)) {
+      return new Response(JSON.stringify({ success: false, error: { code: "NOT_FOUND" } }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    return new Response(JSON.stringify({ success: true, data: getDebateLiveProgress(id) }), {
+      headers: { "Content-Type": "application/json" }
+    });
+  } catch (error) {
+    return toErrorResponse(error);
+  }
+}

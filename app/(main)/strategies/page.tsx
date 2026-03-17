@@ -10,7 +10,11 @@ type StrategyListItem = {
   name: string;
   description: string | null;
   isShared: boolean;
+  forkedFromStrategyId?: string | null;
   roleCount: number;
+  isFavorited?: boolean;
+  favoriteCount?: number;
+  forkCount?: number;
   updatedAt: string;
   createdAt: string;
 };
@@ -141,6 +145,43 @@ export default function StrategiesPage() {
     }
   }
 
+  async function toggleFavorite(item: StrategyListItem) {
+    if (isBusyId) return;
+    setIsBusyId(item.id);
+    try {
+      const response = await fetch(`/api/strategies/${item.id}/favorite`, {
+        method: item.isFavorited ? "DELETE" : "POST"
+      });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "操作失败");
+        return;
+      }
+      showToast("success", item.isFavorited ? "已取消收藏" : "已收藏");
+      await load("shared");
+    } finally {
+      setIsBusyId(null);
+    }
+  }
+
+  async function forkOne(item: StrategyListItem) {
+    if (isBusyId) return;
+    setIsBusyId(item.id);
+    try {
+      const response = await fetch(`/api/strategies/${item.id}/fork`, { method: "POST" });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "Fork 失败");
+        return;
+      }
+      showToast("success", "已 Fork 到我的策略");
+      await load("mine");
+      await load("shared");
+    } finally {
+      setIsBusyId(null);
+    }
+  }
+
   return (
     <div className="grid" style={{ gap: 20 }}>
       {toast ? (
@@ -184,6 +225,12 @@ export default function StrategiesPage() {
                   <div className="row">
                     <span className="muted">角色 {item.roleCount}</span>
                     {item.isShared ? <span className="badge badge-running">shared</span> : <span className="badge">private</span>}
+                    {scope === "shared" && typeof item.favoriteCount === "number" ? (
+                      <span className="muted">收藏 {item.favoriteCount}</span>
+                    ) : null}
+                    {scope === "shared" && typeof item.forkCount === "number" ? (
+                      <span className="muted">Fork {item.forkCount}</span>
+                    ) : null}
                   </div>
                 </div>
                 {item.description ? <div className="muted">{item.description}</div> : null}
@@ -195,6 +242,16 @@ export default function StrategiesPage() {
                   <Link className="btn" href={`/strategies/${item.id}`}>
                     {scope === "mine" ? "查看/编辑" : "查看"}
                   </Link>
+                  {scope === "shared" ? (
+                    <>
+                      <button className="btn" disabled={busy} onClick={() => void toggleFavorite(item)}>
+                        {busy ? "处理中..." : item.isFavorited ? "取消收藏" : "收藏"}
+                      </button>
+                      <button className="btn" disabled={busy} onClick={() => void forkOne(item)}>
+                        {busy ? "处理中..." : "Fork"}
+                      </button>
+                    </>
+                  ) : null}
                   {scope === "mine" ? (
                     <>
                       <button className="btn" disabled={busy} onClick={() => void toggleShare(item.id)}>

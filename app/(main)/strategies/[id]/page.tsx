@@ -12,6 +12,10 @@ type StrategyDetail = {
   name: string;
   description: string | null;
   isShared: boolean;
+  forkedFromStrategyId?: string | null;
+  isFavorited?: boolean;
+  favoriteCount?: number;
+  forkCount?: number;
   canEdit: boolean;
   roles: Array<{
     id: string;
@@ -58,6 +62,9 @@ export default function StrategyDetailPage() {
   const [activeRoleIndex, setActiveRoleIndex] = useState<number>(0);
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isDuplicatingRole, setIsDuplicatingRole] = useState(false);
+  const [isFavoriting, setIsFavoriting] = useState(false);
+  const [isForking, setIsForking] = useState(false);
 
   async function load() {
     if (!id) return;
@@ -86,6 +93,49 @@ export default function StrategyDetailPage() {
   useEffect(() => {
     void load();
   }, [id]);
+
+  async function toggleFavorite() {
+    if (!detail || detail.canEdit) return;
+    if (isFavoriting) return;
+    setIsFavoriting(true);
+    try {
+      const response = await fetch(`/api/strategies/${detail.id}/favorite`, {
+        method: detail.isFavorited ? "DELETE" : "POST"
+      });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "操作失败");
+        return;
+      }
+      showToast("success", detail.isFavorited ? "已取消收藏" : "已收藏");
+      await load();
+    } finally {
+      setIsFavoriting(false);
+    }
+  }
+
+  async function forkOne() {
+    if (!detail || detail.canEdit) return;
+    if (isForking) return;
+    setIsForking(true);
+    try {
+      const response = await fetch(`/api/strategies/${detail.id}/fork`, { method: "POST" });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "Fork 失败");
+        return;
+      }
+      showToast("success", "已 Fork 到我的策略");
+      const newId = payload.data?.id as string | undefined;
+      if (newId) {
+        router.push(`/strategies/${newId}`);
+      } else {
+        router.push("/strategies");
+      }
+    } finally {
+      setIsForking(false);
+    }
+  }
 
   const canSave = useMemo(() => {
     if (!detail?.canEdit) return false;
@@ -131,6 +181,45 @@ export default function StrategyDetailPage() {
       next[nextIndex] = temp;
       return next;
     });
+  }
+
+  async function duplicateActiveRole() {
+    if (!detail?.canEdit || !id) return;
+    const role = roles[activeRoleIndex] ?? null;
+    if (!role) return;
+
+    if (!role.id) {
+      setRoles((current) => {
+        const source = current[activeRoleIndex];
+        if (!source) return current;
+        const copy = {
+          id: "",
+          name: `${source.name || `角色 ${activeRoleIndex + 1}`} (copy)`,
+          systemPrompt: source.systemPrompt ?? ""
+        };
+        const next = [...current.slice(0, activeRoleIndex + 1), copy, ...current.slice(activeRoleIndex + 1)];
+        setActiveRoleIndex(activeRoleIndex + 1);
+        return next;
+      });
+      return;
+    }
+
+    if (isDuplicatingRole) return;
+    setIsDuplicatingRole(true);
+    try {
+      const response = await fetch(`/api/strategies/${id}/roles/${role.id}/duplicate`, { method: "POST" });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "复制失败");
+        return;
+      }
+      const nextIndex = roles.length;
+      await load();
+      setActiveRoleIndex(nextIndex);
+      showToast("success", "已复制角色");
+    } finally {
+      setIsDuplicatingRole(false);
+    }
   }
 
   async function save() {
@@ -210,6 +299,16 @@ export default function StrategyDetailPage() {
             <Link className="btn btn-primary" href={`/debates/new?strategyId=${detail.id}`}>
               使用策略
             </Link>
+            {!detail.canEdit ? (
+              <>
+                <button className="btn" disabled={isFavoriting} onClick={() => void toggleFavorite()}>
+                  {isFavoriting ? "处理中..." : detail.isFavorited ? "取消收藏" : "收藏"}
+                </button>
+                <button className="btn" disabled={isForking} onClick={() => void forkOne()}>
+                  {isForking ? "Fork 中..." : "Fork"}
+                </button>
+              </>
+            ) : null}
             <Link className="btn" href="/strategies">
               返回
             </Link>
@@ -250,7 +349,7 @@ export default function StrategyDetailPage() {
         </div>
       </section>
 
-      <div className="grid grid-3" style={{ gap: 16, alignItems: "start" }}>
+      <div className="grid" style={{ gap: 16, alignItems: "start" }}>
         <section className="panel stack">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <strong>角色（{roles.length}）</strong>
@@ -284,6 +383,9 @@ export default function StrategyDetailPage() {
                     <button className="btn" disabled={activeRoleIndex === roles.length - 1} onClick={() => moveRole(activeRoleIndex, 1)}>
                       下移
                     </button>
+                    <button className="btn" disabled={isDuplicatingRole} onClick={() => void duplicateActiveRole()}>
+                      {isDuplicatingRole ? "复制中..." : "复制"}
+                    </button>
                     <button className="btn btn-danger" disabled={roles.length <= 2} onClick={() => removeRole(activeRoleIndex)}>
                       删除
                     </button>
@@ -308,22 +410,24 @@ export default function StrategyDetailPage() {
           )}
         </section>
 
-        {activeRole?.id ? (
-          <RoleFilesManagerColumns
-            strategyId={detail.id}
-            roleId={activeRole.id}
-            readOnly={!detail.canEdit}
-          />
-        ) : (
-          <>
-            <section className="panel stack">
-              <div className="muted">新角色需先保存后才能编辑文件。</div>
-            </section>
-            <section className="panel stack">
-              <div className="muted">新角色需先保存后才能编辑文件。</div>
-            </section>
-          </>
+        <div className="grid grid-2" style={{ gap: 16, alignItems: "start" }}>
+          {activeRole?.id ? (
+            <RoleFilesManagerColumns
+              strategyId={detail.id}
+              roleId={activeRole.id}
+              readOnly={!detail.canEdit}
+            />
+          ) : (
+            <>
+              <section className="panel stack">
+                <div className="muted">新角色需先保存后才能编辑文件。</div>
+              </section>
+              <section className="panel stack">
+                <div className="muted">新角色需先保存后才能编辑文件。</div>
+              </section>
+            </>
           )}
+        </div>
       </div>
     </div>
   );

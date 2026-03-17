@@ -17,6 +17,7 @@ type StrategyRow = {
   name: string;
   description: string | null;
   is_shared: boolean;
+  forked_from_strategy_id?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -38,6 +39,7 @@ function normalizeStrategyRow(row: Record<string, unknown>) {
     name: String(row.name),
     description: (row.description as string | null) ?? null,
     isShared: Boolean(row.is_shared),
+    forkedFromStrategyId: (row.forked_from_strategy_id as string | null | undefined) ?? null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
@@ -63,6 +65,14 @@ function isMissingTableError(error: unknown, table: string) {
   return message.toLowerCase().includes(table.toLowerCase());
 }
 
+function isMissingColumnError(error: unknown, column: string) {
+  if (typeof error !== "object" || error === null) return false;
+  const anyError = error as { code?: unknown; message?: unknown };
+  if (anyError.code !== "42703") return false;
+  const message = typeof anyError.message === "string" ? anyError.message : "";
+  return message.toLowerCase().includes(column.toLowerCase());
+}
+
 async function requireSessionUser() {
   const session = await readSession();
   if (!session) {
@@ -77,6 +87,7 @@ function toListItem(row: ReturnType<typeof normalizeStrategyRow>, roleCount: num
     name: row.name,
     description: row.description,
     isShared: row.isShared,
+    forkedFromStrategyId: row.forkedFromStrategyId,
     roleCount,
     updatedAt: row.updatedAt,
     createdAt: row.createdAt
@@ -88,24 +99,73 @@ export async function listStrategies(scope: "mine" | "shared") {
 
   try {
     if (scope === "shared") {
-      const result = await query<Record<string, unknown>>(
-        `
-          select s.*,
-                 coalesce(r.role_count, 0)::int as role_count
-            from strategies s
-            left join (
-              select strategy_id, count(1)::int as role_count
-                from strategy_roles
-               group by strategy_id
-            ) r on r.strategy_id = s.id
-           where s.is_shared = true
-           order by s.updated_at desc
-           limit 200
-        `
-      );
-      return result.rows.map((row) =>
-        toListItem(normalizeStrategyRow(row), Number(row.role_count ?? 0))
-      );
+      try {
+        const result = await query<Record<string, unknown>>(
+          `
+            select s.*,
+                   coalesce(r.role_count, 0)::int as role_count,
+                   coalesce(f.favorite_count, 0)::int as favorite_count,
+                   coalesce(k.fork_count, 0)::int as fork_count,
+                   exists(
+                     select 1
+                       from strategy_favorites sf
+                      where sf.strategy_id = s.id and sf.user_id = $1
+                   ) as is_favorited
+              from strategies s
+              left join (
+                select strategy_id, count(1)::int as role_count
+                  from strategy_roles
+                 group by strategy_id
+              ) r on r.strategy_id = s.id
+              left join (
+                select strategy_id, count(1)::int as favorite_count
+                  from strategy_favorites
+                 group by strategy_id
+              ) f on f.strategy_id = s.id
+              left join (
+                select forked_from_strategy_id as strategy_id, count(1)::int as fork_count
+                  from strategies
+                 where forked_from_strategy_id is not null
+                 group by forked_from_strategy_id
+              ) k on k.strategy_id = s.id
+             where s.is_shared = true
+             order by s.updated_at desc
+             limit 200
+          `,
+          [session.userId]
+        );
+        return result.rows.map((row) => ({
+          ...toListItem(normalizeStrategyRow(row), Number(row.role_count ?? 0)),
+          isFavorited: Boolean(row.is_favorited),
+          favoriteCount: Number(row.favorite_count ?? 0),
+          forkCount: Number(row.fork_count ?? 0)
+        }));
+      } catch (error) {
+        if (
+          isMissingTableError(error, "strategy_favorites") ||
+          isMissingColumnError(error, "forked_from_strategy_id")
+        ) {
+          const result = await query<Record<string, unknown>>(
+            `
+              select s.*,
+                     coalesce(r.role_count, 0)::int as role_count
+                from strategies s
+                left join (
+                  select strategy_id, count(1)::int as role_count
+                    from strategy_roles
+                   group by strategy_id
+                ) r on r.strategy_id = s.id
+               where s.is_shared = true
+               order by s.updated_at desc
+               limit 200
+            `
+          );
+          return result.rows.map((row) =>
+            toListItem(normalizeStrategyRow(row), Number(row.role_count ?? 0))
+          );
+        }
+        throw error;
+      }
     }
 
     const result = await query<Record<string, unknown>>(
@@ -128,7 +188,10 @@ export async function listStrategies(scope: "mine" | "shared") {
       toListItem(normalizeStrategyRow(row), Number(row.role_count ?? 0))
     );
   } catch (error) {
-    if (isMissingTableError(error, "strategies") || isMissingTableError(error, "strategy_roles")) {
+    if (
+      isMissingTableError(error, "strategies") ||
+      isMissingTableError(error, "strategy_roles")
+    ) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
     throw error;
@@ -159,6 +222,43 @@ export async function getStrategyDetail(id: string) {
   const { strategy, canEdit } = await getStrategyRowById(id);
 
   try {
+    let favoriteCount = 0;
+    let forkCount = 0;
+    let isFavorited = false;
+    if (strategy.isShared) {
+      const session = await requireSessionUser();
+      try {
+        const [favoriteCountRes, isFavRes, forkCountRes] = await Promise.all([
+          query<{ count: number }>(
+            "select count(1)::int as count from strategy_favorites where strategy_id = $1",
+            [strategy.id]
+          ),
+          query<{ ok: boolean }>(
+            "select exists(select 1 from strategy_favorites where strategy_id = $1 and user_id = $2) as ok",
+            [strategy.id, session.userId]
+          ),
+          query<{ count: number }>(
+            "select count(1)::int as count from strategies where forked_from_strategy_id = $1",
+            [strategy.id]
+          )
+        ]);
+        favoriteCount = favoriteCountRes.rows[0]?.count ?? 0;
+        isFavorited = Boolean(isFavRes.rows[0]?.ok);
+        forkCount = forkCountRes.rows[0]?.count ?? 0;
+      } catch (error) {
+        if (
+          isMissingTableError(error, "strategy_favorites") ||
+          isMissingColumnError(error, "forked_from_strategy_id")
+        ) {
+          favoriteCount = 0;
+          isFavorited = false;
+          forkCount = 0;
+        } else {
+          throw error;
+        }
+      }
+    }
+
     const roleRows = await query<Record<string, unknown>>(
       "select * from strategy_roles where strategy_id = $1 order by role_order asc",
       [strategy.id]
@@ -203,6 +303,9 @@ export async function getStrategyDetail(id: string) {
     return {
       ...strategy,
       canEdit,
+      isFavorited,
+      favoriteCount,
+      forkCount,
       roles: roles.map((role) => ({
         id: role.id,
         name: role.name,
@@ -219,6 +322,133 @@ export async function getStrategyDetail(id: string) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
     throw error;
+  }
+}
+
+export async function favoriteStrategy(id: string) {
+  const session = await requireSessionUser();
+  try {
+    const visible = await query<{ id: string }>(
+      "select id from strategies where id = $1 and is_shared = true",
+      [id]
+    );
+    if ((visible.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "Strategy not found");
+    }
+    await query(
+      `insert into strategy_favorites (user_id, strategy_id, created_at)
+       values ($1,$2,now())
+       on conflict (user_id, strategy_id) do nothing`,
+      [session.userId, id]
+    );
+    return { id, isFavorited: true };
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_favorites")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategy_favorites table");
+    }
+    throw error;
+  }
+}
+
+export async function unfavoriteStrategy(id: string) {
+  const session = await requireSessionUser();
+  try {
+    await query("delete from strategy_favorites where user_id = $1 and strategy_id = $2", [
+      session.userId,
+      id
+    ]);
+    return { id, isFavorited: false };
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_favorites")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategy_favorites table");
+    }
+    throw error;
+  }
+}
+
+export async function forkStrategy(id: string) {
+  const session = await requireSessionUser();
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+
+    const sourceRes = await client.query<StrategyRow>(
+      "select * from strategies where id = $1 and is_shared = true",
+      [id]
+    );
+    if ((sourceRes.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "Strategy not found");
+    }
+    const source = normalizeStrategyRow(sourceRes.rows[0] as unknown as Record<string, unknown>);
+
+    const now = new Date().toISOString();
+    const forkId = randomUUID();
+    const forkName = `${source.name}（Fork）`;
+    await client.query(
+      `insert into strategies (id, owner_user_id, name, description, is_shared, forked_from_strategy_id, created_at, updated_at)
+       values ($1,$2,$3,$4,false,$5,$6,$6)`,
+      [forkId, session.userId, forkName, source.description, source.id, now]
+    );
+
+    const rolesRes = await client.query<StrategyRoleRow>(
+      "select * from strategy_roles where strategy_id = $1 order by role_order asc",
+      [source.id]
+    );
+
+    const roleIdMap = new Map<string, string>();
+    for (const role of rolesRes.rows) {
+      const newRoleId = randomUUID();
+      roleIdMap.set(role.id, newRoleId);
+      await client.query(
+        `insert into strategy_roles (id, strategy_id, name, system_prompt, role_order, created_at, updated_at)
+         values ($1,$2,$3,$4,$5,$6,$6)`,
+        [newRoleId, forkId, role.name, role.system_prompt, role.role_order, now]
+      );
+    }
+
+    const sourceRoleIds = rolesRes.rows.map((r) => r.id);
+    if (sourceRoleIds.length > 0) {
+      const filesRes = await client.query<{ strategy_role_id: string; path: string; content: string }>(
+        "select strategy_role_id, path, content from strategy_role_files where strategy_role_id = any($1::uuid[]) order by strategy_role_id asc, path asc",
+        [sourceRoleIds]
+      );
+      for (const file of filesRes.rows) {
+        const newRoleId = roleIdMap.get(file.strategy_role_id);
+        if (!newRoleId) continue;
+        await client.query(
+          `insert into strategy_role_files (id, strategy_role_id, path, content, created_at, updated_at)
+           values ($1,$2,$3,$4,$5,$5)`,
+          [randomUUID(), newRoleId, file.path, file.content ?? "", now]
+        );
+      }
+    }
+
+    await client.query("commit");
+    return { id: forkId };
+  } catch (error) {
+    try {
+      await client.query("rollback");
+    } catch {
+    }
+    if (
+      error instanceof AppError ||
+      isMissingTableError(error, "strategies") ||
+      isMissingTableError(error, "strategy_roles") ||
+      isMissingTableError(error, "strategy_role_files") ||
+      isMissingColumnError(error, "forked_from_strategy_id")
+    ) {
+      if (isMissingColumnError(error, "forked_from_strategy_id")) {
+        throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies.forked_from_strategy_id column");
+      }
+      if (isMissingTableError(error, "strategies") || isMissingTableError(error, "strategy_roles")) {
+        throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+      }
+      throw error;
+    }
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
@@ -410,6 +640,73 @@ export async function deleteStrategy(id: string) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
     throw error;
+  }
+}
+
+export async function duplicateStrategyRole(strategyId: string, roleId: string) {
+  const session = await requireSessionUser();
+  const client = await getTransactionClient();
+  const now = new Date().toISOString();
+
+  try {
+    await client.query("begin");
+
+    const strategyResult = await client.query<{ id: string }>(
+      "select id from strategies where id = $1 and owner_user_id = $2",
+      [strategyId, session.userId]
+    );
+    if ((strategyResult.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "Strategy not found");
+    }
+
+    const roleResult = await client.query<{ name: string; system_prompt: string | null }>(
+      "select name, system_prompt from strategy_roles where id = $1 and strategy_id = $2",
+      [roleId, strategyId]
+    );
+    if ((roleResult.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "Strategy role not found");
+    }
+
+    const nextOrderResult = await client.query<{ next: number }>(
+      "select (coalesce(max(role_order), 0) + 1)::int as next from strategy_roles where strategy_id = $1",
+      [strategyId]
+    );
+    const nextOrder = nextOrderResult.rows[0]?.next ?? 1;
+
+    const newRoleId = randomUUID();
+    const newName = `${roleResult.rows[0].name} (copy)`;
+
+    await client.query(
+      `insert into strategy_roles (id, strategy_id, name, system_prompt, role_order, created_at, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$6)`,
+      [newRoleId, strategyId, newName, roleResult.rows[0].system_prompt ?? null, nextOrder, now]
+    );
+
+    await client.query(
+      `
+        insert into strategy_role_files (id, strategy_role_id, path, content, created_at, updated_at)
+        select gen_random_uuid(), $2, path, content, $3, $3
+          from strategy_role_files
+         where strategy_role_id = $1
+         order by path asc
+      `,
+      [roleId, newRoleId, now]
+    );
+
+    await client.query("commit");
+    return { id: newRoleId, name: newName, roleOrder: nextOrder };
+  } catch (error) {
+    await safeRollback(client);
+    if (
+      isMissingTableError(error, "strategies") ||
+      isMissingTableError(error, "strategy_roles") ||
+      isMissingTableError(error, "strategy_role_files")
+    ) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  } finally {
+    client.release();
   }
 }
 

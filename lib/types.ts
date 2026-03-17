@@ -26,10 +26,10 @@ export type AgentRecord = {
   name: string;
   provider: Provider;
   model: string;
+  contextLength: number | null;
   baseUrl: string;
   apiKeyEncrypted: string;
   apiKeyMasked: string;
-  systemPrompt: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -42,9 +42,9 @@ export type DebateRecord = {
   status: DebateStatus;
   maxTurns: number;
   currentTurn: number;
-  tokenBudget: number | null;
   tokenUsed: number;
   enableSharedFacts: boolean;
+  isShared: boolean;
   consensusReached: boolean;
   consensusSummary: {
     leadingSolution: string;

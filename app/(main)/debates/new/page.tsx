@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 
@@ -31,10 +31,17 @@ type StrategyDetail = {
   }>;
 };
 
+type BindingRow = {
+  rowId: string;
+  roleId: string;
+  enabled: boolean;
+  agentId: string;
+};
+
 const initialForm = {
   question: "",
   maxTurns: 10,
-  tokenBudget: 20000,
+  unlimitedTurns: false,
   enableSharedFacts: true
 };
 
@@ -44,14 +51,18 @@ export default function NewDebatePage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
   const [form, setForm] = useState(initialForm);
+  const [questionZoomOpen, setQuestionZoomOpen] = useState(false);
   const { toast, showToast } = useAutoDismissToast(1200);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [strategies, setStrategies] = useState<StrategyListItem[]>([]);
   const [strategyId, setStrategyId] = useState<string>("");
   const [strategyDetail, setStrategyDetail] = useState<StrategyDetail | null>(null);
-  const [roleBindings, setRoleBindings] = useState<
-    Record<string, { enabled: boolean; agentId: string }>
-  >({});
+  const [bindingRows, setBindingRows] = useState<BindingRow[]>([]);
+
+  function newRowId() {
+    if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+    return `row_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  }
 
   async function loadAgents() {
     const response = await fetch("/api/agents");
@@ -75,7 +86,7 @@ export default function NewDebatePage() {
   async function loadStrategyDetail(id: string) {
     if (!id) {
       setStrategyDetail(null);
-      setRoleBindings({});
+      setBindingRows([]);
       return;
     }
 
@@ -84,17 +95,24 @@ export default function NewDebatePage() {
     if (!response.ok) {
       showToast("error", payload.error?.message ?? "加载策略失败");
       setStrategyDetail(null);
-      setRoleBindings({});
       return;
     }
 
     const detail = payload.data as StrategyDetail;
     setStrategyDetail(detail);
-    const bindings: Record<string, { enabled: boolean; agentId: string }> = {};
-    for (const role of detail.roles ?? []) {
-      bindings[role.id] = { enabled: true, agentId: "" };
-    }
-    setRoleBindings(bindings);
+    setBindingRows((current) => {
+      const roleIdSet = new Set((detail.roles ?? []).map((r) => r.id));
+      const kept = current.filter((row) => roleIdSet.has(row.roleId));
+      const existingCounts = new Map<string, number>();
+      for (const row of kept) existingCounts.set(row.roleId, (existingCounts.get(row.roleId) ?? 0) + 1);
+
+      const next: BindingRow[] = [...kept];
+      for (const role of detail.roles ?? []) {
+        if ((existingCounts.get(role.id) ?? 0) > 0) continue;
+        next.push({ rowId: role.id, roleId: role.id, enabled: true, agentId: "" });
+      }
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -116,27 +134,26 @@ export default function NewDebatePage() {
     );
   }
 
-  const enabledRoleIds = Object.entries(roleBindings)
-    .filter(([, value]) => value.enabled)
-    .map(([roleId]) => roleId);
+  const rolesById = useMemo(() => {
+    const map = new Map<string, StrategyDetail["roles"][number]>();
+    for (const role of strategyDetail?.roles ?? []) map.set(role.id, role);
+    return map;
+  }, [strategyDetail]);
 
-  const enabledBindings = enabledRoleIds
-    .map((roleId) => ({ roleId, agentId: roleBindings[roleId]?.agentId ?? "" }))
-    .filter((binding) => binding.agentId);
-
+  const enabledRows = bindingRows.filter((row) => row.enabled);
+  const enabledBindings = enabledRows.filter((row) => row.agentId.trim().length > 0);
   const hasDuplicateStrategyAgentIds = (() => {
-    const ids = enabledBindings.map((binding) => binding.agentId);
+    const ids = enabledRows.map((row) => row.agentId).filter(Boolean);
     return new Set(ids).size !== ids.length;
   })();
 
   const canSubmit =
     form.question.trim().length >= 10 &&
-    Number.isFinite(form.maxTurns) &&
-    form.maxTurns >= 1 &&
+    (form.unlimitedTurns ||
+      (Number.isFinite(form.maxTurns) && form.maxTurns >= 1 && form.maxTurns <= 50)) &&
     (strategyId
-      ? enabledRoleIds.length >= 2 &&
-        enabledBindings.length === enabledRoleIds.length &&
-        !hasDuplicateStrategyAgentIds
+      ? enabledRows.length >= 2 &&
+        enabledBindings.length === enabledRows.length
       : selectedAgentIds.length >= 2) &&
     !isSubmitting;
 
@@ -144,27 +161,26 @@ export default function NewDebatePage() {
     if (!canSubmit) return;
     setIsSubmitting(true);
     try {
-      const response = await fetch("/api/debates", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question: form.question,
-          maxTurns: form.maxTurns,
-          tokenBudget: form.tokenBudget,
-          enableSharedFacts: form.enableSharedFacts,
-          ...(strategyId
-            ? {
-                strategy: {
-                  strategyId,
-                  bindings: enabledRoleIds.map((roleId) => ({
-                    roleId,
-                    agentId: roleBindings[roleId]?.agentId ?? ""
-                  }))
+        const response = await fetch("/api/debates", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            question: form.question,
+            maxTurns: form.unlimitedTurns ? 0 : form.maxTurns,
+            enableSharedFacts: form.enableSharedFacts,
+            ...(strategyId
+              ? {
+                  strategy: {
+                    strategyId,
+                    bindings: enabledRows.map((row) => ({
+                      roleId: row.roleId,
+                      agentId: row.agentId
+                    }))
+                  }
                 }
-              }
-            : { agentIds: selectedAgentIds })
-        })
-      });
+              : { agentIds: selectedAgentIds })
+          })
+        });
       const payload = await response.json();
       if (!response.ok) {
         showToast("error", payload.error?.message ?? "创建失败");
@@ -187,6 +203,47 @@ export default function NewDebatePage() {
           aria-live="polite"
         >
           {toast.text}
+        </div>
+      ) : null}
+      {questionZoomOpen ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setQuestionZoomOpen(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "center",
+            padding: 24,
+            zIndex: 1000
+          }}
+        >
+          <div
+            className="panel stack"
+            onClick={(event) => event.stopPropagation()}
+            style={{ width: "min(980px, 100%)" }}
+          >
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <strong>放大编辑问题</strong>
+              <button className="btn" type="button" onClick={() => setQuestionZoomOpen(false)}>
+                关闭
+              </button>
+            </div>
+            <textarea
+              value={form.question}
+              onChange={(event) => setForm({ ...form, question: event.target.value })}
+              placeholder="请输入辩论问题（至少 10 个字）"
+              maxLength={50_000}
+              style={{ height: "60vh", resize: "none", overflowY: "auto" }}
+              autoFocus
+            />
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <span className="muted">{form.question.length.toLocaleString()}/50,000</span>
+            </div>
+          </div>
         </div>
       ) : null}
 
@@ -216,7 +273,6 @@ export default function NewDebatePage() {
                 const next = event.target.value;
                 setStrategyId(next);
                 setStrategyDetail(null);
-                setRoleBindings({});
                 setSelectedAgentIds([]);
                 void loadStrategyDetail(next);
               }}
@@ -236,35 +292,57 @@ export default function NewDebatePage() {
         </div>
 
         <div className="field">
-          <label>问题</label>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <label>问题</label>
+            <button className="btn" type="button" onClick={() => setQuestionZoomOpen(true)}>
+              放大
+            </button>
+          </div>
           <textarea
             value={form.question}
             onChange={(event) => setForm({ ...form, question: event.target.value })}
             placeholder="请输入辩论问题（至少 10 个字）"
+            maxLength={50_000}
+            rows={7}
+            style={{ height: 180, maxHeight: 180, overflowY: "auto", resize: "none" }}
           />
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="muted">支持长文本，输入框会固定高度并滚动</span>
+            <span className="muted">
+              {form.question.length.toLocaleString()}/50,000
+            </span>
+          </div>
         </div>
         <div className="row">
           <div className="field" style={{ flex: 1 }}>
-            <label>最大轮数</label>
+            <label>最大轮数（每轮=所有参与者各发言一次）</label>
             <input
               type="number"
               value={form.maxTurns}
+              disabled={form.unlimitedTurns}
+              min={0}
+              max={50}
               onChange={(event) =>
                 setForm({ ...form, maxTurns: Number(event.target.value) })
               }
             />
           </div>
-          <div className="field" style={{ flex: 1 }}>
-            <label>Token 预算（可选）</label>
-            <input
-              type="number"
-              value={form.tokenBudget}
-              onChange={(event) =>
-                setForm({ ...form, tokenBudget: Number(event.target.value) })
-              }
-            />
-          </div>
         </div>
+
+        <label className="row" style={{ alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={form.unlimitedTurns}
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                unlimitedTurns: event.target.checked,
+                maxTurns: event.target.checked ? 0 : Math.max(1, current.maxTurns || 10)
+              }))
+            }
+          />
+          <span>无限轮次（直到达成共识或手动终止）</span>
+        </label>
 
         <label className="row" style={{ alignItems: "center", gap: 8 }}>
           <input
@@ -276,70 +354,94 @@ export default function NewDebatePage() {
         </label>
 
         {strategyId && strategyDetail ? (
-          <div className="stack">
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <label style={{ fontWeight: 600 }}>
-                策略角色映射（已选 {enabledRoleIds.length}）
-              </label>
-              <span className="muted">至少选择 2 个角色；同一个 AI 配置不能重复绑定</span>
-            </div>
-            {strategyDetail.roles
-              .slice()
-              .sort((a, b) => a.roleOrder - b.roleOrder)
-              .map((role) => {
-                const binding = roleBindings[role.id] ?? { enabled: true, agentId: "" };
-                const usedByOther = new Set(
-                  Object.entries(roleBindings)
-                    .filter(([rid, value]) => rid !== role.id && value.enabled && value.agentId)
-                    .map(([, value]) => value.agentId)
-                );
+            <div className="stack">
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <label style={{ fontWeight: 600 }}>
+                  策略角色映射（已选 {enabledRows.length}）
+                </label>
+                <span className="muted">
+                  至少选择 2 个角色；同一个 AI 配置可以重复绑定（会作为多个席位发言）
+                  {hasDuplicateStrategyAgentIds ? " · 当前存在重复绑定" : ""}
+                </span>
+              </div>
+            {bindingRows.map((row) => {
+              const role = rolesById.get(row.roleId);
+              if (!role) return null;
 
-                return (
-                  <div key={role.id} className="panel stack">
-                    <div className="row" style={{ justifyContent: "space-between" }}>
-                      <label className="row">
-                        <input
-                          type="checkbox"
-                          checked={binding.enabled}
-                          onChange={(event) =>
-                            setRoleBindings((current) => ({
-                              ...current,
-                              [role.id]: { ...binding, enabled: event.target.checked }
-                            }))
-                          }
-                        />
-                        <strong>{role.name}</strong>
-                      </label>
+              return (
+                <div key={row.rowId} className="panel stack">
+                  <div className="row" style={{ justifyContent: "space-between" }}>
+                    <label className="row">
+                      <input
+                        type="checkbox"
+                        checked={row.enabled}
+                        onChange={(event) =>
+                          setBindingRows((current) =>
+                            current.map((item) =>
+                              item.rowId === row.rowId ? { ...item, enabled: event.target.checked } : item
+                            )
+                          )
+                        }
+                      />
+                      <strong>{role.name}</strong>
+                    </label>
+                    <div className="row" style={{ gap: 8 }}>
+                      <button
+                        className="btn"
+                        type="button"
+                        onClick={() =>
+                          setBindingRows((current) => {
+                            const index = current.findIndex((x) => x.rowId === row.rowId);
+                            const copy: BindingRow = {
+                              rowId: newRowId(),
+                              roleId: row.roleId,
+                              enabled: true,
+                              agentId: ""
+                            };
+                            if (index < 0) return [...current, copy];
+                            return [...current.slice(0, index + 1), copy, ...current.slice(index + 1)];
+                          })
+                        }
+                      >
+                        复制
+                      </button>
+                      <button
+                        className="btn btn-muted"
+                        type="button"
+                        onClick={() =>
+                          setBindingRows((current) => current.filter((item) => item.rowId !== row.rowId))
+                        }
+                      >
+                        删除
+                      </button>
                       <span className="muted">#{role.roleOrder}</span>
                     </div>
-
-                    <div className="row">
-                      <select
-                        value={binding.agentId}
-                        disabled={!binding.enabled}
-                        onChange={(event) =>
-                          setRoleBindings((current) => ({
-                            ...current,
-                            [role.id]: { ...binding, agentId: event.target.value }
-                          }))
-                        }
-                        style={{ flex: 1 }}
-                      >
-                        <option value="">选择一个 AI 配置</option>
-                        {agents.map((agent) => (
-                          <option
-                            key={agent.id}
-                            value={agent.id}
-                            disabled={usedByOther.has(agent.id)}
-                          >
-                            {agent.name} · {agent.provider} · {agent.model}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
                   </div>
-                );
-              })}
+
+                  <div className="row">
+                    <select
+                      value={row.agentId}
+                      disabled={!row.enabled}
+                      onChange={(event) =>
+                        setBindingRows((current) =>
+                          current.map((item) =>
+                            item.rowId === row.rowId ? { ...item, agentId: event.target.value } : item
+                          )
+                        )
+                      }
+                      style={{ flex: 1 }}
+                    >
+                      <option value="">选择一个 AI 配置</option>
+                      {agents.map((agent) => (
+                        <option key={agent.id} value={agent.id}>
+                          {agent.name} · {agent.provider} · {agent.model}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              );
+            })}
             {agents.length === 0 ? (
               <div className="muted">
                 还没有 AI 配置。先去 <Link href="/agents">AI 配置</Link> 创建。
