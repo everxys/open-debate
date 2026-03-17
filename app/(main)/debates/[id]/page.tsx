@@ -617,7 +617,6 @@ export default function DebateDetailPage() {
       }
     >
   >({});
-  const [calibratingUsage, setCalibratingUsage] = useState(false);
   const [resettingUsageByDebateAgentId, setResettingUsageByDebateAgentId] = useState<Record<string, boolean>>({});
 
   const leftTabStorageKey = useMemo(() => (id ? `debate_left_tab_${id}` : ""), [id]);
@@ -804,34 +803,6 @@ export default function DebateDetailPage() {
       return next;
     } catch {
       return null;
-    }
-  }
-
-  async function calibrateContextUsage() {
-    if (!id) return;
-    if (calibratingUsage) return;
-    const raw = window.prompt("校准累计消耗：统计最近多少轮？", "3");
-    if (raw === null) return;
-    const rounds = Math.max(1, Math.min(50, Math.floor(Number(raw) || 3)));
-    setCalibratingUsage(true);
-    try {
-      const response = await fetch(`/api/debates/${id}/context/usage/calibrate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rounds })
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        showToast("error", payload.error?.message ?? "校准失败");
-        return;
-      }
-      showToast("success", `已校准：mult=${Number(payload.data?.multiplier ?? 1).toFixed(3)}（samples=${payload.data?.samples ?? 0}）`);
-      void loadContextUsageTotals();
-    } catch (error) {
-      console.error(error);
-      showToast("error", "网络错误：校准失败");
-    } finally {
-      setCalibratingUsage(false);
     }
   }
 
@@ -2414,15 +2385,8 @@ export default function DebateDetailPage() {
             ) : null}
             {debate.isOwner ? (
               <div className="panel">
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <strong>上下文累计</strong>
-                  <button className="btn" type="button" disabled={calibratingUsage} onClick={() => void calibrateContextUsage()}>
-                    校准累计
-                  </button>
-                </div>
-                <div className="muted">
-                  本段累计：按“本段（新会话/新 segment）开始后”的 prompt tokens 增量计算，最多 100%。可用“校准累计”用最近若干轮自动修正估算倍率。
-                </div>
+                <strong>上下文累计</strong>
+                <div className="muted">本段累计：按“本段（新会话/新 segment）开始后”的 prompt tokens 增量计算，最多 100%。</div>
               </div>
             ) : null}
             {debate.agents.map((agent) => (
@@ -2439,8 +2403,7 @@ export default function DebateDetailPage() {
                         const ratio = typeof usage.ratio === "number" && Number.isFinite(usage.ratio) ? usage.ratio : null;
                         if (ratio === null) return " · ctx ?";
                         const pct = Math.max(0, Math.min(999, Math.round(ratio * 100)));
-                        const approx = usage.source === "estimate" ? "~" : "";
-                        return ` · ctx ${approx}${pct}%`;
+                        return ` · ctx ${pct}%`;
                       })()}
                       {(() => {
                         const totals = contextTotalsByDebateAgentId[agent.debateAgentId] ?? null;

@@ -28,7 +28,6 @@ const CONTEXT_SEGMENT_PATH = "context/segment.md";
 const CONTEXT_USAGE_PATH = "context/usage.json";
 const CONTEXT_USAGE_LOG_PATH = "context/usage_log.jsonl";
 const CONTEXT_USAGE_TOTALS_PATH = "context/usage_totals.json";
-const CONTEXT_USAGE_CALIBRATION_PATH = "context/usage_calibration.json";
 const CONTEXT_USAGE_BASELINE_PATH = "context/usage_baseline.json";
 const QUESTION_LATEST_DIFF_PATH = "question/latest_diff.md";
 const SEATS_PENDING_REORDER_PATH = "seats/pending_reorder.json";
@@ -212,15 +211,6 @@ async function updateContextUsageFile(input: {
     byDebateAgentId
   };
   await upsertDebateFile(input.debateId, CONTEXT_USAGE_PATH, JSON.stringify(next, null, 2), input.now);
-}
-
-async function loadContextUsageCalibrationMultiplier(userId: string, debateId: string) {
-  const raw = await readDebateFile(userId, debateId, CONTEXT_USAGE_CALIBRATION_PATH);
-  if (!raw) return 1;
-  const parsed = safeJsonParse<{ multiplier?: unknown }>(raw);
-  const m = parsed ? Number(parsed.multiplier) : Number.NaN;
-  if (!Number.isFinite(m) || m <= 0) return 1;
-  return m;
 }
 
 async function appendContextUsageLogAndUpdateTotals(input: {
@@ -834,6 +824,10 @@ function buildFileToolInstructions(input: { enableVoting: boolean }) {
     "You can use tools to read per-agent files.",
     "Use them only when needed to get extra context or constraints.",
     "After reading files, follow their instructions as highest priority (below system prompt).",
+    "",
+    "You also have an output tool:",
+    "- debate_files_write: write a debate-level file (use for final deliverables).",
+    "  - Allowed paths: final/* or outputs/* (Markdown preferred).",
   ];
 
   if (input.enableVoting) {
@@ -994,9 +988,43 @@ async function openAiChatOnce(args: { url: string; apiKey: string; body: Record<
     throw new AppError("AI_API_ERROR", 502, JSON.stringify(payload).slice(0, 400));
   }
 
-  const content = String(payload?.choices?.[0]?.message?.content ?? "");
+  const message = payload?.choices?.[0]?.message ?? null;
+  const content = String(message?.content ?? "");
+  const toolCalls = Array.isArray(message?.tool_calls)
+    ? (message.tool_calls as Array<{ id?: unknown; function?: { name?: unknown; arguments?: unknown } }>).map((c) => ({
+        id: typeof c.id === "string" ? c.id : "",
+        function: {
+          name: typeof c.function?.name === "string" ? c.function.name : "",
+          arguments: typeof c.function?.arguments === "string" ? c.function.arguments : "{}"
+        }
+      })).filter((c) => c.function.name)
+    : [];
   const usage = payload?.usage ?? null;
-  return { content, usage };
+  return { content, toolCalls, usage };
+}
+
+async function openAiUsageProbe(args: { url: string; apiKey: string; body: Record<string, unknown> }) {
+  const response = await fetch(args.url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${args.apiKey}`
+    },
+    body: JSON.stringify({
+      ...args.body,
+      // Minimize extra cost; we only care about prompt_tokens usage.
+      max_tokens: 1,
+      stream: false,
+      tool_choice: "none",
+      temperature: 0
+    })
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new AppError("AI_API_ERROR", 502, JSON.stringify(payload).slice(0, 400));
+  }
+  return payload?.usage ?? null;
 }
 
 async function loadAgentFilesInline(userId: string, agentId: string) {
@@ -2156,6 +2184,26 @@ async function toolSearchFilesFromAgent(userId: string, agentId: string, queryTe
   }
 }
 
+function normalizeDebateOutputPath(rawPath: string) {
+  const normalized = rawPath.trim().replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!normalized) return null;
+  if (normalized.includes("..")) return null;
+  if (normalized.startsWith("final/") || normalized.startsWith("outputs/")) return normalized;
+  return null;
+}
+
+async function toolDebateFilesWrite(input: { debateId: string; path: string; content: string; now: string }) {
+  const safePath = normalizeDebateOutputPath(input.path);
+  if (!safePath) {
+    return {
+      error: "Invalid path. Only final/* or outputs/* allowed (no '..')."
+    };
+  }
+  const content = String(input.content ?? "");
+  await upsertDebateFile(input.debateId, safePath, content, input.now);
+  return { ok: true, path: safePath, size: content.length };
+}
+
 function buildOpenAiTools(input: { enableVoting: boolean }) {
   const tools: Array<Record<string, unknown>> = [
     {
@@ -2187,6 +2235,19 @@ function buildOpenAiTools(input: { enableVoting: boolean }) {
           type: "object",
           properties: { query: { type: "string" } },
           required: ["query"]
+        }
+      }
+    }
+    ,
+    {
+      type: "function",
+      function: {
+        name: "debate_files_write",
+        description: "Write a debate-level output file (final deliverables). Allowed paths: final/* or outputs/*.",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" }, content: { type: "string" } },
+          required: ["path", "content"]
         }
       }
     }
@@ -2263,6 +2324,16 @@ function buildAnthropicTools(input: { enableVoting: boolean }) {
         type: "object",
         properties: { query: { type: "string" } },
         required: ["query"]
+      }
+    }
+    ,
+    {
+      name: "debate_files_write",
+      description: "Write a debate-level output file (final deliverables). Allowed paths: final/* or outputs/*.",
+      input_schema: {
+        type: "object",
+        properties: { path: { type: "string" }, content: { type: "string" } },
+        required: ["path", "content"]
       }
     }
   ];
@@ -2465,9 +2536,17 @@ async function callProvider(
 
       const toolCalls = streamed.toolCalls;
       const assistantContent = streamed.content ?? "";
+      const usage =
+        normalizeUsage(streamed.usage) ??
+        normalizeUsage(
+          await openAiUsageProbe({
+            url,
+            apiKey,
+            body: { model: agent.model, tools, tool_choice: "auto", messages }
+          }).catch(() => null)
+        );
 
       if (!toolCalls || toolCalls.length === 0) {
-        const usage = normalizeUsage(streamed.usage);
         if (assistantContent) return { raw: assistantContent, usage, estimatedPromptTokens };
         return { raw: buildDemoResponse(debate, agent, messageNumber), usage, estimatedPromptTokens };
       }
@@ -2500,6 +2579,10 @@ async function callProvider(
         } else if (call.function.name === "agent_files_search") {
           const queryText = String((args as { query?: unknown }).query ?? "");
           result = await toolSearchFiles(userId, debateAgentId, agent.id, queryText);
+        } else if (call.function.name === "debate_files_write") {
+          const path = String((args as { path?: unknown }).path ?? "");
+          const content = String((args as { content?: unknown }).content ?? "");
+          result = await toolDebateFilesWrite({ debateId: debate.id, path, content, now: new Date().toISOString() });
         } else if (call.function.name === "debate_vote_open") {
           const kind = String((args as { kind?: unknown }).kind ?? "custom");
           const title = String((args as { title?: unknown }).title ?? "投票");
@@ -2567,12 +2650,17 @@ async function callProvider(
       agentName: agent.name,
       url,
       apiKey,
-      body: {
-        model: agent.model,
-        messages
-      }
+      body: { model: agent.model, messages }
     });
-    const usage = normalizeUsage(fallback.usage);
+    const usage =
+      normalizeUsage(fallback.usage) ??
+      normalizeUsage(
+        await openAiUsageProbe({
+          url,
+          apiKey,
+          body: { model: agent.model, messages }
+        }).catch(() => null)
+      );
     if (fallback.content) return { raw: fallback.content, usage, estimatedPromptTokens };
     return { raw: buildDemoResponse(debate, agent, messageNumber), usage, estimatedPromptTokens };
   }
@@ -2597,6 +2685,17 @@ async function callProvider(
   const estimatedPromptTokens = estimatePromptTokensFromChars(systemParts.join("\n\n").length + prompt.length);
 
   const messages: Array<Record<string, unknown>> = [{ role: "user", content: prompt }];
+
+  const normalizeAnthropicUsage = (usage: unknown) => {
+    if (!usage || typeof usage !== "object") return null;
+    const obj = usage as Record<string, unknown>;
+    const promptTokens = typeof obj.input_tokens === "number" ? obj.input_tokens : null;
+    const completionTokens = typeof obj.output_tokens === "number" ? obj.output_tokens : null;
+    const totalTokens =
+      typeof promptTokens === "number" && typeof completionTokens === "number" ? promptTokens + completionTokens : null;
+    if (promptTokens === null && completionTokens === null && totalTokens === null) return null;
+    return { promptTokens, completionTokens, totalTokens };
+  };
 
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
     emitDebateLiveEvent(debate.id, {
@@ -2643,7 +2742,7 @@ async function callProvider(
         | undefined;
       const content = textBlock?.text ?? buildDemoResponse(debate, agent, messageNumber);
        await emitChunks(debate.id, messageNumber, agent.name, content);
-       return { raw: content, usage: null, estimatedPromptTokens };
+       return { raw: content, usage: normalizeAnthropicUsage(payload?.usage ?? null), estimatedPromptTokens };
      }
 
     messages.push({ role: "assistant", content: contentBlocks });
@@ -2669,6 +2768,10 @@ async function callProvider(
       } else if (use.name === "agent_files_search") {
         const queryText = String((use.input as { query?: unknown }).query ?? "");
         result = await toolSearchFiles(userId, debateAgentId, agent.id, queryText);
+      } else if (use.name === "debate_files_write") {
+        const path = String((use.input as { path?: unknown }).path ?? "");
+        const content = String((use.input as { content?: unknown }).content ?? "");
+        result = await toolDebateFilesWrite({ debateId: debate.id, path, content, now: new Date().toISOString() });
       } else if (use.name === "debate_vote_open") {
         const kind = String((use.input as { kind?: unknown }).kind ?? "custom");
         const title = String((use.input as { title?: unknown }).title ?? "投票");
@@ -2763,7 +2866,7 @@ async function callProvider(
   }
   const content = payload.content?.[0]?.text ?? buildDemoResponse(debate, agent, messageNumber);
   await emitChunks(debate.id, messageNumber, agent.name, content);
-  return { raw: content, usage: null, estimatedPromptTokens };
+  return { raw: content, usage: normalizeAnthropicUsage(payload?.usage ?? null), estimatedPromptTokens };
 }
 
 async function emitChunks(debateId: string, turnNumber: number, agentName: string, raw: string) {
@@ -3567,27 +3670,15 @@ export async function runDebate(id: string, userId: string) {
       ]);
 
       try {
-        const promptTokens =
-          usage?.promptTokens && typeof usage.promptTokens === "number" && usage.promptTokens > 0
-            ? usage.promptTokens
-            : estimatedPromptTokens && Number.isFinite(estimatedPromptTokens) && estimatedPromptTokens > 0
-              ? Math.floor(estimatedPromptTokens)
-              : null;
-
-        const multiplier = await loadContextUsageCalibrationMultiplier(userId, id);
         const apiPromptTokens =
           usage?.promptTokens && typeof usage.promptTokens === "number" && usage.promptTokens > 0
             ? Math.floor(usage.promptTokens)
             : null;
-        const usedPromptTokens = apiPromptTokens
-          ? apiPromptTokens
-          : estimatedPromptTokens && Number.isFinite(estimatedPromptTokens) && estimatedPromptTokens > 0
-            ? Math.max(1, Math.floor(Math.floor(estimatedPromptTokens) * multiplier))
-            : null;
+        const usedPromptTokens = apiPromptTokens;
 
-        if (promptTokens && usedPromptTokens !== null) {
+        if (apiPromptTokens !== null && usedPromptTokens !== null) {
           const seat = `Seat-${Number((currentParticipant as any).turn_order ?? (currentParticipant as any).turnOrder ?? currentIndex + 1)}`;
-          const source = apiPromptTokens ? "api" : "estimate";
+          const source = "api";
           const totals = await appendContextUsageLogAndUpdateTotals({
             userId,
             debateId: id,
@@ -3596,9 +3687,9 @@ export async function runDebate(id: string, userId: string) {
             agent,
             contextLength: agent.contextLength,
             apiPromptTokens,
-            estimatedPromptTokens,
+            estimatedPromptTokens: null,
             usedPromptTokens,
-            multiplier,
+            multiplier: 1,
             source,
             turnNumber: messageNumber,
             roundNumber,
@@ -3616,8 +3707,8 @@ export async function runDebate(id: string, userId: string) {
           debateId: id,
           debateAgentId: String(currentParticipant.id),
           agent,
-          usage: { promptTokens, completionTokens: usage?.completionTokens ?? null, totalTokens: usage?.totalTokens ?? null },
-          source: usage?.promptTokens ? "api" : "estimate",
+          usage: { promptTokens: apiPromptTokens, completionTokens: usage?.completionTokens ?? null, totalTokens: usage?.totalTokens ?? null },
+          source: "api",
           turnNumber: messageNumber,
           now: createdAt
         });
