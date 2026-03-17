@@ -9,6 +9,7 @@
 - 辩论文件查看弹窗：当内容被截断时提供“开头/末尾/加载更多”控制；读取接口 `maxChars` 增加 2,000,000 chars 上限，避免误配置导致页面卡死
 - 运行时：新增工具 `debate_files_write`（所有席位可用），允许写入 `final/*` 或 `outputs/*`，用于把最终交付物落盘为辩论文件
 - Token 统计：移除“估算+校准累计”，改为仅在模型返回真实 `usage` 时统计上下文百分比与本段累计；OpenAI 侧保持流式输出，流结束后后台追加一次“usage probe”请求仅取 `usage`（max_tokens=1）用于统计
+- seed：民主集中制策略提示词补充 Skill 说明与硬性交付要求（最终表决通过后必须 `debate_files_write` 到 `final/novel_outline_v2.md`）
 
 ## 2026-03-16
 
