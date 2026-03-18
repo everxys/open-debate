@@ -648,6 +648,24 @@ async function persistSharedFactsAfterTurn(input: {
   const next = appendWithTrim(current, lines.join("\n"));
   await upsertDebateFile(input.debateId, SHARED_FACTS_PATH, next, input.now);
 }
+
+async function persistAnswerAfterTurn(input: {
+  userId: string;
+  debateId: string;
+  turnNumber: number;
+  agentName: string;
+  content: string;
+  now: string;
+}) {
+  const current = (await readDebateFile(input.userId, input.debateId, "debate/answers.md")) ?? "";
+  const lines: string[] = [];
+  lines.push(`## Turn ${input.turnNumber} · ${input.agentName} · ${input.now}`);
+  lines.push(input.content.trim());
+  lines.push("");
+  const next = appendWithTrim(current, lines.join("\n"));
+  await upsertDebateFile(input.debateId, "debate/answers.md", next, input.now);
+}
+
 function looksLikeToolsUnsupported(errorText: string) {
   const lower = errorText.toLowerCase();
   return (
@@ -3665,6 +3683,143 @@ async function maybeGenerateVoteAnnouncementWithSeat1(input: {
   return { ok: true, generated: true, path: roundPath };
 }
 
+async function generateRoundSummary(input: {
+  userId: string;
+  debate: { id: string; question: string };
+  participantCount: number;
+  endedRound: number;
+}) {
+  const roundPath = `debate/round_summary.md`;
+
+  const announcer = await query<Record<string, unknown>>(
+    `
+      select da.id as debate_agent_id,
+             a.*
+        from debate_agents da
+        join ai_agents a on a.id = da.ai_agent_id
+        join debates d on d.id = da.debate_id
+       where da.debate_id = $1
+         and d.user_id = $2
+         and da.turn_order = 1
+       limit 1
+    `,
+    [input.debate.id, input.userId]
+  );
+
+  let announcerRow: Record<string, unknown> | null = (announcer.rowCount ?? 0) === 1 ? announcer.rows[0] : null;
+  if (!announcerRow) {
+    return { ok: false, error: "Seat-1 agent not found." };
+  }
+
+  const announcerDebateAgentId = String(announcerRow.debate_agent_id);
+  const agent = normalizeAgentRow(announcerRow);
+  const overrideSystemPrompt = await loadDebateAgentSystemPrompt(input.userId, announcerDebateAgentId);
+  const apiKey = decryptSecret(agent.apiKeyEncrypted);
+  const url = resolveChatUrl(agent);
+
+  const proposalStart = (input.endedRound - 1) * input.participantCount + 1;
+  const proposalEnd = input.endedRound * input.participantCount;
+  const proposalTurns = await query<{ turn_number: number; seat_number: number | null; content: string; speaker_name: string | null }>(
+    `
+      select t.turn_number,
+             t.seat_number,
+             t.content,
+             coalesce(da.display_name, a.name) as speaker_name
+        from debate_turns t
+        join ai_agents a on a.id = t.ai_agent_id
+        left join debate_agents da on da.id = t.debate_agent_id
+        join debates d on d.id = t.debate_id
+       where t.debate_id = $1
+         and d.user_id = $2
+         and t.turn_number between $3 and $4
+       order by t.turn_number asc
+       limit 200
+    `,
+    [input.debate.id, input.userId, proposalStart, proposalEnd]
+  );
+  
+  if ((proposalTurns.rowCount ?? 0) === 0) return { ok: false, error: "No turns found" };
+
+  const proposalInline = [
+    `Round ${input.endedRound} Discussion:`,
+    ...proposalTurns.rows.map((r) => {
+      const tn = Number(r.turn_number);
+      const seatNumber = r.seat_number === null ? ((tn - 1) % input.participantCount) + 1 : Number(r.seat_number);
+      const seat = `Seat-${seatNumber}`;
+      const name = String(r.speaker_name ?? "Unknown");
+      const body = summarizeOptionText(String(r.content ?? ""), 1000);
+      return `- ${seat} · ${name}: ${body}`;
+    })
+  ].join("\n");
+
+  const system = [
+    buildBaseSystemPrompt(agent, overrideSystemPrompt),
+    `SYSTEM TASK: You are the moderator/announcer. Please summarize the just-finished round (Round ${input.endedRound}).`,
+    "Output only Markdown for humans; no tool calls."
+  ].join("\n\n");
+
+  const userPrompt = [
+    `Debate question:\n${input.debate.question}`,
+    `\n\n${proposalInline}`,
+    "\n\nPlease summarize the key points discussed in this round. Note any consensus reached, any practical ideas formulated, and how they work. Keep it concise but include important details for the final summary.",
+  ].join("").trim();
+
+  let content = "";
+  try {
+    if (agent.provider === "openai") {
+      const res = await openAiChatOnce({
+        url,
+        apiKey,
+        body: { model: agent.model, messages: [{ role: "system", content: system }, { role: "user", content: userPrompt }] }
+      });
+      content = String(res.content ?? "").trim();
+    } else {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01"
+        },
+        body: JSON.stringify({
+          model: agent.model,
+          max_tokens: 900,
+          system,
+          messages: [{ role: "user", content: userPrompt }]
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new AppError("AI_API_ERROR", 502, JSON.stringify(payload).slice(0, 400));
+      }
+      const blocks = (payload.content ?? []) as Array<Record<string, unknown>>;
+      const texts = blocks
+        .filter((b) => b.type === "text")
+        .map((b) => String((b as { text?: unknown }).text ?? ""))
+        .filter(Boolean);
+      content = texts.join("\n").trim();
+    }
+  } catch (error) {
+    console.warn("round summary generation failed", error);
+    return { ok: false, error };
+  }
+
+  const now = new Date().toISOString();
+  if (content) {
+    const lines = [];
+    lines.push(`## Round ${input.endedRound} Summary`);
+    lines.push(content);
+    lines.push("");
+    
+    const existing = (await readDebateFile(input.userId, input.debate.id, roundPath)) ?? "";
+    const next = appendWithTrim(existing, lines.join("\n"));
+    
+    await upsertDebateFile(input.debate.id, roundPath, next, now);
+  }
+  
+  return { ok: true };
+}
+
 export async function runDebate(id: string, userId: string) {
   if (activeDebates.has(id)) {
     return;
@@ -3915,6 +4070,14 @@ export async function runDebate(id: string, userId: string) {
             structuredOutput: parsed.structuredOutput,
             now: createdAt
           }),
+          persistAnswerAfterTurn({
+            userId,
+            debateId: id,
+            turnNumber: messageNumber,
+            agentName: eventAgentName,
+            content: parsed.content,
+            now: createdAt
+          }),
           ...(debate.enableSharedFacts
             ? [
                 persistSharedFactsAfterTurn({
@@ -4035,6 +4198,23 @@ export async function runDebate(id: string, userId: string) {
 
       if (isBoundary) {
         if (endedRound > 0) {
+          try {
+            emitDebateLiveEvent(id, {
+              type: "status",
+              debateId: id,
+              message: `正在生成第 ${endedRound} 轮总结...`,
+              at: new Date().toISOString()
+            });
+            await generateRoundSummary({
+              userId,
+              debate: { id: debate.id, question: debate.question },
+              participantCount,
+              endedRound
+            });
+          } catch (error) {
+            console.warn("round summary failed", error);
+          }
+
           try {
             const closed = await maybeAutoCloseOpenVoteAtBoundary({
               userId,

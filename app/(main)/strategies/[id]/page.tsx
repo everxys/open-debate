@@ -235,16 +235,18 @@ export default function StrategyDetailPage() {
     if (!ok) return;
 
     const activeClientId = roles[activeRoleIndex]?.clientId ?? "";
+    const nextRoles = roles.filter((role) => !selectedRoleIds.has(role.clientId));
+    
+    setRoles(nextRoles);
     roleSelectionAnchorIndexRef.current = null;
-    setRoles((current) => {
-      const next = current.filter((role) => !selectedRoleIds.has(role.clientId));
-      setActiveRoleIndex(() => {
-        const idx = next.findIndex((role) => role.clientId === activeClientId);
-        if (idx >= 0) return idx;
-        return Math.max(0, Math.min(activeRoleIndex, next.length - 1));
-      });
-      return next;
-    });
+    
+    const idx = nextRoles.findIndex((role) => role.clientId === activeClientId);
+    if (idx >= 0) {
+      setActiveRoleIndex(idx);
+    } else {
+      setActiveRoleIndex(Math.max(0, Math.min(activeRoleIndex, nextRoles.length - 1)));
+    }
+    
     clearRoleSelection();
   }
 
@@ -504,20 +506,12 @@ export default function StrategyDetailPage() {
                 <div key={role.clientId} className="row" style={{ gap: 8 }}>
                   <button
                     className={`btn roleButton ${index === activeRoleIndex ? "btn-primary" : ""}`}
-                    onClick={() => {
-                      roleSelectionAnchorIndexRef.current = index;
-                      setActiveRoleIndex(index);
-                    }}
-                    onMouseDown={(event) => {
-                      if (!detail.canEdit) return;
-                      if (event.button !== 0) return;
-                      if (!event.ctrlKey && !event.shiftKey) return;
-                      event.preventDefault();
-                      event.stopPropagation();
-                      onRoleSelect(index, { ctrlKey: event.ctrlKey, shiftKey: event.shiftKey });
-                    }}
                     onClick={(event) => {
-                      if (!detail.canEdit) return;
+                      if (!detail.canEdit) {
+                        roleSelectionAnchorIndexRef.current = index;
+                        setActiveRoleIndex(index);
+                        return;
+                      }
                       if (event.ctrlKey || event.shiftKey) {
                         event.preventDefault();
                         event.stopPropagation();

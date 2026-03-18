@@ -396,7 +396,7 @@ export default function NewDebatePage() {
                               rowId: newRowId(),
                               roleId: row.roleId,
                               enabled: true,
-                              agentId: ""
+                              agentId: row.agentId
                             };
                             if (index < 0) return [...current, copy];
                             return [...current.slice(0, index + 1), copy, ...current.slice(index + 1)];
