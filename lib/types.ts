@@ -63,6 +63,7 @@ export type DebateAgentRecord = {
   id: string;
   debateId: string;
   aiAgentId: string;
+  displayName: string;
   turnOrder: number;
   turnCount: number;
   createdAt: string;
@@ -72,6 +73,8 @@ export type DebateTurnRecord = {
   id: string;
   debateId: string;
   aiAgentId: string;
+  debateAgentId: string | null;
+  seatNumber: number | null;
   turnNumber: number;
   content: string;
   structuredOutput: StructuredOutput | null;

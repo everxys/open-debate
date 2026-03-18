@@ -58,8 +58,8 @@ export default function DebatesPage() {
   async function removeDebate(id: string) {
     const target = debates.find((d) => d.id === id);
     if (!target) return;
-    if (target.status === "running") {
-      window.alert("请先终止辩论再删除");
+    if (["pending", "running", "paused"].includes(String(target.status))) {
+      window.alert("进行中的辩论必须先终止才能删除");
       return;
     }
     if (!window.confirm("确定删除这场辩论吗？（会删除该辩论所有记录）")) return;
@@ -198,7 +198,7 @@ export default function DebatesPage() {
                             </button>
                             <button
                               className="btn btn-danger"
-                              disabled={deletingId === debate.id || debate.status === "running"}
+                              disabled={deletingId === debate.id}
                               onClick={() => void removeDebate(debate.id)}
                             >
                               {deletingId === debate.id ? "删除中..." : "删除"}

@@ -112,7 +112,7 @@ export default function NewStrategyPage() {
       const source = current.roles[index];
       if (!source) return current;
       const copy = {
-        name: `${source.name || `角色 ${index + 1}`} (copy)`,
+        name: source.name || `角色 ${index + 1}`,
         systemPrompt: source.systemPrompt ?? "",
         files: (source.files ?? []).map((file) => ({ ...file }))
       };

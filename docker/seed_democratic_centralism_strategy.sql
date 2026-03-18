@@ -113,7 +113,15 @@ common_files as (
     "roles": ["Host", "Supervisor"],
     "speakingOrder": { "firstRole": "Host", "lastRole": "Supervisor" }
   },
-  "seatOrderRules": [{ "afterRound": 1, "policy": { "type": "rotate", "offset": 1 } }]
+  "voting": {
+    "custom": { "minOptions": 2, "maxOptions": null },
+    "announcement": { "announcer": { "type": "role", "role": "Host" } }
+  },
+  "consensus": { "enabled": true, "minAvgScore": 8, "requireAllSeats": true },
+  "seatOrderRules": [
+    { "afterRound": 1, "policy": { "type": "reverse" } },
+    { "afterRound": 2, "policy": { "type": "reverse" } }
+  ]
 }
 $f$
       ),

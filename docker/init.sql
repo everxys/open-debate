@@ -93,10 +93,10 @@ create table if not exists debate_agents (
   id uuid primary key default gen_random_uuid(),
   debate_id uuid not null references debates(id) on delete cascade,
   ai_agent_id uuid not null references ai_agents(id) on delete restrict,
+  display_name text not null,
   turn_order integer not null,
   turn_count integer not null default 0,
   created_at timestamptz not null default now(),
-  unique (debate_id, ai_agent_id),
   unique (debate_id, turn_order)
 );
 
@@ -104,6 +104,8 @@ create table if not exists debate_turns (
   id uuid primary key default gen_random_uuid(),
   debate_id uuid not null references debates(id) on delete cascade,
   ai_agent_id uuid not null references ai_agents(id) on delete restrict,
+  debate_agent_id uuid not null references debate_agents(id) on delete restrict,
+  seat_number integer not null,
   turn_number integer not null,
   content text not null,
   structured_output jsonb null,

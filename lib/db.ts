@@ -77,6 +77,16 @@ async function ensureSchema(pool: Pool) {
   );
   await pool.query("alter table ai_agents add column if not exists context_length int null");
   await pool.query("alter table ai_agents add column if not exists deleted_at timestamptz null");
+  // Per-seat identity (cannot rely on ai_agents.name because same config can be reused).
+  await pool.query("alter table debate_agents add column if not exists display_name text null");
+  await pool.query(`
+    update debate_agents
+       set display_name = concat('Seat-', turn_order)
+     where display_name is null
+  `);
+  // Keep nullable for backward-compatibility: older rows can stay null.
+  await pool.query("alter table debate_turns add column if not exists debate_agent_id uuid null");
+  await pool.query("alter table debate_turns add column if not exists seat_number int null");
   // Allow reusing the same AI config for multiple seats within one debate.
   await pool.query(`
     do $$

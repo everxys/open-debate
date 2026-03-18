@@ -674,7 +674,7 @@ export async function duplicateStrategyRole(strategyId: string, roleId: string) 
     const nextOrder = nextOrderResult.rows[0]?.next ?? 1;
 
     const newRoleId = randomUUID();
-    const newName = `${roleResult.rows[0].name} (copy)`;
+    const newName = roleResult.rows[0].name;
 
     await client.query(
       `insert into strategy_roles (id, strategy_id, name, system_prompt, role_order, created_at, updated_at)
@@ -755,7 +755,7 @@ export async function listStrategyRoleFiles(strategyId: string, roleId: string) 
   try {
     const result = await query<Record<string, unknown>>(
       `
-        select path, content, created_at, updated_at
+        select path, created_at, updated_at
           from strategy_role_files
          where strategy_role_id = $1
          order by path asc
@@ -764,10 +764,39 @@ export async function listStrategyRoleFiles(strategyId: string, roleId: string) 
     );
     return result.rows.map((row) => ({
       path: String(row.path),
-      content: String(row.content ?? ""),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at)
     }));
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_role_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+export async function getStrategyRoleFile(strategyId: string, roleId: string, path: string) {
+  await requireVisibleStrategyRole(strategyId, roleId);
+  try {
+    const result = await query<Record<string, unknown>>(
+      `
+        select path, content, created_at, updated_at
+          from strategy_role_files
+         where strategy_role_id = $1
+           and path = $2
+         limit 1
+      `,
+      [roleId, path]
+    );
+    if ((result.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "File not found");
+    }
+    return {
+      path: String(result.rows[0].path),
+      content: String(result.rows[0].content ?? ""),
+      createdAt: String(result.rows[0].created_at),
+      updatedAt: String(result.rows[0].updated_at)
+    };
   } catch (error) {
     if (isMissingTableError(error, "strategy_role_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
@@ -825,6 +854,28 @@ export async function deleteStrategyRoleFile(strategyId: string, roleId: string,
       throw new AppError("NOT_FOUND", 404, "File not found");
     }
     return null;
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_role_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+export async function deleteStrategyRoleFilesByPrefix(strategyId: string, roleId: string, prefix: string) {
+  const { canEdit } = await requireVisibleStrategyRole(strategyId, roleId);
+  if (!canEdit) {
+    throw new AppError("FORBIDDEN", 403, "Permission denied");
+  }
+
+  const normalized = String(prefix ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const like = normalized ? `${normalized.replace(/\/+$/, "")}/%` : "%";
+  try {
+    const result = await query(
+      "delete from strategy_role_files where strategy_role_id = $1 and path like $2",
+      [roleId, like]
+    );
+    return { deleted: Number(result.rowCount ?? 0) };
   } catch (error) {
     if (isMissingTableError(error, "strategy_role_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");

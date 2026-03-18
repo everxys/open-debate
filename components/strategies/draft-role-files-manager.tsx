@@ -1,12 +1,14 @@
 "use client";
 
 import MonacoEditor from "@monaco-editor/react";
-import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent, MutableRefObject } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Tree, type NodeApi } from "react-arborist";
 
 import { Portal } from "@/components/ui/portal";
 import { useAutoDismissToast } from "@/components/ui/use-toast";
+import { type FsNode, isKeepMarkerPath, joinFsPath, normalizeFsPath } from "@/lib/fs-tree";
+import { useFsTree } from "@/lib/use-fs-tree";
 
 export type DraftStrategyRoleFile = {
   path: string;
@@ -21,102 +23,109 @@ type ContextTarget =
   | { type: "file"; path: string };
 
 function joinPath(base: string, leaf: string) {
-  const b = base.replace(/\/+$/, "");
-  const l = leaf.replace(/^\/+/, "");
-  if (!b) return l;
-  if (!l) return b;
-  return `${b}/${l}`;
+  return joinFsPath(base, leaf);
 }
 
 function normalizeInputPath(value: string) {
-  return value.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/{2,}/g, "/");
+  return normalizeFsPath(value);
 }
 
 function isInternalDirMarker(path: string) {
-  return path.endsWith("/.keep");
+  return isKeepMarkerPath(path);
 }
 
-type FsNode = {
-  id: string;
-  name: string;
-  type: "dir" | "file";
-  path: string; // dir path without trailing slash; file path
-  children?: FsNode[];
-};
+const TreeRow = memo(
+  function TreeRow(props: {
+    node: NodeApi<FsNode>;
+    style: CSSProperties;
+    activePath: string;
+    dragOverDir: string | null;
+    readOnly: boolean;
+    actionsRef: MutableRefObject<{
+      openFile: (path: string) => void;
+      openContextMenu: (event: ReactMouseEvent<HTMLElement>, target: ContextTarget) => void;
+      moveFile: (fromPath: string, toPath: string) => void;
+    }>;
+    setDragOverDir: (next: string | null | ((current: string | null) => string | null)) => void;
+  }) {
+    const { node, style, activePath, dragOverDir, readOnly, actionsRef, setDragOverDir } = props;
+    const data = node.data;
+    const isDir = data.type === "dir";
+    const isActive = data.type === "file" && data.path === activePath;
+    const dropActive = isDir && dragOverDir === data.path;
 
-type FsDirBuilder = {
-  name: string;
-  path: string;
-  dirs: Map<string, FsDirBuilder>;
-  files: Map<string, FsNode>;
-};
-
-function toDirId(path: string) {
-  return `d:${path}`;
-}
-
-function toFileId(path: string) {
-  return `f:${path}`;
-}
-
-function buildFsTree(files: DraftStrategyRoleFile[]) {
-  const root: FsDirBuilder = { name: "", path: "", dirs: new Map(), files: new Map() };
-
-  for (const file of files) {
-    const isMarker = isInternalDirMarker(file.path);
-    const parts = file.path.split("/").filter(Boolean);
-    if (parts.length === 0) continue;
-
-    const dirParts = parts.slice(0, -1);
-    const fileName = parts[parts.length - 1];
-    let current = root;
-    let prefix = "";
-
-    for (const part of dirParts) {
-      prefix = prefix ? `${prefix}/${part}` : part;
-      const existing = current.dirs.get(part);
-      if (existing) {
-        current = existing;
-      } else {
-        const next: FsDirBuilder = { name: part, path: prefix, dirs: new Map(), files: new Map() };
-        current.dirs.set(part, next);
-        current = next;
-      }
-    }
-
-    if (!isMarker) {
-      const fullPath = normalizeInputPath(file.path);
-      current.files.set(fileName, {
-        id: toFileId(fullPath),
-        name: fileName,
-        type: "file",
-        path: fullPath
-      });
-    }
+    return (
+      <div
+        style={style}
+        className={`treeRow ${isActive ? "treeItemActive" : ""} ${dropActive ? "treeDropActive" : ""}`}
+        onClick={() => {
+          if (data.type === "file") actionsRef.current.openFile(data.path);
+          else node.toggle();
+        }}
+        onContextMenu={(event) =>
+          actionsRef.current.openContextMenu(
+            event,
+            isDir ? { type: "dir", path: data.path } : { type: "file", path: data.path }
+          )
+        }
+        data-tree-type={isDir ? "dir" : "file"}
+        data-tree-path={data.path}
+        draggable={data.type === "file" && !readOnly}
+        onDragStart={(event) => {
+          if (readOnly) return;
+          if (data.type !== "file") return;
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("application/x-open-debate-path", data.path);
+          event.dataTransfer.setData("text/plain", data.path);
+        }}
+        onDragOver={(event) => {
+          if (readOnly) return;
+          if (!isDir) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          setDragOverDir((current) => (current === data.path ? current : data.path));
+          if (!node.isOpen) node.open();
+        }}
+        onDragLeave={() => {
+          if (!isDir) return;
+          setDragOverDir((current) => (current === data.path ? null : current));
+        }}
+        onDrop={(event) => {
+          if (readOnly) return;
+          if (!isDir) return;
+          event.preventDefault();
+          const from =
+            event.dataTransfer.getData("application/x-open-debate-path") || event.dataTransfer.getData("text/plain");
+          setDragOverDir(null);
+          if (!from) return;
+          const filename = from.split("/").filter(Boolean).slice(-1)[0] ?? "";
+          if (!filename) return;
+          const to = joinPath(data.path, filename);
+          actionsRef.current.moveFile(from, to);
+        }}
+      >
+        {isDir ? (
+          <span className="treeIcon" aria-hidden="true">
+            {node.isOpen ? "▾" : "▸"}
+          </span>
+        ) : (
+          <span className="treeIcon treeIconFile" aria-hidden="true" />
+        )}
+        <span className={`treeLabel ${isDir ? "treeDirLabel" : ""}`}>{isDir ? `${data.name}/` : data.name}</span>
+      </div>
+    );
+  },
+  (a, b) => {
+    if (a.readOnly !== b.readOnly) return false;
+    if (a.activePath !== b.activePath) return false;
+    if (a.dragOverDir !== b.dragOverDir) return false;
+    if (a.node.id !== b.node.id) return false;
+    if (a.node.isOpen !== b.node.isOpen) return false;
+    const at = a.style.transform ?? a.style.top;
+    const bt = b.style.transform ?? b.style.top;
+    return at === bt;
   }
-
-  function materialize(dir: FsDirBuilder): FsNode[] {
-    const children: FsNode[] = [];
-    for (const sub of dir.dirs.values()) {
-      children.push({
-        id: toDirId(sub.path),
-        name: sub.name,
-        type: "dir",
-        path: sub.path,
-        children: materialize(sub)
-      });
-    }
-    for (const file of dir.files.values()) children.push(file);
-
-    children.sort((a, b) => {
-      if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-    return children;
-  }
-
-  return materialize(root);
-}
+);
 
 export function DraftRoleFilesManagerColumns({
   files,
@@ -139,9 +148,30 @@ export function DraftRoleFilesManagerColumns({
   } | null>(null);
   const [dragOverDir, setDragOverDir] = useState<string | null>(null);
   const { toast, showToast } = useAutoDismissToast(1200);
+  const { treeData, sync: syncTree, upsertPath, deletePath, deletePaths, movePath } = useFsTree({
+    normalizePath: normalizeInputPath,
+    isDirMarker: isInternalDirMarker
+  });
+  const skipNextFilesSyncRef = useRef(false);
+  const actionsRef = useRef<{
+    openFile: (path: string) => void;
+    openContextMenu: (event: ReactMouseEvent<HTMLElement>, target: ContextTarget) => void;
+    moveFile: (fromPath: string, toPath: string) => void;
+  }>({
+    openFile: () => {},
+    openContextMenu: () => {},
+    moveFile: () => {}
+  });
 
   const displayFiles = useMemo(() => files.filter((file) => !isInternalDirMarker(file.path)), [files]);
-  const treeData = useMemo(() => buildFsTree(files), [files]);
+
+  useEffect(() => {
+    if (skipNextFilesSyncRef.current) {
+      skipNextFilesSyncRef.current = false;
+      return;
+    }
+    syncTree(files.map((file) => file.path));
+  }, [files, syncTree]);
 
   const filesByPath = useMemo(() => {
     const map = new Map<string, DraftStrategyRoleFile>();
@@ -246,6 +276,8 @@ export function DraftRoleFilesManagerColumns({
     try {
       const now = new Date().toISOString();
       const created: DraftStrategyRoleFile = { path, content: "", createdAt: now, updatedAt: now };
+      upsertPath(created.path);
+      skipNextFilesSyncRef.current = true;
       onFilesChange([...files, created].sort((a, b) => a.path.localeCompare(b.path)));
       openFile(created.path);
       showToast("success", "已创建");
@@ -278,6 +310,8 @@ export function DraftRoleFilesManagerColumns({
     try {
       const now = new Date().toISOString();
       const created: DraftStrategyRoleFile = { path: markerPath, content: "", createdAt: now, updatedAt: now };
+      upsertPath(created.path);
+      skipNextFilesSyncRef.current = true;
       onFilesChange([...files, created].sort((a, b) => a.path.localeCompare(b.path)));
       showToast("success", "已创建文件夹");
     } finally {
@@ -289,6 +323,8 @@ export function DraftRoleFilesManagerColumns({
     if (!path || isDeleting || readOnly) return;
     setIsDeleting(true);
     try {
+      deletePath(path);
+      skipNextFilesSyncRef.current = true;
       onFilesChange(files.filter((item) => item.path !== path));
       setTabs((current) => current.filter((t) => t.path !== path));
       if (activePath === path) setActivePath("");
@@ -309,6 +345,8 @@ export function DraftRoleFilesManagerColumns({
     }
 
     const now = new Date().toISOString();
+    movePath(from, to);
+    skipNextFilesSyncRef.current = true;
     onFilesChange(
       files
         .map((file) => (file.path === from ? { ...file, path: to, updatedAt: now } : file))
@@ -330,6 +368,8 @@ export function DraftRoleFilesManagerColumns({
 
     setIsDeleting(true);
     try {
+      deletePaths(targets);
+      skipNextFilesSyncRef.current = true;
       onFilesChange(files.filter((f) => !f.path.startsWith(prefix)));
       setTabs((current) => current.filter((t) => !t.path.startsWith(prefix)));
       if (activePath.startsWith(prefix)) setActivePath("");
@@ -345,6 +385,7 @@ export function DraftRoleFilesManagerColumns({
     setIsSaving(true);
     try {
       const now = new Date().toISOString();
+      skipNextFilesSyncRef.current = true;
       onFilesChange(
         files
           .map((file) => (file.path === activePath ? { ...file, content, updatedAt: now } : file))
@@ -389,7 +430,7 @@ export function DraftRoleFilesManagerColumns({
           if (!isDir) return;
           event.preventDefault();
           event.dataTransfer.dropEffect = "move";
-          setDragOverDir(data.path);
+          setDragOverDir((current) => (current === data.path ? current : data.path));
           if (!node.isOpen) node.open();
         }}
         onDragLeave={() => {
@@ -423,6 +464,10 @@ export function DraftRoleFilesManagerColumns({
     );
   }
 
+  actionsRef.current.openFile = (path: string) => openFile(path);
+  actionsRef.current.openContextMenu = openContextMenu;
+  actionsRef.current.moveFile = (fromPath: string, toPath: string) => void moveFile(fromPath, toPath);
+
   return (
     <>
       {toast ? (
@@ -445,7 +490,7 @@ export function DraftRoleFilesManagerColumns({
             if (readOnly) return;
             event.preventDefault();
             event.dataTransfer.dropEffect = "move";
-            setDragOverDir("");
+            setDragOverDir((current) => (current === "" ? current : ""));
           }}
           onDragLeave={() => setDragOverDir((current) => (current === "" ? null : current))}
           onDrop={(event) => {
@@ -478,7 +523,17 @@ export function DraftRoleFilesManagerColumns({
                 rowHeight={34}
                 openByDefault={false}
               >
-                {renderNode}
+                {(props) => (
+                  <TreeRow
+                    node={props.node}
+                    style={props.style}
+                    activePath={activePath}
+                    dragOverDir={dragOverDir}
+                    readOnly={Boolean(readOnly)}
+                    actionsRef={actionsRef}
+                    setDragOverDir={setDragOverDir}
+                  />
+                )}
               </Tree>
             </div>
           ) : (

@@ -24,6 +24,25 @@ export type DebateWorkflowConfig = {
     firstRole?: string | null;
     lastRole?: string | null;
   };
+
+  voting?: {
+    custom?: {
+      // null/undefined means "no explicit limit" (defaults to participantCount)
+      minOptions?: number | null;
+      maxOptions?: number | null;
+    };
+    announcement?: {
+      announcer?:
+        | { type?: "seat"; seat?: number }
+        | { type?: "role"; role?: string | null };
+    };
+  };
+
+  consensus?: {
+    enabled?: boolean;
+    minAvgScore?: number;
+    requireAllSeats?: boolean;
+  };
 };
 
 export type NormalizedDebateWorkflow = {
@@ -41,6 +60,22 @@ export type NormalizedDebateWorkflow = {
     | { afterRound: number; policy: { type: "rotate"; offset: number } }
     | { afterRound: number; policy: { type: "reverse" } }
   >;
+  voting: {
+    custom: {
+      minOptions: number | null;
+      maxOptions: number | null;
+    };
+    announcement: {
+      announcer:
+        | { type: "seat"; seat: number }
+        | { type: "role"; role: string };
+    };
+  };
+  consensus: {
+    enabled: boolean;
+    minAvgScore: number;
+    requireAllSeats: boolean;
+  };
 };
 
 function toTrimmedString(value: unknown) {
@@ -56,10 +91,70 @@ function toPositiveInt(value: unknown) {
   return i >= 1 ? i : null;
 }
 
+function toPositiveIntOrNull(value: unknown) {
+  if (value === null) return null;
+  return toPositiveInt(value);
+}
+
 function toInt(value: unknown) {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return null;
   return Math.floor(n);
+}
+
+function toNonNegativeNumberOrNull(value: unknown) {
+  if (value === null) return null;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return null;
+  return n >= 0 ? n : null;
+}
+
+function normalizeVoting(value: unknown) {
+  if (typeof value !== "object" || value === null) {
+    return {
+      custom: { minOptions: null as number | null, maxOptions: null as number | null },
+      announcement: { announcer: { type: "seat" as const, seat: 1 } }
+    };
+  }
+  const obj = value as Record<string, unknown>;
+  const customRaw = obj.custom;
+  const customObj = typeof customRaw === "object" && customRaw !== null ? (customRaw as Record<string, unknown>) : null;
+  const minOptions = toPositiveIntOrNull(customObj?.minOptions);
+  const maxOptions = toPositiveIntOrNull(customObj?.maxOptions);
+
+  const announcementRaw = obj.announcement;
+  const announcementObj =
+    typeof announcementRaw === "object" && announcementRaw !== null ? (announcementRaw as Record<string, unknown>) : null;
+  const announcerRaw = announcementObj?.announcer;
+  const announcerObj = typeof announcerRaw === "object" && announcerRaw !== null ? (announcerRaw as Record<string, unknown>) : null;
+  const announcerType = toTrimmedString(announcerObj?.type);
+  if (announcerType === "role") {
+    const role = toTrimmedString(announcerObj?.role);
+    if (role) {
+      return {
+        custom: { minOptions, maxOptions },
+        announcement: { announcer: { type: "role" as const, role } }
+      };
+    }
+  }
+  const seat = toPositiveInt(announcerObj?.seat) ?? 1;
+  return {
+    custom: { minOptions, maxOptions },
+    announcement: { announcer: { type: "seat" as const, seat } }
+  };
+}
+
+function normalizeConsensus(value: unknown) {
+  if (typeof value !== "object" || value === null) {
+    return { enabled: true, minAvgScore: 8, requireAllSeats: true };
+  }
+  const obj = value as Record<string, unknown>;
+  const enabledRaw = obj.enabled;
+  const enabled = enabledRaw === undefined ? true : Boolean(enabledRaw);
+  const minAvgScore = toNonNegativeNumberOrNull(obj.minAvgScore) ?? 8;
+  const requireAllSeatsRaw = obj.requireAllSeats;
+  const requireAllSeats = requireAllSeatsRaw === undefined ? true : Boolean(requireAllSeatsRaw);
+  return { enabled, minAvgScore, requireAllSeats };
 }
 
 function normalizeRoles(value: unknown) {
@@ -137,6 +232,9 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
   if (speakingOrder.firstRole && !roleSet.has(speakingOrder.firstRole)) return null;
   if (speakingOrder.lastRole && !roleSet.has(speakingOrder.lastRole)) return null;
 
+  const voting = normalizeVoting((anyInput as { voting?: unknown }).voting);
+  const consensus = normalizeConsensus((anyInput as { consensus?: unknown }).consensus);
+
   return {
     workflowVersion: 1,
     enabled,
@@ -145,7 +243,9 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
       roles,
       speakingOrder
     },
-    seatOrderRules
+    seatOrderRules,
+    voting,
+    consensus
   };
 }
 

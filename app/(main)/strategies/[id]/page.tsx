@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { RoleFilesManagerColumns } from "@/components/strategies/role-files-manager";
 import { useAutoDismissToast } from "@/components/ui/use-toast";
@@ -25,7 +25,11 @@ type StrategyDetail = {
   }>;
 };
 
-type RoleDraft = { id: string; name: string; systemPrompt: string };
+type RoleDraft = { clientId: string; id: string; name: string; systemPrompt: string };
+
+function createClientId() {
+  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+}
 
 async function readPayload(response: Response) {
   const contentType = response.headers.get("content-type") ?? "";
@@ -60,6 +64,8 @@ export default function StrategyDetailPage() {
   const [isShared, setIsShared] = useState(false);
   const [roles, setRoles] = useState<RoleDraft[]>([]);
   const [activeRoleIndex, setActiveRoleIndex] = useState<number>(0);
+  const [selectedRoleIds, setSelectedRoleIds] = useState<Set<string>>(() => new Set());
+  const roleSelectionAnchorIndexRef = useRef<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDuplicatingRole, setIsDuplicatingRole] = useState(false);
@@ -82,12 +88,14 @@ export default function StrategyDetailPage() {
     const nextRoles = (data.roles ?? [])
       .slice()
       .sort((a, b) => a.roleOrder - b.roleOrder)
-      .map((role) => ({ id: role.id, name: role.name, systemPrompt: role.systemPrompt ?? "" }));
+      .map((role) => ({ clientId: role.id, id: role.id, name: role.name, systemPrompt: role.systemPrompt ?? "" }));
     setRoles(nextRoles);
+    setSelectedRoleIds(new Set());
     setActiveRoleIndex((current) => {
       if (current >= 0 && current < nextRoles.length) return current;
       return 0;
     });
+    roleSelectionAnchorIndexRef.current = null;
   }
 
   useEffect(() => {
@@ -152,10 +160,92 @@ export default function StrategyDetailPage() {
   function addRole() {
     if (!detail?.canEdit) return;
     setRoles((current) => {
-      const next = [...current, { id: "", name: `角色 ${current.length + 1}`, systemPrompt: "" }];
+      const next = [...current, { clientId: createClientId(), id: "", name: `角色 ${current.length + 1}`, systemPrompt: "" }];
       setActiveRoleIndex(next.length - 1);
       return next;
     });
+  }
+
+  function toggleRoleSelected(roleId: string) {
+    if (!detail?.canEdit) return;
+    setSelectedRoleIds((current) => {
+      const next = new Set(current);
+      if (next.has(roleId)) next.delete(roleId);
+      else next.add(roleId);
+      return next;
+    });
+  }
+
+  function applyRangeSelection(fromIndex: number, toIndex: number, mode: "replace" | "add") {
+    const start = Math.max(0, Math.min(fromIndex, toIndex));
+    const end = Math.max(0, Math.max(fromIndex, toIndex));
+    const ids = roles.slice(start, end + 1).map((role) => role.clientId);
+    setSelectedRoleIds((current) => {
+      if (mode === "add") {
+        const next = new Set(current);
+        for (const id of ids) next.add(id);
+        return next;
+      }
+      return new Set(ids);
+    });
+  }
+
+  function onRoleSelect(index: number, event: { ctrlKey: boolean; shiftKey: boolean }) {
+    if (!detail?.canEdit) return;
+    const hit = roles[index];
+    if (!hit) return;
+
+    const anchor = roleSelectionAnchorIndexRef.current ?? index;
+    if (event.shiftKey) {
+      applyRangeSelection(anchor, index, event.ctrlKey ? "add" : "replace");
+      setActiveRoleIndex(index);
+      return;
+    }
+
+    roleSelectionAnchorIndexRef.current = index;
+    if (event.ctrlKey) {
+      toggleRoleSelected(hit.clientId);
+      setActiveRoleIndex(index);
+      return;
+    }
+
+    setSelectedRoleIds(new Set([hit.clientId]));
+    setActiveRoleIndex(index);
+  }
+
+  function selectAllRoles() {
+    if (!detail?.canEdit) return;
+    setSelectedRoleIds(new Set(roles.map((role) => role.clientId)));
+  }
+
+  function clearRoleSelection() {
+    setSelectedRoleIds(new Set());
+    roleSelectionAnchorIndexRef.current = null;
+  }
+
+  function deleteSelectedRoles() {
+    if (!detail?.canEdit) return;
+    if (selectedRoleIds.size === 0) return;
+    if (roles.length - selectedRoleIds.size < 2) {
+      showToast("error", "至少需要保留 2 个角色");
+      return;
+    }
+
+    const ok = window.confirm(`确认删除选中的 ${selectedRoleIds.size} 个角色？（保存后生效，会同时删除这些角色下的文件）`);
+    if (!ok) return;
+
+    const activeClientId = roles[activeRoleIndex]?.clientId ?? "";
+    roleSelectionAnchorIndexRef.current = null;
+    setRoles((current) => {
+      const next = current.filter((role) => !selectedRoleIds.has(role.clientId));
+      setActiveRoleIndex(() => {
+        const idx = next.findIndex((role) => role.clientId === activeClientId);
+        if (idx >= 0) return idx;
+        return Math.max(0, Math.min(activeRoleIndex, next.length - 1));
+      });
+      return next;
+    });
+    clearRoleSelection();
   }
 
   function removeRole(index: number) {
@@ -164,8 +254,17 @@ export default function StrategyDetailPage() {
       if (current.length <= 2) return current;
       const ok = window.confirm("确认删除该角色？（保存后生效，会同时删除该角色下的文件）");
       if (!ok) return current;
+      const removed = current[index];
       const next = current.filter((_, i) => i !== index);
       setActiveRoleIndex((active) => Math.max(0, Math.min(active, next.length - 1)));
+      if (removed) {
+        setSelectedRoleIds((selected) => {
+          if (!selected.has(removed.clientId)) return selected;
+          const nextSelected = new Set(selected);
+          nextSelected.delete(removed.clientId);
+          return nextSelected;
+        });
+      }
       return next;
     });
   }
@@ -189,18 +288,21 @@ export default function StrategyDetailPage() {
     if (!role) return;
 
     if (!role.id) {
+      const insertAt = activeRoleIndex + 1;
       setRoles((current) => {
         const source = current[activeRoleIndex];
         if (!source) return current;
         const copy = {
+          clientId: createClientId(),
           id: "",
-          name: `${source.name || `角色 ${activeRoleIndex + 1}`} (copy)`,
+          name: source.name || `角色 ${activeRoleIndex + 1}`,
           systemPrompt: source.systemPrompt ?? ""
         };
-        const next = [...current.slice(0, activeRoleIndex + 1), copy, ...current.slice(activeRoleIndex + 1)];
-        setActiveRoleIndex(activeRoleIndex + 1);
+        const next = [...current.slice(0, insertAt), copy, ...current.slice(insertAt)];
         return next;
       });
+      setActiveRoleIndex(insertAt);
+      roleSelectionAnchorIndexRef.current = insertAt;
       return;
     }
 
@@ -213,9 +315,27 @@ export default function StrategyDetailPage() {
         showToast("error", payload.error?.message ?? "复制失败");
         return;
       }
-      const nextIndex = roles.length;
-      await load();
-      setActiveRoleIndex(nextIndex);
+      const created = payload.data as { id?: unknown; name?: unknown };
+      const createdId = typeof created?.id === "string" ? created.id : "";
+      if (!createdId) {
+        showToast("error", "复制失败：缺少角色 ID");
+        return;
+      }
+
+      const insertAt = activeRoleIndex + 1;
+      setRoles((current) => {
+        const source = current[activeRoleIndex];
+        if (!source) return current;
+        const nextRole: RoleDraft = {
+          clientId: createdId,
+          id: createdId,
+          name: source.name,
+          systemPrompt: source.systemPrompt ?? ""
+        };
+        return [...current.slice(0, insertAt), nextRole, ...current.slice(insertAt)];
+      });
+      setActiveRoleIndex(insertAt);
+      roleSelectionAnchorIndexRef.current = insertAt;
       showToast("success", "已复制角色");
     } finally {
       setIsDuplicatingRole(false);
@@ -276,6 +396,8 @@ export default function StrategyDetailPage() {
   }
 
   const activeRole = roles[activeRoleIndex] ?? null;
+  const selectedCount = selectedRoleIds.size;
+  const canDeleteSelected = detail.canEdit && selectedCount > 0 && roles.length - selectedCount >= 2;
 
   return (
     <div className="grid" style={{ gap: 20 }}>
@@ -353,22 +475,71 @@ export default function StrategyDetailPage() {
         <section className="panel stack">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <strong>角色（{roles.length}）</strong>
-            <button className="btn btn-primary" disabled={!detail.canEdit} onClick={addRole}>
-              新增角色
-            </button>
+            {detail.canEdit ? (
+              <div className="row">
+                <button className="btn" type="button" disabled={selectedCount === 0} onClick={clearRoleSelection}>
+                  清空选择
+                </button>
+                <button className="btn" type="button" onClick={selectAllRoles}>
+                  全选
+                </button>
+                <button className="btn btn-danger" type="button" disabled={!canDeleteSelected} onClick={deleteSelectedRoles}>
+                  删除选中
+                </button>
+                <button className="btn btn-primary" type="button" onClick={addRole}>
+                  新增角色
+                </button>
+              </div>
+            ) : (
+              <button className="btn btn-primary" disabled={!detail.canEdit} onClick={addRole}>
+                新增角色
+              </button>
+            )}
           </div>
 
           <div className="roleList">
-            {roles.map((role, index) => (
-              <button
-                key={role.id || `new-${index}`}
-                className={`btn roleButton ${index === activeRoleIndex ? "btn-primary" : ""}`}
-                onClick={() => setActiveRoleIndex(index)}
-                type="button"
-              >
-                #{index + 1} {role.name || "(未命名)"}
-              </button>
-            ))}
+            {roles.map((role, index) => {
+              const selected = selectedRoleIds.has(role.clientId);
+              return (
+                <div key={role.clientId} className="row" style={{ gap: 8 }}>
+                  <button
+                    className={`btn roleButton ${index === activeRoleIndex ? "btn-primary" : ""}`}
+                    onClick={() => {
+                      roleSelectionAnchorIndexRef.current = index;
+                      setActiveRoleIndex(index);
+                    }}
+                    onMouseDown={(event) => {
+                      if (!detail.canEdit) return;
+                      if (event.button !== 0) return;
+                      if (!event.ctrlKey && !event.shiftKey) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onRoleSelect(index, { ctrlKey: event.ctrlKey, shiftKey: event.shiftKey });
+                    }}
+                    onClick={(event) => {
+                      if (!detail.canEdit) return;
+                      if (event.ctrlKey || event.shiftKey) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onRoleSelect(index, { ctrlKey: event.ctrlKey, shiftKey: event.shiftKey });
+                        return;
+                      }
+                      roleSelectionAnchorIndexRef.current = index;
+                      setSelectedRoleIds(new Set([role.clientId]));
+                      setActiveRoleIndex(index);
+                    }}
+                    type="button"
+                    style={{
+                      flex: 1,
+                      textAlign: "left",
+                      boxShadow: selected ? "0 0 0 2px rgba(59, 130, 246, 0.55) inset" : undefined
+                    }}
+                  >
+                    #{index + 1} {role.name || "(未命名)"}
+                  </button>
+                </div>
+              );
+            })}
           </div>
 
           {activeRole ? (

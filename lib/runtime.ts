@@ -9,9 +9,6 @@ import { safeParseWorkflowJson, type NormalizedDebateWorkflow } from "@/lib/work
 
 const activeDebates = new Set<string>();
 const MAX_TOOL_ROUNDS = 3;
-const MAX_TOOL_OUTPUT_CHARS = 20_000;
-const MAX_INLINE_FILES_CHARS = 12_000;
-const MAX_RECENT_TURNS_CHARS = 10_000;
 const ENABLE_DEBATE_MEMORY = process.env.ENABLE_DEBATE_MEMORY !== "0";
 const MEMORY_SUMMARY_PATH = "memory/summary.md";
 const MEMORY_LOG_PATH = "memory/log.jsonl";
@@ -31,14 +28,9 @@ const CONTEXT_USAGE_TOTALS_PATH = "context/usage_totals.json";
 const CONTEXT_USAGE_BASELINE_PATH = "context/usage_baseline.json";
 const QUESTION_LATEST_DIFF_PATH = "question/latest_diff.md";
 const SEATS_PENDING_REORDER_PATH = "seats/pending_reorder.json";
-const MAX_MEMORY_SUMMARY_CHARS = 8_000;
-const MAX_SHARED_FACTS_CHARS = 8_000;
-const MAX_QUESTION_DIFF_CHARS = 4_000;
-const MAX_SEGMENT_CONTEXT_CHARS = 8_000;
 const MEMORY_LOG_COMPACT_THRESHOLD_CHARS = 60_000;
 const MEMORY_LOG_KEEP_LAST_LINES = 120;
 const MEMORY_SUMMARY_REFRESH_EVERY_TURNS = 6;
-const MAX_CONTEXT_USAGE_LOG_CHARS = 200_000;
 
 function isMemoryPath(path: string) {
   const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").trim().toLowerCase();
@@ -51,9 +43,11 @@ function getPgErrorCode(error: unknown) {
   return typeof code === "string" ? code : null;
 }
 
-function trimToChars(value: string, maxChars: number) {
+function trimToChars(value: string, maxChars?: number | null) {
+  if (maxChars === undefined || maxChars === null) return value;
+  if (!Number.isFinite(maxChars) || maxChars <= 0) return value;
   if (value.length <= maxChars) return value;
-  return value.slice(0, maxChars);
+  return value.slice(0, Math.floor(maxChars));
 }
 
 function splitJsonLines(raw: string) {
@@ -71,8 +65,10 @@ function safeParseJsonLine(line: string) {
   }
 }
 
-function appendWithTrim(current: string, appended: string, maxChars: number) {
+function appendWithTrim(current: string, appended: string, maxChars?: number | null) {
   const next = (current ? `${current}\n` : "") + appended;
+  if (maxChars === undefined || maxChars === null) return next;
+  if (!Number.isFinite(maxChars) || maxChars <= 0) return next;
   if (next.length <= maxChars) return next;
   // keep tail when exceeding limit
   return next.slice(Math.max(0, next.length - maxChars));
@@ -242,10 +238,10 @@ async function appendContextUsageLogAndUpdateTotals(input: {
       : null;
   const sessionId = baselineRow && Number.isFinite(Number(baselineRow.sessionId)) ? Math.floor(Number(baselineRow.sessionId)) : 1;
 
-  // Append log (bounded).
-  try {
-    const prev = (await readDebateFile(input.userId, input.debateId, CONTEXT_USAGE_LOG_PATH)) ?? "";
-    const line = JSON.stringify({
+    // Append log.
+    try {
+      const prev = (await readDebateFile(input.userId, input.debateId, CONTEXT_USAGE_LOG_PATH)) ?? "";
+      const line = JSON.stringify({
       at: input.now,
       sessionId,
       turnNumber: input.turnNumber,
@@ -261,7 +257,7 @@ async function appendContextUsageLogAndUpdateTotals(input: {
       usedPromptTokens: input.usedPromptTokens,
       source: input.source
     });
-    const next = appendWithTrim(prev, line, MAX_CONTEXT_USAGE_LOG_CHARS);
+    const next = appendWithTrim(prev, line);
     await upsertDebateFile(input.debateId, CONTEXT_USAGE_LOG_PATH, next.trim() + "\n", input.now);
   } catch (error) {
     console.warn("context usage log append failed", error);
@@ -565,7 +561,7 @@ async function refreshParticipantMemorySummary(input: {
   await upsertDebateAgentFile(
     input.debateAgentId,
     MEMORY_SUMMARY_PATH,
-    trimToChars(summary, MAX_MEMORY_SUMMARY_CHARS),
+    trimToChars(summary),
     input.now
   );
 
@@ -649,7 +645,7 @@ async function persistSharedFactsAfterTurn(input: {
   }
   lines.push("");
 
-  const next = appendWithTrim(current, lines.join("\n"), MAX_SHARED_FACTS_CHARS);
+  const next = appendWithTrim(current, lines.join("\n"));
   await upsertDebateFile(input.debateId, SHARED_FACTS_PATH, next, input.now);
 }
 function looksLikeToolsUnsupported(errorText: string) {
@@ -664,8 +660,23 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function aggregateConsensusByLastRound(turns: DebateTurnRecord[], participantCount: number) {
+function aggregateConsensusByLastRound(
+  turns: DebateTurnRecord[],
+  participantCount: number,
+  consensus?: NormalizedDebateWorkflow["consensus"] | null
+) {
   if (participantCount <= 0) participantCount = 1;
+
+  const enabled = consensus?.enabled === undefined ? true : Boolean(consensus.enabled);
+  const minAvgScoreRaw = consensus?.minAvgScore ?? 8;
+  const minAvgScore = typeof minAvgScoreRaw === "number" && Number.isFinite(minAvgScoreRaw) ? minAvgScoreRaw : 8;
+  const requireAllSeats =
+    consensus?.requireAllSeats === undefined ? true : Boolean(consensus.requireAllSeats);
+
+  if (!enabled) {
+    return { reached: false, leadingSolution: null as string | null, score: 0 };
+  }
+
   if (turns.length < participantCount) {
     return { reached: false, leadingSolution: null as string | null, score: 0 };
   }
@@ -690,7 +701,7 @@ function aggregateConsensusByLastRound(turns: DebateTurnRecord[], participantCou
     .map((t) => t.structuredOutput?.agreement_score)
     .filter((x): x is number => typeof x === "number");
   const avg = scores.length > 0 ? scores.reduce((sum, item) => sum + item, 0) / scores.length : 0;
-  const reached = scores.length === participantCount && avg >= 8;
+  const reached = (requireAllSeats ? scores.length === participantCount : scores.length > 0) && avg >= minAvgScore;
 
   return { reached, leadingSolution: first, score: Number((avg / 10).toFixed(3)) };
 }
@@ -1036,22 +1047,17 @@ async function loadAgentFilesInline(userId: string, agentId: string) {
         join ai_agents a on a.id = f.ai_agent_id
         where f.ai_agent_id = $1 and a.user_id = $2
         order by f.path asc
-        limit 50
       `,
       [agentId, userId]
     );
 
-    let remaining = MAX_INLINE_FILES_CHARS;
     const parts: string[] = [];
     for (const row of result.rows) {
-      if (remaining <= 0) break;
       const path = String(row.path);
       if (isMemoryPath(path)) continue;
       const content = String(row.content ?? "");
       const header = `\n\n---\nFILE: ${path}\n---\n`;
-      const chunk = content.slice(0, Math.max(0, remaining - header.length));
-      parts.push(header + chunk);
-      remaining -= header.length + chunk.length;
+      parts.push(header + content);
     }
 
     if (parts.length === 0) return null;
@@ -1099,7 +1105,6 @@ async function loadDebateAgentFilesInline(userId: string, debateAgentId: string,
           join debates d on d.id = da.debate_id
          where f.debate_agent_id = $1 and d.user_id = $2
          order by f.path asc
-         limit 50
       `,
       [debateAgentId, userId]
     );
@@ -1108,17 +1113,13 @@ async function loadDebateAgentFilesInline(userId: string, debateAgentId: string,
       return loadAgentFilesInline(userId, agentId);
     }
 
-    let remaining = MAX_INLINE_FILES_CHARS;
     const parts: string[] = [];
     for (const row of result.rows) {
-      if (remaining <= 0) break;
       const path = String(row.path);
       if (isMemoryPath(path)) continue;
       const content = String(row.content ?? "");
       const header = `\n\n---\nFILE: ${path}\n---\n`;
-      const chunk = content.slice(0, Math.max(0, remaining - header.length));
-      parts.push(header + chunk);
-      remaining -= header.length + chunk.length;
+      parts.push(header + content);
     }
 
     if (parts.length === 0) {
@@ -1136,30 +1137,26 @@ async function loadDebateAgentFilesInline(userId: string, debateAgentId: string,
 async function loadDebateAgentMemoryInline(userId: string, debateAgentId: string) {
   const content = await readDebateAgentFile(userId, debateAgentId, MEMORY_SUMMARY_PATH);
   if (!content) return null;
-  const trimmed = trimToChars(content, MAX_MEMORY_SUMMARY_CHARS);
-  return `Long-term memory (this agent):\n\n${trimmed}`;
+  return `Long-term memory (this agent):\n\n${content}`;
 }
 
 async function loadSharedFactsBoardInline(userId: string, debateId: string) {
   const content = await readDebateFile(userId, debateId, SHARED_FACTS_PATH);
   if (!content) return null;
-  const trimmed = trimToChars(content, MAX_SHARED_FACTS_CHARS);
-  return `Shared facts board (working notes):\n\n${trimmed}`;
+  return `Shared facts board (working notes):\n\n${content}`;
 }
 
 async function loadDebateSegmentInline(userId: string, debateId: string) {
   const content = await readDebateFile(userId, debateId, CONTEXT_SEGMENT_PATH);
   if (!content) return null;
-  const trimmed = trimToChars(content, MAX_SEGMENT_CONTEXT_CHARS);
-  return `Segment checkpoint (read-only; summary for continuing the debate):\n\n${trimmed}`;
+  return `Segment checkpoint (read-only; summary for continuing the debate):\n\n${content}`;
 }
 
 async function loadDebateAgentSegmentInline(userId: string, debateId: string, debateAgentId: string) {
   const agentContent = await readDebateAgentFile(userId, debateAgentId, CONTEXT_SEGMENT_PATH);
   const content = agentContent ?? (await readDebateFile(userId, debateId, CONTEXT_SEGMENT_PATH));
   if (!content) return null;
-  const trimmed = trimToChars(content, MAX_SEGMENT_CONTEXT_CHARS);
-  return `Segment checkpoint (read-only; this seat only):\n\n${trimmed}`;
+  return `Segment checkpoint (read-only; this seat only):\n\n${content}`;
 }
 
 async function loadContextWindowMinTurnNumber(userId: string, debateId: string) {
@@ -1200,11 +1197,22 @@ async function loadRecentTurnsInline(
 ) {
   try {
     const min = typeof minTurnNumber === "number" && Number.isFinite(minTurnNumber) ? Math.floor(minTurnNumber) : null;
-    const result = await query<{ turn_number: number; content: string; created_at: string; agent_name: string }>(
+    const result = await query<{
+      turn_number: number;
+      content: string;
+      created_at: string;
+      speaker_name: string | null;
+      seat_number: number | null;
+    }>(
       `
-        select t.turn_number, t.content, t.created_at, a.name as agent_name
+        select t.turn_number,
+               t.content,
+               t.created_at,
+               coalesce(da.display_name, a.name) as speaker_name,
+               t.seat_number as seat_number
           from debate_turns t
           join ai_agents a on a.id = t.ai_agent_id
+          left join debate_agents da on da.id = t.debate_agent_id
           join debates d on d.id = t.debate_id
          where t.debate_id = $1
            and d.user_id = $2
@@ -1229,15 +1237,41 @@ async function loadRecentTurnsInline(
     );
     for (const row of rows) {
       const turnNumber = Number(row.turn_number);
-      const agentName = String(row.agent_name ?? "Unknown");
+      const speakerName = String(row.speaker_name ?? "Unknown");
+      const seatLabel = row.seat_number === null ? "" : `Seat-${Number(row.seat_number)} · `;
       const createdAt = String(row.created_at ?? "");
       const content = String(row.content ?? "");
-      const header = `\n\n---\nTurn #${turnNumber} · ${agentName} · ${createdAt}\n---\n`;
+      const header = `\n\n---\nTurn #${turnNumber} · ${seatLabel}${speakerName} · ${createdAt}\n---\n`;
       parts.push(header + content);
     }
 
-    const joined = parts.join("");
-    return trimToChars(joined, MAX_RECENT_TURNS_CHARS);
+    return parts.join("");
+  } catch {
+    return null;
+  }
+}
+
+async function loadDebateSeatInline(userId: string, debateId: string, debateAgentId: string) {
+  try {
+    const result = await query<{ turn_order: number; display_name: string | null }>(
+      `
+        select da.turn_order,
+               da.display_name
+          from debate_agents da
+          join debates d on d.id = da.debate_id
+         where da.debate_id = $1
+           and da.id = $2
+           and d.user_id = $3
+         limit 1
+      `,
+      [debateId, debateAgentId, userId]
+    );
+    if ((result.rowCount ?? 0) !== 1) return null;
+    const seatNumber = Number(result.rows[0]?.turn_order ?? 0);
+    const displayName = String(result.rows[0]?.display_name ?? "");
+    if (!Number.isFinite(seatNumber) || seatNumber <= 0) return null;
+    const namePart = displayName ? ` (${displayName})` : "";
+    return `Identity (read-only):\n- You are Seat-${seatNumber}${namePart}.`;
   } catch {
     return null;
   }
@@ -1248,20 +1282,24 @@ async function loadDebateParticipantsInline(userId: string, debateId: string) {
     const result = await query<Record<string, unknown>>(
       `
         select da.turn_order,
-               a.name as agent_name
+               da.display_name as display_name
           from debate_agents da
-          join ai_agents a on a.id = da.ai_agent_id
           join debates d on d.id = da.debate_id
          where da.debate_id = $1
            and d.user_id = $2
          order by da.turn_order asc
-         limit 50
       `,
       [debateId, userId]
     );
     if ((result.rowCount ?? 0) <= 0) return null;
-    const lines = result.rows.map((row) => `- Seat-${Number(row.turn_order)}: ${String(row.agent_name ?? "Unknown")}`);
-    return ["Seats (read-only):", ...lines].join("\n");
+    const lines = result.rows.map(
+      (row) => `- Seat-${Number(row.turn_order)}: ${String(row.display_name ?? `Seat-${Number(row.turn_order)}`)}`
+    );
+    return [
+      "Seats (read-only):",
+      ...lines,
+      "- NOTE: Seat numbers are positions and may change at round boundaries when workflow seatOrderRules applies."
+    ].join("\n");
   } catch {
     return null;
   }
@@ -1420,12 +1458,41 @@ async function loadOpenVote(userId: string, debateId: string) {
   return parsed;
 }
 
-async function loadOpenVoteInline(userId: string, debateId: string) {
+async function loadOpenVoteInline(userId: string, debateId: string, seed?: string) {
   const open = await loadOpenVote(userId, debateId);
   if (!open) return null;
 
+  function hashSeedToUint32(value: string) {
+    let hash = 2166136261;
+    for (let i = 0; i < value.length; i += 1) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function shuffleWithSeed<T>(items: T[], seedValue: string) {
+    if (!seedValue) return items.slice();
+    const out = items.slice();
+    let state = hashSeedToUint32(seedValue) || 1;
+    const rand = () => {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      return (state >>> 0) / 0xffffffff;
+    };
+    for (let i = out.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(rand() * (i + 1));
+      const tmp = out[i];
+      out[i] = out[j];
+      out[j] = tmp;
+    }
+    return out;
+  }
+
   if (open.kind === "election") {
-    const candidates = open.candidates.map((c) => `- ${c.seat}: ${c.name}`).join("\n");
+    const candidatesList = shuffleWithSeed(open.candidates, String(seed ?? ""));
+    const candidates = candidatesList.map((c) => `- ${c.seat}: ${c.name}`).join("\n");
     const roles = (open.roles ?? []).map((r) => `- ${r}`).join("\n");
     return [
       "OFFICIAL VOTE (OPEN): Election",
@@ -1438,7 +1505,8 @@ async function loadOpenVoteInline(userId: string, debateId: string) {
     ].join("\n");
   }
 
-  const options = open.options.map((opt) => `- ${opt}`).join("\n");
+  const optionsList = shuffleWithSeed(open.options, String(seed ?? ""));
+  const options = optionsList.map((opt) => `- ${opt}`).join("\n");
   return [
     "OFFICIAL VOTE (OPEN): Custom",
     `- Title: ${open.title}`,
@@ -1465,7 +1533,7 @@ async function loadVoteAnnouncementInline(userId: string, debateId: string) {
 async function loadQuestionDiffInline(userId: string, debateId: string) {
   const content = await readDebateFile(userId, debateId, QUESTION_LATEST_DIFF_PATH);
   if (!content) return null;
-  return trimToChars(content, MAX_QUESTION_DIFF_CHARS);
+  return content;
 }
 
 async function maybeApplyPendingSeatReorder(input: {
@@ -1546,10 +1614,11 @@ async function toolVoteOpen(input: {
   if (!workflowEnabled && !allowWithoutWorkflow) {
     return { ok: false, error: "Official voting is disabled (missing workflow.json or enabled=false)." };
   }
-  if (workflowEnabled && input.roundNumber < workflow.election.startRound && !input.bypassStartRound) {
+  const startRound = workflowEnabled ? workflow.election.startRound : 1;
+  if (workflowEnabled && input.roundNumber < startRound && !input.bypassStartRound) {
     return {
       ok: false,
-      error: `Official voting starts from Round ${workflow.election.startRound}. Current round is ${input.roundNumber}.`
+      error: `Official voting starts from Round ${startRound}. Current round is ${input.roundNumber}.`
     };
   }
   const existing = await loadOpenVote(input.userId, input.debateId);
@@ -1567,9 +1636,8 @@ async function toolVoteOpen(input: {
     const participants = await query<Record<string, unknown>>(
       `
         select da.turn_order,
-               a.name as agent_name
+               da.display_name as display_name
           from debate_agents da
-          join ai_agents a on a.id = da.ai_agent_id
           join debates d on d.id = da.debate_id
          where da.debate_id = $1
            and d.user_id = $2
@@ -1579,7 +1647,7 @@ async function toolVoteOpen(input: {
     );
     const candidates = participants.rows.map((row) => ({
       seat: `Seat-${Number(row.turn_order)}`,
-      name: String(row.agent_name ?? "Unknown")
+      name: String(row.display_name ?? `Seat-${Number(row.turn_order)}`)
     }));
 
     const open: OfficialVote = {
@@ -1638,8 +1706,9 @@ async function toolVoteCast(input: {
   if (!workflowEnabled && open.kind !== "custom") {
     return { ok: false, error: "Official voting is disabled (missing workflow.json or enabled=false)." };
   }
-  if (workflowEnabled && open.roundNumber < workflow.election.startRound && !forcedOpen) {
-    return { ok: false, error: `Official voting starts from Round ${workflow.election.startRound}.` };
+  const startRound = workflowEnabled ? workflow.election.startRound : 1;
+  if (workflowEnabled && open.roundNumber < startRound && !forcedOpen) {
+    return { ok: false, error: `Official voting starts from Round ${startRound}.` };
   }
 
   let voterSeat: string | null = null;
@@ -1721,8 +1790,9 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
   if (!workflowEnabled && open.kind !== "custom") {
     return { ok: false, error: "Official voting is disabled (missing workflow.json or enabled=false)." };
   }
-  if (workflowEnabled && open.roundNumber < workflow.election.startRound && !forcedOpen) {
-    return { ok: false, error: `Official voting starts from Round ${workflow.election.startRound}.` };
+  const startRound = workflowEnabled ? workflow.election.startRound : 1;
+  if (workflowEnabled && open.roundNumber < startRound && !forcedOpen) {
+    return { ok: false, error: `Official voting starts from Round ${startRound}.` };
   }
 
   if (open.kind === "election") {
@@ -1776,9 +1846,8 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
         select da.id as debate_agent_id,
                da.turn_order,
                da.ai_agent_id,
-               a.name as agent_name
+               da.display_name as display_name
           from debate_agents da
-          join ai_agents a on a.id = da.ai_agent_id
           join debates d on d.id = da.debate_id
          where da.debate_id = $1
            and d.user_id = $2
@@ -1792,7 +1861,7 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
       bySeat.set(seat, {
         debateAgentId: String(row.debate_agent_id),
         aiAgentId: String(row.ai_agent_id),
-        name: String(row.agent_name ?? "Unknown"),
+        name: String(row.display_name ?? seat),
         turnOrder: Number(row.turn_order)
       });
     }
@@ -2072,8 +2141,7 @@ async function toolReadFile(userId: string, debateAgentId: string, agentId: stri
     );
     if ((result.rowCount ?? 0) === 1) {
       const content = String(result.rows[0].content ?? "");
-      if (content.length <= MAX_TOOL_OUTPUT_CHARS) return content;
-      return `${content.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n\n[TRUNCATED]`;
+      return content;
     }
   } catch (error) {
     if (!isMissingTableError(error, "debate_agent_files")) {
@@ -2100,8 +2168,7 @@ async function toolReadFileFromAgent(userId: string, agentId: string, path: stri
       return `NOT_FOUND: ${path}`;
     }
     const content = String(result.rows[0].content ?? "");
-    if (content.length <= MAX_TOOL_OUTPUT_CHARS) return content;
-    return `${content.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n\n[TRUNCATED]`;
+    return content;
   } catch (error) {
     if (getPgErrorCode(error) === "42P01") {
       return "MIGRATION_REQUIRED: ai_agent_files table missing";
@@ -2384,12 +2451,13 @@ async function callProvider(
   roundNumber: number,
   participantCount: number,
   userId: string,
-  debateAgentId: string
+  debateAgentId: string,
+  eventAgentName: string
 ) {
   emitDebateLiveEvent(debate.id, {
     type: "status",
     debateId: debate.id,
-    message: `请求模型中：${agent.name}`,
+    message: `请求模型中：${eventAgentName}`,
     at: new Date().toISOString()
   });
   const apiKey = decryptSecret(agent.apiKeyEncrypted);
@@ -2400,10 +2468,11 @@ async function callProvider(
     Math.min(24, Math.max(8, Math.max(1, participantCount) * 2)),
     await loadContextWindowMinTurnNumberForDebateAgent(userId, debate.id, debateAgentId)
   );
-  const participantsInline = await loadDebateParticipantsInline(userId, debate.id);
+  const seatInline = await loadDebateSeatInline(userId, debate.id, debateAgentId);
+  const participantsInline = messageNumber <= participantCount ? null : await loadDebateParticipantsInline(userId, debate.id);
   const workflow = await loadDebateWorkflow(userId, debate.id);
   const openVote = await loadOpenVote(userId, debate.id);
-  const openVoteInline = await loadOpenVoteInline(userId, debate.id);
+  const openVoteInline = await loadOpenVoteInline(userId, debate.id, `${debateAgentId}:${openVote?.roundNumber ?? 0}`);
   const directiveInline = await loadOfficialDirectiveInline(userId, debate.id);
   const announcementInline = await loadVoteAnnouncementInline(userId, debate.id);
   const questionDiffInline = await loadQuestionDiffInline(userId, debate.id);
@@ -2439,12 +2508,20 @@ async function callProvider(
     `Question:\n${debate.question}`,
     "",
     ...(questionDiffInline ? [questionDiffInline, ""] : []),
+    ...(seatInline ? [seatInline, ""] : []),
     "Round semantics (IMPORTANT):",
     `- Seats: ${participantCount}`,
     `- 1 round = ${participantCount} messages (each seat speaks once in order).`,
-    `- You are generating: Round ${roundNumber}, message #${messageNumber} overall, turn ${turnInRound}/${participantCount} in this round.`,
+    `- You are generating: Round ${roundNumber} · Turn ${turnInRound}/${participantCount} (global message #${messageNumber}).`,
     `- Round ${roundNumber} covers message #${roundStart} ~ #${roundEnd}.`,
+    "- IMPORTANT: Do NOT treat global message # as a seat index (e.g., Round 2 Turn 1 is global #21 when Seats=20).",
     ...(votingRuleInline ? [votingRuleInline] : []),
+    ...(messageNumber <= participantCount
+      ? [
+          "",
+          "Fairness (Round 1): You do not yet have full information about other seats. Do not pre-judge or claim you know other seats' views/roles before they speak."
+        ]
+      : []),
     "",
     ...(participantsInline ? [participantsInline, ""] : []),
     ...(segmentInline ? [segmentInline, ""] : []),
@@ -2516,7 +2593,7 @@ async function callProvider(
         streamed = await openAiChatStream({
           debateId: debate.id,
           roundNumber,
-          agentName: agent.name,
+          agentName: eventAgentName,
           url,
           apiKey,
           body: {
@@ -2638,7 +2715,7 @@ async function callProvider(
         const serialized =
           typeof result === "string"
             ? result
-            : JSON.stringify(result).slice(0, MAX_TOOL_OUTPUT_CHARS);
+            : JSON.stringify(result);
         messages.push({ role: "tool", tool_call_id: call.id, content: serialized });
       }
     }
@@ -2647,7 +2724,7 @@ async function callProvider(
     const fallback = await openAiChatStream({
       debateId: debate.id,
       roundNumber,
-      agentName: agent.name,
+      agentName: eventAgentName,
       url,
       apiKey,
       body: { model: agent.model, messages }
@@ -2838,7 +2915,7 @@ async function callProvider(
       const serialized =
         typeof result === "string"
           ? result
-          : JSON.stringify(result).slice(0, MAX_TOOL_OUTPUT_CHARS);
+          : JSON.stringify(result);
       toolResults.push({ type: "tool_result", tool_use_id: use.id, content: serialized });
     }
 
@@ -2964,7 +3041,6 @@ async function startAutoSegmentAtBoundary(input: {
        where da.debate_id = $1
          and d.user_id = $2
        order by da.turn_order asc
-       limit 50
     `,
     [input.debateId, input.userId]
   );
@@ -3077,7 +3153,6 @@ async function startAutoSegmentForDebateAgentAtBoundary(input: {
        where da.debate_id = $1
          and d.user_id = $2
        order by da.turn_order asc
-       limit 50
     `,
     [input.debateId, input.userId]
   );
@@ -3213,21 +3288,25 @@ function summarizeOptionText(text: string, maxChars: number) {
   return compact.slice(0, Math.max(0, maxChars - 1)) + "…";
 }
 
-async function maybeAutoOpenVoteAfterRound2AtBoundary(input: {
+async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
   userId: string;
   debateId: string;
   participantCount: number;
   endedRound: number;
 }) {
   if (input.participantCount <= 0) return { ok: true, opened: false };
-  if (input.endedRound !== 2) return { ok: true, opened: false };
 
   const existing = await loadOpenVote(input.userId, input.debateId);
   if (existing) return { ok: true, opened: false, open: existing };
 
-  const openRoundNumber = input.endedRound + 1;
   const workflow = await loadDebateWorkflow(input.userId, input.debateId);
   const workflowEnabled = Boolean(workflow?.enabled);
+  if (!workflowEnabled) return { ok: true, opened: false };
+
+  const startRound = workflow.election.startRound;
+  if (input.endedRound !== startRound - 1) return { ok: true, opened: false };
+
+  const openRoundNumber = input.endedRound + 1;
   const electionRoles = workflowEnabled ? (workflow?.election.roles ?? []) : [];
 
   // Prefer election vote when workflow is enabled so roles/speakingOrder can be applied
@@ -3238,10 +3317,10 @@ async function maybeAutoOpenVoteAfterRound2AtBoundary(input: {
       debateId: input.debateId,
       participantCount: input.participantCount,
       roundNumber: openRoundNumber,
-      title: "第 2 轮后 · 角色选举",
+      title: `第 ${input.endedRound} 轮后 · 角色选举`,
       kind: "election",
-      bypassStartRound: true,
-      meta: { forcedOpen: true, reason: "after_round_2" }
+      bypassStartRound: false,
+      meta: { forcedOpen: true, reason: `after_round_${input.endedRound}` }
     });
     return { ok: true, opened: Boolean((result as { ok?: unknown }).ok), result };
   }
@@ -3249,14 +3328,22 @@ async function maybeAutoOpenVoteAfterRound2AtBoundary(input: {
   const startTurn = 1;
   const endTurn = input.endedRound * input.participantCount;
 
-  const turns = await query<{ turn_number: number; content: string; structured_output: unknown; agent_name: string }>(
+  const turns = await query<{
+    turn_number: number;
+    seat_number: number | null;
+    content: string;
+    structured_output: unknown;
+    speaker_name: string | null;
+  }>(
     `
       select t.turn_number,
+             t.seat_number,
              t.content,
              t.structured_output,
-             a.name as agent_name
+             coalesce(da.display_name, a.name) as speaker_name
         from debate_turns t
         join ai_agents a on a.id = t.ai_agent_id
+        left join debate_agents da on da.id = t.debate_agent_id
         join debates d on d.id = t.debate_id
        where t.debate_id = $1
          and d.user_id = $2
@@ -3278,15 +3365,18 @@ async function maybeAutoOpenVoteAfterRound2AtBoundary(input: {
   >();
   for (const row of turns.rows) {
     const turnNumber = Number(row.turn_number);
-    const seatNumber = ((turnNumber - 1) % input.participantCount) + 1;
+    const seatNumber =
+      row.seat_number === null
+        ? ((turnNumber - 1) % input.participantCount) + 1
+        : Number(row.seat_number);
     const seat = `Seat-${seatNumber}`;
-    const agentName = String(row.agent_name ?? "Unknown");
+    const speakerName = String(row.speaker_name ?? "Unknown");
 
     const structured = row.structured_output && typeof row.structured_output === "object" ? (row.structured_output as any) : null;
     const proposed = typeof structured?.proposed_solution === "string" ? structured.proposed_solution : "";
 
-    const info = bySeat.get(seat) ?? { seat, name: agentName, proposals: [], lastContent: "" };
-    if (!info.name) info.name = agentName;
+    const info = bySeat.get(seat) ?? { seat, name: speakerName, proposals: [], lastContent: "" };
+    if (!info.name) info.name = speakerName;
     const proposal = summarizeOptionText(proposed, 220);
     if (proposal) info.proposals.push(proposal);
     info.lastContent = String(row.content ?? "");
@@ -3304,11 +3394,24 @@ async function maybeAutoOpenVoteAfterRound2AtBoundary(input: {
     options.push(`${seat}（${info.name}）：${text}`);
   }
 
-  const uniqueOptions = Array.from(new Set(options)).slice(0, 12);
+  const minOptionsConfigured = workflow.voting.custom.minOptions;
+  const maxOptionsConfigured = workflow.voting.custom.maxOptions;
+  const minOptions =
+    typeof minOptionsConfigured === "number" && Number.isFinite(minOptionsConfigured) && minOptionsConfigured >= 1
+      ? Math.floor(minOptionsConfigured)
+      : 2;
+  const maxOptions =
+    typeof maxOptionsConfigured === "number" && Number.isFinite(maxOptionsConfigured) && maxOptionsConfigured >= 1
+      ? Math.floor(maxOptionsConfigured)
+      : input.participantCount;
+  const minOptionsSafe = Math.max(2, minOptions);
+  const effectiveMax = Math.min(input.participantCount, Math.max(minOptionsSafe, maxOptions));
+
+  const uniqueOptions = Array.from(new Set(options)).slice(0, effectiveMax);
   if (uniqueOptions.length < 2) {
     // Fallback: always provide at least two options so voting phase can proceed.
     uniqueOptions.length = 0;
-    for (let i = 1; i <= Math.min(12, input.participantCount); i += 1) {
+    for (let i = 1; i <= effectiveMax; i += 1) {
       uniqueOptions.push(`Seat-${i}：支持 Seat-${i} 的方案（未提取到明确摘要）`);
     }
   }
@@ -3318,13 +3421,13 @@ async function maybeAutoOpenVoteAfterRound2AtBoundary(input: {
     debateId: input.debateId,
     participantCount: input.participantCount,
     roundNumber: openRoundNumber,
-    title: `第 2 轮后 · 方案投票`,
+    title: `第 ${input.endedRound} 轮后 · 方案投票`,
     kind: "custom",
-    prompt: "请基于前两轮（Round 1-2）各席位的表现与方案演进，投票选出你认为最好的方案作为官方结论。",
+    prompt: `请基于前 ${input.endedRound} 轮（Round 1-${input.endedRound}）各席位的表现与方案演进，投票选出你认为最好的方案作为官方结论。`,
     options: uniqueOptions,
-    allowWithoutWorkflow: true,
-    bypassStartRound: true,
-    meta: { forcedOpen: true, reason: "after_round_2" }
+    allowWithoutWorkflow: false,
+    bypassStartRound: false,
+    meta: { forcedOpen: true, reason: `after_round_${input.endedRound}` }
   });
 
   return { ok: true, opened: Boolean((result as { ok?: unknown }).ok), result };
@@ -3374,11 +3477,40 @@ async function maybeGenerateVoteAnnouncementWithSeat1(input: {
   const existing = await readDebateFile(input.userId, input.debate.id, roundPath);
   if (existing && existing.trim()) return { ok: true, generated: false, reason: "already_exists" };
 
+  const workflow = await loadDebateWorkflow(input.userId, input.debate.id);
   const participantsInline = await loadDebateParticipantsInline(input.userId, input.debate.id);
   const directiveJsonRaw = await readDebateFile(input.userId, input.debate.id, VOTE_DIRECTIVE_JSON_PATH);
   const directiveJson = directiveJsonRaw ? (safeJsonParse<Record<string, unknown>>(directiveJsonRaw) ?? null) : null;
 
-  const seat1 = await query<Record<string, unknown>>(
+  let announcerSeatNumber = 1;
+  let announcerRoleLabel: string | null = null;
+  if (workflow?.enabled) {
+    const announcer = workflow.voting.announcement.announcer;
+    if (announcer.type === "seat") {
+      announcerSeatNumber = Math.max(1, Math.floor(Number(announcer.seat) || 1));
+    } else if (announcer.type === "role") {
+      const role = String(announcer.role ?? "").trim();
+      if (role) {
+        const appointmentsRaw =
+          directiveJson && typeof (directiveJson as any).appointments === "object" ? ((directiveJson as any).appointments as Record<string, unknown>) : null;
+        const seat =
+          appointmentsRaw &&
+          appointmentsRaw[role] &&
+          typeof appointmentsRaw[role] === "object" &&
+          typeof (appointmentsRaw[role] as any).seat === "string"
+            ? String((appointmentsRaw[role] as any).seat)
+            : "";
+        const match = seat.match(/^Seat-([0-9]{1,6})$/);
+        const n = match ? Number(match[1]) : Number.NaN;
+        if (Number.isFinite(n) && n >= 1) {
+          announcerSeatNumber = Math.floor(n);
+          announcerRoleLabel = role;
+        }
+      }
+    }
+  }
+
+  const announcer = await query<Record<string, unknown>>(
     `
       select da.id as debate_agent_id,
              a.*
@@ -3387,29 +3519,53 @@ async function maybeGenerateVoteAnnouncementWithSeat1(input: {
         join debates d on d.id = da.debate_id
        where da.debate_id = $1
          and d.user_id = $2
-         and da.turn_order = 1
+         and da.turn_order = $3
        limit 1
     `,
-    [input.debate.id, input.userId]
+    [input.debate.id, input.userId, announcerSeatNumber]
   );
-  if ((seat1.rowCount ?? 0) !== 1) return { ok: false, generated: false, error: "Seat-1 agent not found." };
 
-  const seat1DebateAgentId = String(seat1.rows[0].debate_agent_id);
-  const agent = normalizeAgentRow(seat1.rows[0]);
-  const overrideSystemPrompt = await loadDebateAgentSystemPrompt(input.userId, seat1DebateAgentId);
+  let announcerRow: Record<string, unknown> | null = (announcer.rowCount ?? 0) === 1 ? announcer.rows[0] : null;
+  if (!announcerRow) {
+    // Fallback to Seat-1
+    const seat1 = await query<Record<string, unknown>>(
+      `
+        select da.id as debate_agent_id,
+               a.*
+          from debate_agents da
+          join ai_agents a on a.id = da.ai_agent_id
+          join debates d on d.id = da.debate_id
+         where da.debate_id = $1
+           and d.user_id = $2
+           and da.turn_order = 1
+         limit 1
+      `,
+      [input.debate.id, input.userId]
+    );
+    if ((seat1.rowCount ?? 0) !== 1) return { ok: false, generated: false, error: "Seat-1 agent not found." };
+    announcerSeatNumber = 1;
+    announcerRoleLabel = null;
+    announcerRow = seat1.rows[0];
+  }
+
+  const announcerDebateAgentId = String(announcerRow.debate_agent_id);
+  const agent = normalizeAgentRow(announcerRow);
+  const overrideSystemPrompt = await loadDebateAgentSystemPrompt(input.userId, announcerDebateAgentId);
   const apiKey = decryptSecret(agent.apiKeyEncrypted);
   const url = resolveChatUrl(agent);
 
   const proposalRound = Math.max(1, Math.floor(roundNumber) - 1);
   const proposalStart = 1;
   const proposalEnd = proposalRound * input.participantCount;
-  const proposalTurns = await query<{ turn_number: number; content: string; agent_name: string }>(
+  const proposalTurns = await query<{ turn_number: number; seat_number: number | null; content: string; speaker_name: string | null }>(
     `
       select t.turn_number,
+             t.seat_number,
              t.content,
-             a.name as agent_name
+             coalesce(da.display_name, a.name) as speaker_name
         from debate_turns t
         join ai_agents a on a.id = t.ai_agent_id
+        left join debate_agents da on da.id = t.debate_agent_id
         join debates d on d.id = t.debate_id
        where t.debate_id = $1
          and d.user_id = $2
@@ -3425,8 +3581,10 @@ async function maybeGenerateVoteAnnouncementWithSeat1(input: {
           `Rounds 1-${proposalRound} (read-only; for vote context):`,
           ...proposalTurns.rows.map((r) => {
             const tn = Number(r.turn_number);
-            const seat = `Seat-${((tn - 1) % input.participantCount) + 1}`;
-            const name = String(r.agent_name ?? "Unknown");
+            const seatNumber =
+              r.seat_number === null ? ((tn - 1) % input.participantCount) + 1 : Number(r.seat_number);
+            const seat = `Seat-${seatNumber}`;
+            const name = String(r.speaker_name ?? "Unknown");
             const body = summarizeOptionText(String(r.content ?? ""), 260);
             return `- ${seat} · ${name}: ${body}`;
           })
@@ -3435,7 +3593,7 @@ async function maybeGenerateVoteAnnouncementWithSeat1(input: {
 
   const system = [
     buildBaseSystemPrompt(agent, overrideSystemPrompt),
-    "SYSTEM TASK: You are Seat-1 acting as the official vote announcer.",
+    `SYSTEM TASK: You are Seat-${announcerSeatNumber}${announcerRoleLabel ? ` (${announcerRoleLabel})` : ""} acting as the official vote announcer.`,
     "Output only Markdown for humans; no tool calls."
   ].join("\n\n");
 
@@ -3589,13 +3747,26 @@ export async function runDebate(id: string, userId: string) {
       }
 
       const agent = normalizeAgentRow(agentResult.rows[0]);
+      const seatNumberForEvent =
+        typeof (currentParticipant as any).turn_order === "number"
+          ? Number((currentParticipant as any).turn_order)
+          : typeof (currentParticipant as any).turnOrder === "number"
+            ? Number((currentParticipant as any).turnOrder)
+            : currentIndex + 1;
+      const displayNameForEvent =
+        typeof (currentParticipant as any).display_name === "string"
+          ? String((currentParticipant as any).display_name)
+          : typeof (currentParticipant as any).displayName === "string"
+            ? String((currentParticipant as any).displayName)
+            : "";
+      const eventAgentName = `Seat-${seatNumberForEvent}${displayNameForEvent ? ` · ${displayNameForEvent}` : ""}`;
       setDebateLiveProgress({
         debateId: id,
         roundNumber: completedRounds + 1,
         messageNumber: debate.currentTurn + 1,
         debateAgentId: String(currentParticipant.id),
         aiAgentId: String(currentParticipant.ai_agent_id),
-        agentName: agent.name,
+        agentName: eventAgentName,
         stage: "calling_model"
       });
       const startedAt = Date.now();
@@ -3615,7 +3786,8 @@ export async function runDebate(id: string, userId: string) {
             roundNumber,
             participantCount,
             userId,
-            String(currentParticipant.id)
+            String(currentParticipant.id),
+            eventAgentName
           );
           raw = result.raw;
           usage = result.usage;
@@ -3646,13 +3818,19 @@ export async function runDebate(id: string, userId: string) {
 
       await query(
         `insert into debate_turns (
-          id, debate_id, ai_agent_id, turn_number, content, structured_output,
+          id, debate_id, ai_agent_id, debate_agent_id, seat_number, turn_number, content, structured_output,
           parse_status, token_used, response_time_ms, retry_count, error_code, created_at
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
         [
           randomUUID(),
           id,
           String(currentParticipant.ai_agent_id),
+          String(currentParticipant.id),
+          typeof (currentParticipant as any).turn_order === "number"
+            ? Number((currentParticipant as any).turn_order)
+            : typeof (currentParticipant as any).turnOrder === "number"
+              ? Number((currentParticipant as any).turnOrder)
+              : currentIndex + 1,
           debate.currentTurn + 1,
           parsed.content,
           parsed.structuredOutput ? JSON.stringify(parsed.structuredOutput) : null,
@@ -3720,7 +3898,7 @@ export async function runDebate(id: string, userId: string) {
          type: "turn_end",
          debateId: id,
          turnNumber: messageNumber,
-         agentName: agent.name,
+         agentName: eventAgentName,
          at: createdAt
        });
 
@@ -3730,7 +3908,7 @@ export async function runDebate(id: string, userId: string) {
             userId,
             debateId: id,
             debateAgentId: String(currentParticipant.id),
-            agentName: agent.name,
+            agentName: eventAgentName,
             debateQuestion: debate.question,
             turnNumber: messageNumber,
             content: parsed.content,
@@ -3743,7 +3921,7 @@ export async function runDebate(id: string, userId: string) {
                   userId,
                   debateId: id,
                   turnNumber: messageNumber,
-                  agentName: agent.name,
+                  agentName: eventAgentName,
                   content: parsed.content,
                   structuredOutput: parsed.structuredOutput,
                   now: createdAt
@@ -3763,6 +3941,8 @@ export async function runDebate(id: string, userId: string) {
         id: String(row.id),
         debateId: String(row.debate_id),
         aiAgentId: String(row.ai_agent_id),
+        debateAgentId: row.debate_agent_id ? String(row.debate_agent_id) : null,
+        seatNumber: row.seat_number === null ? null : Number(row.seat_number),
         turnNumber: Number(row.turn_number),
         content: String(row.content),
         structuredOutput: (row.structured_output as StructuredOutput | null) ?? null,
@@ -3774,12 +3954,15 @@ export async function runDebate(id: string, userId: string) {
         createdAt: String(row.created_at)
       }));
 
-      const consensus = aggregateConsensusByLastRound(turns, participantCount);
+      const workflow = await loadDebateWorkflow(userId, id);
+      const consensus = aggregateConsensusByLastRound(turns, participantCount, workflow?.consensus ?? null);
       const nextTurn = debate.currentTurn + 1;
       const isBoundary = participantCount > 0 ? nextTurn % participantCount === 0 : false;
       const endedRound = participantCount > 0 ? Math.floor(nextTurn / participantCount) : 0;
       const openVoteBeforeUpdate = await loadOpenVote(userId, id);
-      const mustKeepRunningForVote = Boolean(openVoteBeforeUpdate) || (isBoundary && endedRound === 2);
+      const mustKeepRunningForVote =
+        Boolean(openVoteBeforeUpdate) ||
+        Boolean(workflow?.enabled) && isBoundary && endedRound === (workflow?.election.startRound ?? 1) - 1;
       const consensusReachedForDb = mustKeepRunningForVote ? false : consensus.reached;
       const nextStatusForDb = consensusReachedForDb ? "completed" : "running";
       await query(
@@ -3888,7 +4071,7 @@ export async function runDebate(id: string, userId: string) {
           }
 
           try {
-            const opened = await maybeAutoOpenVoteAfterRound2AtBoundary({
+            const opened = await maybeAutoOpenVoteAtBoundaryUsingWorkflow({
               userId,
               debateId: id,
               participantCount,
@@ -3898,7 +4081,7 @@ export async function runDebate(id: string, userId: string) {
               emitDebateLiveEvent(id, {
                 type: "status",
                 debateId: id,
-                message: "已在第 2 轮结束后自动开票：请各席位使用官方工具完成投票",
+                message: `已在第 ${endedRound} 轮结束后自动开票：请各席位使用官方工具完成投票`,
                 at: new Date().toISOString()
               });
             }

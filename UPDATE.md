@@ -1,3 +1,14 @@
+## 2026-03-18
+
+- 运行时：第 1 轮不再向席位注入完整 seats 名单（仅告知自身 Seat-X + 公平性约束），避免开局就“评价/分配”其他席位导致看起来像有记忆
+- 创建/开始辩论：禁止并清理从策略角色文件意外 seed 的内部路径（`debate/*`、`context/*`、`facts/*`、`votes/*`、`question/*`），避免新辩论读取到上一场残留的“记忆/段落/台账”
+- 轮次架构：默认 `workflow.json` 调整为 Round 1 正序发言、Round 2 反序发言（轮次边界自动 reverse）；Round 3 起自动开选举投票（主持人/监管者）
+- DB：`debate_agents` 增加 `display_name`（每席位随机唯一名）；`debate_turns` 增加 `debate_agent_id` + `seat_number`，避免复用同一 AI 配置时“错认人/错认席位”
+- 运行时：提示词强化 “Round / Turn（本轮第几回） vs 全局 Turn #N”，避免把 Round 2 Turn 1 理解成“第 21 个席位/第 21 个人”
+- 辩论详情页：发言目录与查看器标题同时显示 `#全局序号 + 第 X 轮第 Y 回 (+ Seat-X)`
+- 辩论详情页：参与者的上下文百分比改为进度条（绿→黄→红）并保留百分比文字；参与者显示为 `Seat 顺位 + display_name`，并在旁边显示对应 AI 配置名
+- seed SQL：民主集中制策略 `workflow.json` 的 `seatOrderRules` 改为 reverse（Round 2 反序），不再 rotate
+
 ## 2026-03-17
 
 - 运行时：75% 自动“新会话”阈值改为按单席位“本段累计（sessionPromptTokens/contextLength）”判断，不再错误地按单次请求的 promptTokens 判断，避免长期讨论仍不触发分段
@@ -10,6 +21,31 @@
 - 运行时：新增工具 `debate_files_write`（所有席位可用），允许写入 `final/*` 或 `outputs/*`，用于把最终交付物落盘为辩论文件
 - Token 统计：移除“估算+校准累计”，改为仅在模型返回真实 `usage` 时统计上下文百分比与本段累计；OpenAI 侧保持流式输出，流结束后后台追加一次“usage probe”请求仅取 `usage`（max_tokens=1）用于统计
 - seed：民主集中制策略提示词补充 Skill 说明与硬性交付要求（最终表决通过后必须 `debate_files_write` 到 `final/novel_outline_v2.md`）
+- 鉴权：修复 middleware 引用 `next/headers` 导致 Edge 运行时潜在崩溃的问题（抽离 `lib/session-core.ts`，middleware 改为仅依赖 Edge-safe 模块）
+- 工程：补齐 ESLint 最小配置与依赖（`eslint@8` + `eslint-config-next@15.2.0`），让 `next lint` 可非交互运行
+- 投票：自定义“方案投票”候选项数量由策略 `workflow.json` 的 `voting.custom.minOptions/maxOptions` 控制（默认不截断，按席位数生成）
+- 投票：投票候选列表在注入到每个席位提示词时会按席位做稳定洗牌，降低“总是选前几位”的位置偏差
+- 投票：投票起始轮次完全由策略 `workflow.json` 的 `election.startRound` 控制（自动开票也遵从该值）
+- 投票：自动开票的状态提示不再硬编码“第 2 轮结束后”
+- 投票：公告生成席位由策略 `workflow.json` 的 `voting.announcement.announcer` 控制（支持按 seat 或按角色 role 指定）
+- 共识：阈值由策略 `workflow.json` 的 `consensus` 控制（enabled/minAvgScore/requireAllSeats）
+- 运行时：Seats 列表不再固定 `limit 50`，避免席位数增长时提示词/Checkpoint 缺席
+- 运行时：工具读文件/注入上下文默认不再按 chars 截断（显示全部）
+- 文件管理：列表接口不再返回全量 content，改为按需读取；文件夹删除改为后端批量删除；拖拽 hover 降低无效 rerender
+- 新增脚本：从 OpenRouter Models API 拉取模型 `context_length`（用于按 75% 阈值自动分段）
+- AI 配置：新增 `contextLength`（tokens，可选），可从“模型目录”自动填充，用于后续按 75% 阈值自动分段
+- AI 配置：新增“返回 JSON”调试按钮（复用测试连接接口 `?debug=1`），用于查看 Provider 原始返回并判断是否包含 usage
+- 运行时：基于返回的 `usage.prompt_tokens`（不看 total）+ 配置的 `contextLength`，在轮次边界自动开始新段落（>= 75%）
+- 辩论详情页：发言内容新增“跟随最新”按钮，开启后自动滚动到最新输出
+- 运行时：官方投票若已开启但未封票，则在轮次边界自动封票（不改投票结果），并要求下一轮首位席位统计并公布结果
+- DB：移除 `debate_agents(debate_id, ai_agent_id)` 唯一约束，允许同一场辩论复用同一个 AI 配置到多个席位
+- AI 配置：修复“删除”按钮未检查后端错误导致看起来无效的问题（例如配置已被辩论使用时会提示失败）
+- 辩论列表页：进行中辩论点击“删除”会提示“必须先终止才能删除”（不再无反应）
+- 删除接口：`pending/running/paused` 状态统一禁止删除，避免误删进行中的辩论
+- 辩论详情页：切换辩论 `id` 时重置本地 state，并防止旧的异步 `loadDebate()` 回写，避免新辩论短暂显示上一场辩论的发言/文件内容（看起来像“记忆”残留）
+- 策略：duplicate 角色时不再自动追加 ` (copy)`，保持角色名一致
+- 策略详情页：角色列表支持多选并批量删除（至少保留 2 个角色，保存后生效）
+- 策略详情页：角色多选改为 `Ctrl + 左键` 切换选择、`Shift + 左键` 范围选择（`Ctrl+Shift` 追加范围）
 
 ## 2026-03-16
 
@@ -61,15 +97,6 @@
 - 辩论详情页：记忆栏移除摘要/log，改为打开 AI 文件管理弹窗并在弹窗内查看文件
 - 辩论详情页：移除“文件管理”Tab（功能合并到“记忆”）
 - runtime：删除未使用的 `randomInt`/`aggregateConsensus` 等死代码（不改业务逻辑）
-- 新增脚本：从 OpenRouter Models API 拉取模型 `context_length`（用于按 75% 阈值自动分段）
-- AI 配置：新增 `contextLength`（tokens，可选），可从“模型目录”自动填充，用于后续按 75% 阈值自动分段
-- AI 配置：新增“返回 JSON”调试按钮（复用测试连接接口 `?debug=1`），用于查看 Provider 原始返回并判断是否包含 usage
-- 运行时：基于返回的 `usage.prompt_tokens`（不看 total）+ 配置的 `contextLength`，在轮次边界自动开始新段落（>= 75%）
-- 辩论详情页：发言内容新增“跟随最新”按钮，开启后自动滚动到最新输出
-- 运行时：官方投票若已开启但未封票，则在轮次边界自动封票（不改投票结果），并要求下一轮首位席位统计并公布结果
-- DB：移除 `debate_agents(debate_id, ai_agent_id)` 唯一约束，允许同一场辩论复用同一个 AI 配置到多个席位
-- AI 配置：修复“删除”按钮未检查后端错误导致看起来无效的问题（例如配置已被辩论使用时会提示失败）
-
 ## 2026-03-14
 
 - 辩论支持长时记忆（按参与者独立）：自动维护 `memory/log.jsonl`（追加）与 `memory/summary.md`（压缩摘要）

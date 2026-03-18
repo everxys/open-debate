@@ -8,6 +8,50 @@ import type { DebateRecord } from "@/lib/types";
 import { createDebateSchema, updateDebateQuestionSchema, updateDebateSharingSchema } from "@/lib/validation";
 import { normalizeDebateWorkflow } from "@/lib/workflow";
 
+const DISPLAY_NAME_ADJECTIVES = ["青", "赤", "白", "玄", "金", "银", "苍", "墨", "紫", "绿", "蓝", "橙"];
+const DISPLAY_NAME_NOUNS = ["狐", "狼", "鹰", "鲸", "蛇", "虎", "鹿", "鸦", "猫", "犬", "熊", "龙", "雀"];
+
+function pickRandom<T>(items: T[]) {
+  if (items.length === 0) throw new Error("pickRandom: empty list");
+  return items[Math.floor(Math.random() * items.length)] as T;
+}
+
+function createUniqueDisplayName(used: Set<string>) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const name = `${pickRandom(DISPLAY_NAME_ADJECTIVES)}${pickRandom(DISPLAY_NAME_NOUNS)}`;
+    if (!used.has(name)) {
+      used.add(name);
+      return name;
+    }
+  }
+  const fallback = `席位-${randomUUID().slice(0, 8)}`;
+  used.add(fallback);
+  return fallback;
+}
+
+const DEFAULT_WORKFLOW_JSON = JSON.stringify(
+  {
+    workflowVersion: 1,
+    enabled: true,
+    election: {
+      startRound: 3,
+      roles: ["Host", "Supervisor"],
+      speakingOrder: { firstRole: "Host", lastRole: "Supervisor" }
+    },
+    seatOrderRules: [
+      { afterRound: 1, policy: { type: "reverse" } },
+      { afterRound: 2, policy: { type: "reverse" } }
+    ],
+    voting: {
+      custom: { minOptions: 2, maxOptions: null },
+      announcement: { announcer: { type: "role", role: "Host" } }
+    },
+    consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true }
+  },
+  null,
+  2
+);
+
 function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
   return {
     id: String(row.id),
@@ -176,12 +220,27 @@ export async function createDebate(input: unknown) {
     );
 
     const debate = normalizeDebateRow(insertedDebate.rows[0]);
+    const usedDisplayNames = new Set<string>();
     for (let index = 0; index < data.agentIds.length; index += 1) {
       await query(
-        `insert into debate_agents (debate_id, ai_agent_id, turn_order, turn_count, created_at)
-         values ($1,$2,$3,0,$4)`,
-        [debate.id, data.agentIds[index], index + 1, now]
+        `insert into debate_agents (debate_id, ai_agent_id, display_name, turn_order, turn_count, created_at)
+         values ($1,$2,$3,$4,0,$5)`,
+        [debate.id, data.agentIds[index], createUniqueDisplayName(usedDisplayNames), index + 1, now]
       );
+    }
+
+    // Ensure workflow.json exists so seat order and election timing are deterministic.
+    try {
+      await query(
+        `
+          insert into debate_files (debate_id, path, content, created_at, updated_at)
+          values ($1, 'workflow.json', $2, $3, $3)
+          on conflict (debate_id, path) do nothing
+        `,
+        [debate.id, DEFAULT_WORKFLOW_JSON, now]
+      );
+    } catch {
+      // backward-compat: older DBs may not have debate_files yet.
     }
 
     return toListItem(debate);
@@ -255,6 +314,7 @@ export async function createDebate(input: unknown) {
   const debate = normalizeDebateRow(insertedDebate.rows[0]);
 
   try {
+    const usedDisplayNames = new Set<string>();
     const uniqueRoleIds = Array.from(new Set(roleIds));
     const workflow = await query<{ content: string }>(
       `
@@ -266,28 +326,25 @@ export async function createDebate(input: unknown) {
       `,
       [uniqueRoleIds]
     );
-    if ((workflow.rowCount ?? 0) >= 1) {
-      const content = String(workflow.rows[0]?.content ?? "").trim();
-      if (content) {
-        await query(
-          `
-            insert into debate_files (debate_id, path, content, created_at, updated_at)
-            values ($1, 'workflow.json', $2, $3, $3)
-            on conflict (debate_id, path)
-            do update set content = excluded.content, updated_at = excluded.updated_at
-          `,
-          [debate.id, content, now]
-        );
-      }
-    }
+    const workflowContent =
+      (workflow.rowCount ?? 0) >= 1 ? String(workflow.rows[0]?.content ?? "").trim() : "";
+    await query(
+      `
+        insert into debate_files (debate_id, path, content, created_at, updated_at)
+        values ($1, 'workflow.json', $2, $3, $3)
+        on conflict (debate_id, path)
+        do update set content = excluded.content, updated_at = excluded.updated_at
+      `,
+      [debate.id, workflowContent || DEFAULT_WORKFLOW_JSON, now]
+    );
 
     for (let index = 0; index < bindings.length; index += 1) {
       const binding = bindings[index];
       const insertParticipant = await query<{ id: string }>(
-        `insert into debate_agents (debate_id, ai_agent_id, turn_order, turn_count, created_at)
-         values ($1,$2,$3,0,$4)
+        `insert into debate_agents (debate_id, ai_agent_id, display_name, turn_order, turn_count, created_at)
+         values ($1,$2,$3,$4,0,$5)
          returning id`,
-        [debate.id, binding.agentId, index + 1, now]
+        [debate.id, binding.agentId, createUniqueDisplayName(usedDisplayNames), index + 1, now]
       );
 
       const debateAgentId = insertParticipant.rows[0]?.id;
@@ -311,7 +368,13 @@ export async function createDebate(input: unknown) {
         const path = String(file.path ?? "");
         const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").trim().toLowerCase();
         if (normalized.startsWith("memory/")) continue;
-        if (normalized === "debate/workflow.json") continue;
+        // Strategy role files are meant to seed per-seat prompt context and templates.
+        // Never seed debate-internal runtime files (they can cause "previous debate memory" leakage).
+        if (normalized.startsWith("debate/")) continue;
+        if (normalized.startsWith("context/")) continue;
+        if (normalized.startsWith("facts/")) continue;
+        if (normalized.startsWith("votes/")) continue;
+        if (normalized.startsWith("question/")) continue;
         await query(
           `insert into debate_agent_files (id, debate_agent_id, path, content, created_at, updated_at)
            values ($1,$2,$3,$4,$5,$5)`,
@@ -341,6 +404,7 @@ export async function getDebateDetail(id: string) {
     `
       select da.id as debate_agent_id,
              da.ai_agent_id,
+             da.display_name as display_name,
              da.turn_order,
              da.turn_count,
              a.name as agent_name,
@@ -357,6 +421,7 @@ export async function getDebateDetail(id: string) {
   const agents = agentRows.rows.map((item) => ({
     id: String(item.ai_agent_id),
     debateAgentId: String(item.debate_agent_id),
+    displayName: item.display_name ? String(item.display_name) : `Seat-${Number(item.turn_order)}`,
     name: item.agent_name ? String(item.agent_name) : "Unknown",
     provider: item.agent_provider ? String(item.agent_provider) : "openai",
     contextLength: item.context_length === null ? null : Number(item.context_length),
@@ -577,7 +642,7 @@ export async function deleteDebate(id: string) {
   if ((existing.rowCount ?? 0) !== 1) {
     throw new AppError("NOT_FOUND", 404, "Debate not found");
   }
-  if (String(existing.rows[0].status) === "running") {
+  if (["pending", "running", "paused"].includes(String(existing.rows[0].status))) {
     throw new AppError("CONFLICT", 409, "Please stop the debate before deleting");
   }
 
@@ -601,10 +666,11 @@ export async function listDebateTurns(
   const turnRows = await query<Record<string, unknown>>(
     `
       select t.*,
-             a.name as agent_name,
+             coalesce(da.display_name, a.name) as agent_name,
              a.provider as agent_provider
         from debate_turns t
         join ai_agents a on a.id = t.ai_agent_id
+        left join debate_agents da on da.id = t.debate_agent_id
        where t.debate_id = $1
          and ($2::int is null or t.turn_number > $2::int)
        order by t.turn_number asc
@@ -621,6 +687,8 @@ export async function listDebateTurns(
     parseStatus: String(turn.parse_status),
     tokenUsed: Number(turn.token_used),
     createdAt: String(turn.created_at),
+    debateAgentId: turn.debate_agent_id ? String(turn.debate_agent_id) : null,
+    seatNumber: turn.seat_number === null || turn.seat_number === undefined ? null : Number(turn.seat_number),
     agent: {
       name: turn.agent_name ? String(turn.agent_name) : "Unknown",
       provider: turn.agent_provider ? String(turn.agent_provider) : "openai"
@@ -678,18 +746,17 @@ export async function listDebateAllFiles(debateId: string): Promise<DebateAllFil
   }
 
   try {
-    const agentFiles = await query<{ debate_agent_id: string; turn_order: number | null; agent_name: string | null; path: string; updated_at: string | null }>(
+    const agentFiles = await query<{ debate_agent_id: string; turn_order: number | null; display_name: string | null; path: string; updated_at: string | null }>(
       `
         select da.id as debate_agent_id,
                da.turn_order as turn_order,
-               a.name as agent_name,
+               da.display_name as display_name,
                f.path as path,
                f.updated_at as updated_at
           from debate_agent_files f
           join debate_agents da on da.id = f.debate_agent_id
-          join ai_agents a on a.id = da.ai_agent_id
          where da.debate_id = $1
-         order by da.turn_order asc nulls last, a.name asc, f.path asc
+         order by da.turn_order asc nulls last, da.display_name asc nulls last, f.path asc
          limit 20000
       `,
       [debateId]
@@ -699,7 +766,7 @@ export async function listDebateAllFiles(debateId: string): Promise<DebateAllFil
         scope: "agent",
         debateAgentId: String(row.debate_agent_id),
         turnOrder: row.turn_order === null ? null : Number(row.turn_order),
-        agentName: row.agent_name ? String(row.agent_name) : "Unknown",
+        agentName: row.display_name ? String(row.display_name) : "Unknown",
         path: String(row.path),
         updatedAt: row.updated_at ? String(row.updated_at) : null
       });
@@ -922,16 +989,14 @@ export async function startDebateSegment(id: string, input: unknown) {
     throw new AppError("CONFLICT", 409, "Please pause the debate before starting a new segment");
   }
 
-  const participants = await query<{ debate_agent_id: string; turn_order: number; agent_name: string }>(
+  const participants = await query<{ debate_agent_id: string; turn_order: number; display_name: string | null }>(
     `
       select da.id as debate_agent_id,
              da.turn_order,
-             a.name as agent_name
+             da.display_name as display_name
         from debate_agents da
-        join ai_agents a on a.id = da.ai_agent_id
        where da.debate_id = $1
        order by da.turn_order asc
-       limit 50
     `,
     [id]
   );
@@ -994,7 +1059,7 @@ export async function startDebateSegment(id: string, input: unknown) {
   lines.push("");
   lines.push("## Seats (current order)");
   for (const row of participants.rows) {
-    lines.push(`- Seat-${Number(row.turn_order)}: ${String(row.agent_name ?? "Unknown")}`);
+    lines.push(`- Seat-${Number(row.turn_order)}: ${String(row.display_name ?? `Seat-${Number(row.turn_order)}`)}`);
   }
 
   lines.push("");
@@ -1112,7 +1177,38 @@ export async function startDebate(id: string) {
       [id]
     );
 
+    // Also clean any other debate-internal files that should never be seeded from strategy role files.
+    await query(
+      `
+        delete from debate_agent_files f
+        using debate_agents da
+        where f.debate_agent_id = da.id
+          and da.debate_id = $1
+          and (
+            lower(replace(f.path, '\\\\', '/')) like 'debate/%'
+            or lower(replace(f.path, '\\\\', '/')) like 'context/%'
+            or lower(replace(f.path, '\\\\', '/')) like 'facts/%'
+            or lower(replace(f.path, '\\\\', '/')) like 'votes/%'
+            or lower(replace(f.path, '\\\\', '/')) like 'question/%'
+          )
+      `,
+      [id]
+    );
+
     await query("delete from debate_files where debate_id = $1 and path = $2", [id, "facts/board.md"]);
+    await query(
+      `
+        delete from debate_files
+         where debate_id = $1
+           and (
+             lower(replace(path, '\\\\', '/')) like 'context/%'
+             or lower(replace(path, '\\\\', '/')) like 'facts/%'
+             or lower(replace(path, '\\\\', '/')) like 'votes/%'
+             or lower(replace(path, '\\\\', '/')) like 'question/%'
+           )
+      `,
+      [id]
+    );
   }
 
   void runDebate(id, session.userId);
@@ -1185,25 +1281,24 @@ export async function appendAgentToDebate(id: string, agentId: string) {
     throw new AppError("NOT_FOUND", 404, "Agent not found");
   }
 
-  const exists = await query<{ id: string }>(
-    "select id from debate_agents where debate_id = $1 and ai_agent_id = $2",
-    [debate.id, agentId]
-  );
-  if ((exists.rowCount ?? 0) > 0) {
-    throw new AppError("CONFLICT", 409, "Agent already joined this debate");
-  }
-
   const maxOrderResult = await query<{ max: number }>(
     "select coalesce(max(turn_order), 0)::int as max from debate_agents where debate_id = $1",
     [debate.id]
   );
   const maxOrder = maxOrderResult.rows[0]?.max ?? 0;
+  const existingDisplayNames = await query<{ display_name: string | null }>(
+    "select display_name from debate_agents where debate_id = $1",
+    [debate.id]
+  );
+  const usedDisplayNames = new Set(
+    existingDisplayNames.rows.map((row) => (row.display_name ? String(row.display_name) : "")).filter(Boolean)
+  );
   const now = new Date().toISOString();
 
   await query(
-    `insert into debate_agents (debate_id, ai_agent_id, turn_order, turn_count, created_at)
-     values ($1,$2,$3,0,$4)`,
-    [debate.id, agentId, maxOrder + 1, now]
+    `insert into debate_agents (debate_id, ai_agent_id, display_name, turn_order, turn_count, created_at)
+     values ($1,$2,$3,$4,0,$5)`,
+    [debate.id, agentId, createUniqueDisplayName(usedDisplayNames), maxOrder + 1, now]
   );
 
   await query("update debates set updated_at = $2 where id = $1", [debate.id, now]);

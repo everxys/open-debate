@@ -457,15 +457,38 @@ export async function listAgentFiles(agentId: string) {
   await getAgentById(agentId);
   try {
     const result = await query<Record<string, unknown>>(
-      "select path, content, created_at, updated_at from ai_agent_files where ai_agent_id = $1 order by path asc",
+      "select path, created_at, updated_at from ai_agent_files where ai_agent_id = $1 order by path asc",
       [agentId]
     );
     return result.rows.map((row) => ({
       path: String(row.path),
-      content: String(row.content ?? ""),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at)
     }));
+  } catch (error) {
+    if (isMissingTableError(error, "ai_agent_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing ai_agent_files table");
+    }
+    throw error;
+  }
+}
+
+export async function getAgentFile(agentId: string, path: string) {
+  await getAgentById(agentId);
+  try {
+    const result = await query<Record<string, unknown>>(
+      "select path, content, created_at, updated_at from ai_agent_files where ai_agent_id = $1 and path = $2 limit 1",
+      [agentId, path]
+    );
+    if ((result.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "File not found");
+    }
+    return {
+      path: String(result.rows[0].path),
+      content: String(result.rows[0].content ?? ""),
+      createdAt: String(result.rows[0].created_at),
+      updatedAt: String(result.rows[0].updated_at)
+    };
   } catch (error) {
     if (isMissingTableError(error, "ai_agent_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing ai_agent_files table");
@@ -515,6 +538,24 @@ export async function deleteAgentFile(agentId: string, input: unknown) {
     if ((result.rowCount ?? 0) !== 1) {
       throw new AppError("NOT_FOUND", 404, "File not found");
     }
+  } catch (error) {
+    if (isMissingTableError(error, "ai_agent_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing ai_agent_files table");
+    }
+    throw error;
+  }
+}
+
+export async function deleteAgentFilesByPrefix(agentId: string, prefix: string) {
+  await getAgentById(agentId);
+  const normalized = String(prefix ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const like = normalized ? `${normalized.replace(/\/+$/, "")}/%` : "%";
+  try {
+    const result = await query(
+      "delete from ai_agent_files where ai_agent_id = $1 and path like $2",
+      [agentId, like]
+    );
+    return { deleted: Number(result.rowCount ?? 0) };
   } catch (error) {
     if (isMissingTableError(error, "ai_agent_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing ai_agent_files table");

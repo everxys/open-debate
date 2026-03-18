@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { verifySessionToken } from "@/lib/session";
+import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/session-core";
 
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
@@ -9,7 +9,7 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith("/debates") ||
     pathname.startsWith("/settings") ||
     pathname.startsWith("/admin");
-  const token = request.cookies.get("open_debate_session")?.value;
+  const token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   const session = token ? await verifySessionToken(token) : null;
 
   if (!session && isProtected) {

@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { Fragment, type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, type CSSProperties, type MutableRefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Tree, type NodeApi } from "react-arborist";
 
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 import { MarkdownView } from "@/components/ui/markdown";
+import { createFsTreeModel, type FsNode, normalizeFsPath } from "@/lib/fs-tree";
 import { normalizeDebateWorkflow } from "@/lib/workflow";
 
 type Agent = {
@@ -19,6 +20,7 @@ type Agent = {
 type DebateAgent = {
   id: string;
   debateAgentId: string;
+  displayName: string;
   name: string;
   provider: string;
   contextLength: number | null;
@@ -46,6 +48,8 @@ type Debate = {
 type Turn = {
   id: string;
   turnNumber: number;
+  debateAgentId: string | null;
+  seatNumber: number | null;
   content: string;
   parseStatus: string;
   tokenUsed: number;
@@ -65,87 +69,86 @@ type LeftTab = "status" | "participants" | "workflow" | "memory";
 
 type LeftTabIconName = "status" | "participants" | "workflow" | "memory";
 
-type FsNode = {
-  id: string;
-  name: string;
-  type: "dir" | "file";
-  path: string;
-  children?: FsNode[];
-};
+function UsageBar({ ratio }: { ratio: number | null }) {
+  const pct = ratio === null ? null : Math.max(0, Math.min(100, Math.round(ratio * 100)));
+  const color =
+    pct === null
+      ? "rgba(148, 163, 184, 0.65)"
+      : pct < 55
+        ? "rgba(34, 197, 94, 0.95)"
+        : pct < 80
+          ? "rgba(245, 158, 11, 0.95)"
+          : "rgba(239, 68, 68, 0.95)";
 
-type FsDirBuilder = {
-  name: string;
-  path: string;
-  dirs: Map<string, FsDirBuilder>;
-  files: Map<string, FsNode>;
-};
-
-function toDirId(path: string) {
-  return `d:${path}`;
+  return (
+    <span className="row" style={{ gap: 8, alignItems: "center" }}>
+      <span
+        aria-hidden="true"
+        style={{
+          width: 120,
+          height: 8,
+          borderRadius: 999,
+          background: "rgba(148, 163, 184, 0.22)",
+          overflow: "hidden"
+        }}
+      >
+        <span
+          style={{
+            display: "block",
+            height: "100%",
+            width: pct === null ? "0%" : `${pct}%`,
+            background: color
+          }}
+        />
+      </span>
+      <span className="muted" style={{ minWidth: 44, textAlign: "right" }}>
+        {pct === null ? "?" : `${pct}%`}
+      </span>
+    </span>
+  );
 }
 
-function toFileId(path: string) {
-  return `f:${path}`;
-}
+const AllFilesTreeRow = memo(
+  function AllFilesTreeRow(props: {
+    node: NodeApi<FsNode>;
+    style: CSSProperties;
+    activeVirtualPath: string;
+    actionsRef: MutableRefObject<{ openVirtualPath: (virtualPath: string) => void }>;
+  }) {
+    const { node, style, activeVirtualPath, actionsRef } = props;
+    const data = node.data;
+    const isDir = data.type === "dir";
+    const isActive = data.path === activeVirtualPath;
 
-function normalizeFsPath(value: string) {
-  return value.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/{2,}/g, "/");
-}
-
-function buildFsTreeFromPaths(paths: string[]) {
-  const root: FsDirBuilder = { name: "", path: "", dirs: new Map(), files: new Map() };
-
-  for (const raw of paths) {
-    const normalized = normalizeFsPath(raw);
-    const parts = normalized.split("/").filter(Boolean);
-    if (parts.length === 0) continue;
-    const dirParts = parts.slice(0, -1);
-    const fileName = parts[parts.length - 1];
-    let current = root;
-    let prefix = "";
-
-    for (const part of dirParts) {
-      prefix = prefix ? `${prefix}/${part}` : part;
-      const existing = current.dirs.get(part);
-      if (existing) {
-        current = existing;
-      } else {
-        const next: FsDirBuilder = { name: part, path: prefix, dirs: new Map(), files: new Map() };
-        current.dirs.set(part, next);
-        current = next;
-      }
-    }
-
-    current.files.set(fileName, {
-      id: toFileId(normalized),
-      name: fileName,
-      type: "file",
-      path: normalized
-    });
+    return (
+      <div
+        style={style}
+        className={`treeRow ${isActive ? "treeItemActive" : ""}`}
+        onClick={() => {
+          if (isDir) node.toggle();
+          else actionsRef.current.openVirtualPath(data.path);
+        }}
+      >
+        {isDir ? (
+          <span className="treeIcon" aria-hidden="true">
+            {node.isOpen ? "▾" : "▸"}
+          </span>
+        ) : (
+          <span className="treeIcon treeIconFile" aria-hidden="true" />
+        )}
+        <span className={`treeLabel ${isDir ? "treeDirLabel" : ""}`}>{isDir ? `${data.name}/` : data.name}</span>
+      </div>
+    );
+  },
+  (a, b) => {
+    if (a.activeVirtualPath !== b.activeVirtualPath) return false;
+    if (a.node.id !== b.node.id) return false;
+    if (a.node.isOpen !== b.node.isOpen) return false;
+    const at = a.style.transform ?? a.style.top;
+    const bt = b.style.transform ?? b.style.top;
+    return at === bt;
   }
-
-  function materialize(dir: FsDirBuilder): FsNode[] {
-    const children: FsNode[] = [];
-    for (const sub of dir.dirs.values()) {
-      children.push({
-        id: toDirId(sub.path),
-        name: sub.name,
-        type: "dir",
-        path: sub.path,
-        children: materialize(sub)
-      });
-    }
-    for (const file of dir.files.values()) children.push(file);
-
-    children.sort((a, b) => {
-      if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-    return children;
-  }
-
-  return materialize(root);
-}
+);
 
 function LeftTabIcon({ name }: { name: LeftTabIconName }) {
   const baseProps = {
@@ -580,7 +583,8 @@ export default function DebateDetailPage() {
   const lastLoadErrorAtRef = useRef(0);
   const lastVoteIndexAtRef = useRef(0);
   const lastContextUsageAtRef = useRef(0);
-  const loadingDebateRef = useRef(false);
+  const activeDebateIdRef = useRef<string>("");
+  const loadingDebateIdRef = useRef<string | null>(null);
   const lastTurnNumberRef = useRef(0);
   const { toast, showToast } = useAutoDismissToast(1200);
   const preWrapStyle = useMemo(
@@ -646,17 +650,22 @@ export default function DebateDetailPage() {
 
   async function loadDebate() {
     if (!id) return;
-    if (loadingDebateRef.current) return;
-    loadingDebateRef.current = true;
+    const expectedId = id;
+    if (loadingDebateIdRef.current === expectedId) return;
+    loadingDebateIdRef.current = expectedId;
     try {
       const after = lastTurnNumberRef.current;
-      const turnsUrl = after > 0 ? `/api/debates/${id}/turns?after=${after}` : `/api/debates/${id}/turns`;
+      const turnsUrl = after > 0 ? `/api/debates/${expectedId}/turns?after=${after}` : `/api/debates/${expectedId}/turns`;
       const [debateResponse, turnsResponse] = await Promise.all([
-        fetch(`/api/debates/${id}`, { cache: "no-store" }),
+        fetch(`/api/debates/${expectedId}`, { cache: "no-store" }),
         fetch(turnsUrl, { cache: "no-store" })
       ]);
       const debatePayload = await debateResponse.json().catch(() => ({}));
       const turnsPayload = await turnsResponse.json().catch(() => ({}));
+
+      if (activeDebateIdRef.current && activeDebateIdRef.current !== expectedId) {
+        return;
+      }
 
       if (debateResponse.ok) {
         setDebate(debatePayload.data ?? null);
@@ -707,7 +716,7 @@ export default function DebateDetailPage() {
         showToast("error", "网络错误：加载失败（将自动重试）");
       }
     } finally {
-      loadingDebateRef.current = false;
+      if (loadingDebateIdRef.current === expectedId) loadingDebateIdRef.current = null;
     }
   }
 
@@ -925,8 +934,39 @@ export default function DebateDetailPage() {
       return;
     }
 
+    activeDebateIdRef.current = id;
+    loadingDebateIdRef.current = null;
     lastTurnNumberRef.current = 0;
+    lastLoadErrorAtRef.current = 0;
+    lastVoteIndexAtRef.current = 0;
+    lastContextUsageAtRef.current = 0;
     allFilesLoadedRef.current = false;
+    setDebate(null);
+    setTurns([]);
+    setIsStreaming(false);
+    setLiveRoundNumber(null);
+    setLiveMessageNumber(null);
+    setLiveAgentName("");
+    setLiveStatus("");
+    setLiveText("");
+    setActiveTurnId("");
+    setActiveVoteRound(null);
+    setVotePathsByRound({});
+    setVoteByRound({});
+    setVoteLoadingRound(null);
+    setContextUsageByDebateAgentId({});
+    setContextTotalsByDebateAgentId({});
+    setResettingUsageByDebateAgentId({});
+    setMemoryOpen(false);
+    setMemoryTitle("");
+    setMemoryPath("");
+    setMemoryUpdatedAt("");
+    setMemoryContent("");
+    setMemoryLoading(false);
+    setMemoryTarget(null);
+    setMemoryTail(false);
+    setMemoryMaxChars(null);
+    setMemoryTruncation(null);
     setAllFilesMetaByVirtualPath({});
     setActiveAllFileVirtualPath("");
     setOpenRoundsByNumber({});
@@ -1744,14 +1784,40 @@ export default function DebateDetailPage() {
     });
   }, [turnsByRound.length]);
 
-  const allFilesTree = useMemo(() => buildFsTreeFromPaths(Object.keys(allFilesMetaByVirtualPath)), [allFilesMetaByVirtualPath]);
+  const allFilesTreeModel = useMemo(
+    () =>
+      createFsTreeModel({
+        normalizePath: normalizeFsPath
+      }),
+    []
+  );
+  const [allFilesTree, setAllFilesTree] = useState<FsNode[]>([]);
+  const allFilesActionsRef = useRef<{ openVirtualPath: (virtualPath: string) => void }>({
+    openVirtualPath: () => {}
+  });
+
+  useEffect(() => {
+    allFilesTreeModel.sync(Object.keys(allFilesMetaByVirtualPath));
+    setAllFilesTree(allFilesTreeModel.getTree());
+  }, [allFilesMetaByVirtualPath, allFilesTreeModel]);
+
+  const renderAllFilesNode = useCallback(
+    (props: { node: NodeApi<FsNode>; style: CSSProperties }) => (
+      <AllFilesTreeRow
+        node={props.node}
+        style={props.style}
+        activeVirtualPath={activeAllFileVirtualPath}
+        actionsRef={allFilesActionsRef}
+      />
+    ),
+    [activeAllFileVirtualPath]
+  );
 
   if (!debate) {
     return <div className="panel">加载中...</div>;
   }
 
-  const joinedAgentIds = new Set(debate.agents.map((item) => item.id));
-  const availableAgents = agents.filter((agent) => !joinedAgentIds.has(agent.id));
+  const availableAgents = agents;
   const canAddAgent =
     debate.isOwner &&
     ["running", "paused"].includes(debate.status) &&
@@ -1771,33 +1837,7 @@ export default function DebateDetailPage() {
     memory: "文件"
   };
 
-  function renderAllFilesNode(props: { node: NodeApi<FsNode>; style: CSSProperties }) {
-    const { node, style } = props;
-    const data = node.data;
-    const isDir = data.type === "dir";
-    return (
-      <div
-        style={style}
-        className={`treeRow ${data.path === activeAllFileVirtualPath ? "treeItemActive" : ""}`}
-        onClick={() => {
-          if (isDir) {
-            node.toggle();
-          } else {
-            void openDebateFileFromIndex(data.path);
-          }
-        }}
-      >
-        {isDir ? (
-          <span className="treeIcon" aria-hidden="true">
-            {node.isOpen ? "▾" : "▸"}
-          </span>
-        ) : (
-          <span className="treeIcon treeIconFile" aria-hidden="true" />
-        )}
-        <span className={`treeLabel ${isDir ? "treeDirLabel" : ""}`}>{isDir ? `${data.name}/` : data.name}</span>
-      </div>
-    );
-  }
+  allFilesActionsRef.current.openVirtualPath = (virtualPath: string) => void openDebateFileFromIndex(virtualPath);
 
   return (
     <div className="grid" style={{ gridTemplateColumns: "52px 320px 2fr 1fr", alignItems: "start" }}>
@@ -2337,10 +2377,15 @@ export default function DebateDetailPage() {
             {debate.status === "running" ? (
               <div className="row" style={{ justifyContent: "space-between" }}>
                 <strong>
-                  当前：{liveAgentName || "未知"}
-                  {liveDisplayRound ? ` · 第 ${liveDisplayRound} 轮` : ""}
-                  {liveDisplayMessage ? ` · 发言 #${liveDisplayMessage}` : ""}
-                </strong>
+                当前：{liveAgentName || "未知"}
+                {liveDisplayRound ? ` · 第 ${liveDisplayRound} 轮` : ""}
+                {liveDisplayMessage
+                  ? (() => {
+                      const turnInRound = agentCount > 0 ? ((liveDisplayMessage - 1) % agentCount) + 1 : null;
+                      return ` · #${liveDisplayMessage}${turnInRound ? `（第 ${turnInRound} 回）` : ""}`;
+                    })()
+                  : ""}
+              </strong>
                 <span className="muted">{liveStatus || "运行中"}</span>
               </div>
             ) : null}
@@ -2393,30 +2438,10 @@ export default function DebateDetailPage() {
               <div className="panel" key={agent.debateAgentId}>
                 <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
                   <span>
-                    #{agent.turnOrder} {agent.name}
+                    #{agent.turnOrder} {agent.displayName}
                     <span className="muted">
                       {" "}
-                      · 发言 {agent.turnCount}
-                      {(() => {
-                        const usage = contextUsageByDebateAgentId[agent.debateAgentId] ?? null;
-                        if (!usage) return agent.contextLength ? " · ctx ?" : "";
-                        const ratio = typeof usage.ratio === "number" && Number.isFinite(usage.ratio) ? usage.ratio : null;
-                        if (ratio === null) return " · ctx ?";
-                        const pct = Math.max(0, Math.min(999, Math.round(ratio * 100)));
-                        return ` · ctx ${pct}%`;
-                      })()}
-                      {(() => {
-                        const totals = contextTotalsByDebateAgentId[agent.debateAgentId] ?? null;
-                        if (!totals) return "";
-                        const sessionInline =
-                          typeof totals.sessionId === "number" && Number.isFinite(totals.sessionId) && totals.sessionId >= 1
-                            ? ` · 会话 ${totals.sessionId} · 新会话次数 ${Math.max(0, totals.sessionId - 1)}`
-                            : "";
-                        const ratio = typeof totals.ratio === "number" && Number.isFinite(totals.ratio) ? totals.ratio : null;
-                        if (ratio === null) return `${sessionInline} · 本段累计 ?`;
-                        const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
-                        return `${sessionInline} · 本段累计 ${pct}%`;
-                      })()}
+                      · {agent.name} · 发言 {agent.turnCount}
                     </span>
                   </span>
                   {debate.isOwner ? (
@@ -2452,6 +2477,16 @@ export default function DebateDetailPage() {
                     </div>
                   ) : null}
                 </div>
+                {debate.isOwner ? (
+                  <div className="row" style={{ justifyContent: "space-between", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+                    <span className="muted">本段累计</span>
+                    {(() => {
+                      const totals = contextTotalsByDebateAgentId[agent.debateAgentId] ?? null;
+                      const ratio = typeof totals?.ratio === "number" && Number.isFinite(totals.ratio) ? totals.ratio : null;
+                      return <UsageBar ratio={ratio} />;
+                    })()}
+                  </div>
+                ) : null}
               </div>
             ))}
           </Fragment>
@@ -2530,7 +2565,12 @@ export default function DebateDetailPage() {
               <strong>
                 当前：{liveAgentName || "未知"}
                 {liveDisplayRound ? ` · 第 ${liveDisplayRound} 轮` : ""}
-                {liveDisplayMessage ? ` · 发言 #${liveDisplayMessage}` : ""}
+                {liveDisplayMessage
+                  ? (() => {
+                      const turnInRound = agentCount > 0 ? ((liveDisplayMessage - 1) % agentCount) + 1 : null;
+                      return ` · #${liveDisplayMessage}${turnInRound ? `（第 ${turnInRound} 回）` : ""}`;
+                    })()
+                  : ""}
               </strong>
               <span className="muted">{liveStatus || "运行中"}</span>
             </div>
@@ -2562,8 +2602,12 @@ export default function DebateDetailPage() {
           <div className="stack" style={{ flex: 1, minHeight: 0 }}>
             <div className="row" style={{ justifyContent: "space-between" }}>
               <strong>
-                第 {Math.floor((viewer.turn.turnNumber - 1) / agentCount) + 1} 轮 · {viewer.turn.agent.name} · 发言 #
-                {viewer.turn.turnNumber}
+                {(() => {
+                  const round = Math.floor((viewer.turn.turnNumber - 1) / agentCount) + 1;
+                  const turnInRound = ((viewer.turn.turnNumber - 1) % agentCount) + 1;
+                  const seat = viewer.turn.seatNumber ? `Seat-${viewer.turn.seatNumber}` : "";
+                  return `#${viewer.turn.turnNumber} · 第 ${round} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${viewer.turn.agent.name}`;
+                })()}
               </strong>
               <span className="muted">{new Date(viewer.turn.createdAt).toLocaleTimeString()}</span>
             </div>
@@ -2665,15 +2709,19 @@ export default function DebateDetailPage() {
                         textAlign: "left",
                         borderColor: active ? "rgba(38, 99, 235, 0.55)" : undefined,
                         background: active ? "rgba(38, 99, 235, 0.08)" : undefined
-                      }}
-                    >
-                      <span>
-                        {turn.agent.name} · 发言 #{turn.turnNumber}
-                      </span>
-                      <span className="muted"> · {new Date(turn.createdAt).toLocaleTimeString()}</span>
-                    </button>
-                  );
-                })}
+                    }}
+                  >
+                    <span>
+                        {(() => {
+                          const turnInRound = ((turn.turnNumber - 1) % agentCount) + 1;
+                          const seat = turn.seatNumber ? `Seat-${turn.seatNumber}` : "";
+                          return `#${turn.turnNumber} · 第 ${round} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${turn.agent.name}`;
+                        })()}
+                    </span>
+                    <span className="muted"> · {new Date(turn.createdAt).toLocaleTimeString()}</span>
+                  </button>
+                );
+              })}
               </div>
             ) : null}
           </details>
