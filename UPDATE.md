@@ -1,3 +1,15 @@
+## 2026-03-20
+
+- 辩论详情页文件栏：支持 `Ctrl + 左键` 多选、`Shift + 左键` 区间多选，并增加右键菜单下载选中项
+- 辩论详情页文件栏：下载选中项时增加实时进度条与已下载大小显示
+- 辩论详情页文件栏：右键新增“获取文件信息”，可查看文件字数、大小、创建时间、修改时间
+- 修复文件信息接口：不再错误依赖 `debates.deleted_at` 列，兼容当前数据库结构
+- 辩论详情页文件栏：单文件下载改为直接原文件下载；下载进度改为弹窗；移除文件栏提示文案
+- 新增辩论文件打包下载接口：可将选中的文件/文件夹展开后打成 zip 下载
+- 清理未引用代码：删除未使用的 `components/auth/logout-button.tsx`、`components/docs/doc-markdown.tsx`、`scripts/openrouter-model-context.mjs`
+- 精简现有实现：文档页直接复用 `MarkdownView`，移除 `role-files-manager` 中未被使用的包装导出；同时去掉 `MarkdownView` 内未使用的 fenced-code `lang` 字段
+- 清理未接入站内文档的孤儿文件：删除 `docs/BACKGROUND_JOBS.md`、`docs/CONSENSUS_ALGORITHM.md`、`docs/DEBATE_QUESTION_DEMOCRATIC_CENTRALISM.md`、`docs/STRATEGY_DEMOCRATIC_CENTRALISM.md`、`docs/workflow-driven-voting-plan.md`
+
 ## 2026-03-18
 
 - 运行时：第 1 轮不再向席位注入完整 seats 名单（仅告知自身 Seat-X + 公平性约束），避免开局就“评价/分配”其他席位导致看起来像有记忆

@@ -117,7 +117,7 @@ function renderInline(text: string) {
 type Block =
   | { type: "hr" }
   | { type: "heading"; level: number; text: string }
-  | { type: "code"; lang: string; text: string }
+  | { type: "code"; text: string }
   | { type: "quote"; lines: string[] }
   | { type: "ul"; items: string[] }
   | { type: "ol"; items: string[] }
@@ -143,8 +143,6 @@ function parseBlocks(input: string): Block[] {
 
     // fenced code
     if (line.trimStart().startsWith("```")) {
-      const fence = line.trimStart();
-      const lang = fence.slice(3).trim();
       i += 1;
       const codeLines: string[] = [];
       while (i < lines.length && !lines[i].trimStart().startsWith("```")) {
@@ -152,7 +150,7 @@ function parseBlocks(input: string): Block[] {
         i += 1;
       }
       if (i < lines.length) i += 1;
-      blocks.push({ type: "code", lang, text: codeLines.join("\n") });
+      blocks.push({ type: "code", text: codeLines.join("\n") });
       continue;
     }
 

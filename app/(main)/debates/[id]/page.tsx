@@ -2,7 +2,18 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { Fragment, memo, type CSSProperties, type MutableRefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  memo,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type MutableRefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import { Tree, type NodeApi } from "react-arborist";
 
 import { useAutoDismissToast } from "@/components/ui/use-toast";
@@ -113,21 +124,25 @@ const AllFilesTreeRow = memo(
     node: NodeApi<FsNode>;
     style: CSSProperties;
     activeVirtualPath: string;
-    actionsRef: MutableRefObject<{ openVirtualPath: (virtualPath: string) => void }>;
+    selectedVirtualPaths: ReadonlySet<string>;
+    actionsRef: MutableRefObject<{
+      openVirtualPath: (virtualPath: string) => void;
+      clickVirtualPath: (node: NodeApi<FsNode>, event: ReactMouseEvent<HTMLDivElement>) => void;
+      openContextMenu: (node: NodeApi<FsNode>, event: ReactMouseEvent<HTMLDivElement>) => void;
+    }>;
   }) {
-    const { node, style, activeVirtualPath, actionsRef } = props;
+    const { node, style, activeVirtualPath, selectedVirtualPaths, actionsRef } = props;
     const data = node.data;
     const isDir = data.type === "dir";
     const isActive = data.path === activeVirtualPath;
+    const isSelected = selectedVirtualPaths.has(data.path);
 
     return (
       <div
         style={style}
-        className={`treeRow ${isActive ? "treeItemActive" : ""}`}
-        onClick={() => {
-          if (isDir) node.toggle();
-          else actionsRef.current.openVirtualPath(data.path);
-        }}
+        className={`treeRow ${isActive || isSelected ? "treeItemActive" : ""}`}
+        onClick={(event) => actionsRef.current.clickVirtualPath(node, event)}
+        onContextMenu={(event) => actionsRef.current.openContextMenu(node, event)}
       >
         {isDir ? (
           <span className="treeIcon" aria-hidden="true">
@@ -562,6 +577,32 @@ export default function DebateDetailPage() {
     >
   >({});
   const [activeAllFileVirtualPath, setActiveAllFileVirtualPath] = useState("");
+  const [selectedAllFileVirtualPaths, setSelectedAllFileVirtualPaths] = useState<string[]>([]);
+  const [allFilesSelectionAnchor, setAllFilesSelectionAnchor] = useState("");
+  const [allFilesContextMenu, setAllFilesContextMenu] = useState<
+    | null
+    | {
+        x: number;
+        y: number;
+        target:
+          | { type: "root" }
+          | { type: "node"; path: string; nodeType: FsNode["type"] };
+      }
+  >(null);
+  const [allFilesDownloading, setAllFilesDownloading] = useState(false);
+  const [allFilesDownloadProgress, setAllFilesDownloadProgress] = useState<{
+    loadedBytes: number;
+    totalBytes: number | null;
+  } | null>(null);
+  const [allFileInfoOpen, setAllFileInfoOpen] = useState(false);
+  const [allFileInfoLoading, setAllFileInfoLoading] = useState(false);
+  const [allFileInfo, setAllFileInfo] = useState<null | {
+    displayPath: string;
+    charCount: number;
+    byteSize: number;
+    createdAt: string;
+    updatedAt: string;
+  }>(null);
   const allFilesLoadedRef = useRef(false);
   const [liveRoundNumber, setLiveRoundNumber] = useState<number | null>(null);
   const [liveMessageNumber, setLiveMessageNumber] = useState<number | null>(null);
@@ -1792,14 +1833,213 @@ export default function DebateDetailPage() {
     []
   );
   const [allFilesTree, setAllFilesTree] = useState<FsNode[]>([]);
-  const allFilesActionsRef = useRef<{ openVirtualPath: (virtualPath: string) => void }>({
-    openVirtualPath: () => {}
+  const allFilesActionsRef = useRef<{
+    openVirtualPath: (virtualPath: string) => void;
+    clickVirtualPath: (node: NodeApi<FsNode>, event: ReactMouseEvent<HTMLDivElement>) => void;
+    openContextMenu: (node: NodeApi<FsNode>, event: ReactMouseEvent<HTMLDivElement>) => void;
+  }>({
+    openVirtualPath: () => {},
+    clickVirtualPath: () => {},
+    openContextMenu: () => {}
   });
+  const selectedAllFilesSet = useMemo(() => new Set(selectedAllFileVirtualPaths), [selectedAllFileVirtualPaths]);
 
   useEffect(() => {
     allFilesTreeModel.sync(Object.keys(allFilesMetaByVirtualPath));
     setAllFilesTree(allFilesTreeModel.getTree());
   }, [allFilesMetaByVirtualPath, allFilesTreeModel]);
+
+  const allFilesTreePaths = useMemo(() => {
+    const paths = new Set<string>();
+    const stack = [...allFilesTree];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node) continue;
+      paths.add(node.path);
+      if (node.children?.length) {
+        for (const child of node.children) stack.push(child);
+      }
+    }
+    return paths;
+  }, [allFilesTree]);
+
+  useEffect(() => {
+    setSelectedAllFileVirtualPaths((current) => current.filter((path) => allFilesTreePaths.has(path)));
+    setAllFilesSelectionAnchor((current) => (current && allFilesTreePaths.has(current) ? current : ""));
+  }, [allFilesTreePaths]);
+
+  useEffect(() => {
+    if (!allFilesContextMenu) return;
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setAllFilesContextMenu(null);
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [allFilesContextMenu]);
+
+  const updateAllFilesSelection = useCallback(
+    (node: NodeApi<FsNode>, event: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }, mode: "click" | "contextmenu") => {
+      const path = node.data.path;
+      const extend = event.ctrlKey || event.metaKey;
+
+      if (mode === "contextmenu" && selectedAllFilesSet.has(path)) {
+        setAllFilesSelectionAnchor(path);
+        return selectedAllFileVirtualPaths;
+      }
+
+      let next: string[] = [path];
+      if (event.shiftKey) {
+        const visiblePaths = node.tree.visibleNodes.map((item) => item.data.path);
+        const anchor = allFilesSelectionAnchor && visiblePaths.includes(allFilesSelectionAnchor) ? allFilesSelectionAnchor : path;
+        const start = visiblePaths.indexOf(anchor);
+        const end = visiblePaths.indexOf(path);
+        if (start >= 0 && end >= 0) {
+          const [from, to] = start <= end ? [start, end] : [end, start];
+          const range = visiblePaths.slice(from, to + 1);
+          next = extend ? Array.from(new Set([...selectedAllFileVirtualPaths, ...range])) : range;
+        }
+      } else if (extend) {
+        next = selectedAllFilesSet.has(path)
+          ? selectedAllFileVirtualPaths.filter((item) => item !== path)
+          : [...selectedAllFileVirtualPaths, path];
+      }
+
+      if (next.length === 0) next = [path];
+      setSelectedAllFileVirtualPaths(next);
+      setAllFilesSelectionAnchor(path);
+      return next;
+    },
+    [allFilesSelectionAnchor, selectedAllFileVirtualPaths, selectedAllFilesSet]
+  );
+
+  async function downloadSelectedAllFiles() {
+    if (!id) return;
+    if (selectedAllFileVirtualPaths.length === 0) {
+      showToast("error", "请先选择文件或文件夹");
+      return;
+    }
+    if (allFilesDownloading) return;
+
+    setAllFilesDownloading(true);
+    setAllFilesDownloadProgress({ loadedBytes: 0, totalBytes: null });
+    try {
+      const response = await fetch(`/api/debates/${id}/download`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths: selectedAllFileVirtualPaths })
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        showToast("error", payload.error?.message ?? "下载失败");
+        return;
+      }
+
+      const totalBytesHeader = Number(response.headers.get("content-length"));
+      const totalBytes = Number.isFinite(totalBytesHeader) && totalBytesHeader > 0 ? totalBytesHeader : null;
+      const reader = response.body?.getReader();
+      let blob: Blob;
+
+      if (!reader) {
+        blob = await response.blob();
+        setAllFilesDownloadProgress({
+          loadedBytes: blob.size,
+          totalBytes: totalBytes ?? blob.size
+        });
+      } else {
+        const chunks: Uint8Array[] = [];
+        let loadedBytes = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          chunks.push(value);
+          loadedBytes += value.byteLength;
+          setAllFilesDownloadProgress({ loadedBytes, totalBytes });
+        }
+        blob = new Blob(chunks, { type: "application/zip" });
+        setAllFilesDownloadProgress({
+          loadedBytes: loadedBytes || blob.size,
+          totalBytes: totalBytes ?? blob.size
+        });
+      }
+
+      const header = response.headers.get("content-disposition") ?? "";
+      const fileName =
+        header.match(/filename=\"([^\"]+)\"/i)?.[1] ??
+        `debate-${id}-files.zip`;
+
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(href), 1000);
+      showToast("success", "已开始下载");
+    } catch (error) {
+      console.error(error);
+      showToast("error", "网络错误：下载失败");
+    } finally {
+      setAllFilesDownloading(false);
+      window.setTimeout(() => {
+        setAllFilesDownloadProgress(null);
+      }, 1200);
+      setAllFilesContextMenu(null);
+    }
+  }
+
+  async function openAllFileInfo(virtualPath: string) {
+    if (!id) return;
+    const meta = allFilesMetaByVirtualPath[virtualPath] ?? null;
+    if (!meta) {
+      showToast("error", "仅支持获取文件信息");
+      return;
+    }
+
+    const displayPath = meta.scope === "debate" ? `debate/${meta.path}` : `agents/${meta.seat}/${meta.path}`;
+    setAllFilesContextMenu(null);
+    setAllFileInfoOpen(true);
+    setAllFileInfoLoading(true);
+    setAllFileInfo(null);
+
+    try {
+      const response = await fetch(`/api/debates/${id}/file-info`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          meta.scope === "debate"
+            ? { scope: "debate", path: meta.path }
+            : { scope: "agent", debateAgentId: meta.debateAgentId, path: meta.path }
+        )
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "读取文件信息失败");
+        setAllFileInfoOpen(false);
+        return;
+      }
+      setAllFileInfo({
+        displayPath,
+        charCount: Number(payload.data?.charCount ?? 0) || 0,
+        byteSize: Number(payload.data?.byteSize ?? 0) || 0,
+        createdAt: String(payload.data?.createdAt ?? ""),
+        updatedAt: String(payload.data?.updatedAt ?? "")
+      });
+    } catch (error) {
+      console.error(error);
+      showToast("error", "网络错误：读取文件信息失败");
+      setAllFileInfoOpen(false);
+    } finally {
+      setAllFileInfoLoading(false);
+    }
+  }
 
   const renderAllFilesNode = useCallback(
     (props: { node: NodeApi<FsNode>; style: CSSProperties }) => (
@@ -1807,15 +2047,31 @@ export default function DebateDetailPage() {
         node={props.node}
         style={props.style}
         activeVirtualPath={activeAllFileVirtualPath}
+        selectedVirtualPaths={selectedAllFilesSet}
         actionsRef={allFilesActionsRef}
       />
     ),
-    [activeAllFileVirtualPath]
+    [activeAllFileVirtualPath, selectedAllFilesSet]
   );
 
   if (!debate) {
     return <div className="panel">加载中...</div>;
   }
+
+  const downloadProgressPct =
+    allFilesDownloadProgress && allFilesDownloadProgress.totalBytes && allFilesDownloadProgress.totalBytes > 0
+      ? Math.max(
+          0,
+          Math.min(100, Math.round((allFilesDownloadProgress.loadedBytes / allFilesDownloadProgress.totalBytes) * 100))
+        )
+      : null;
+
+  const formatBytes = (value: number) => {
+    if (!Number.isFinite(value) || value <= 0) return "0 B";
+    if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+    if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${Math.floor(value)} B`;
+  };
 
   const availableAgents = agents;
   const canAddAgent =
@@ -1838,6 +2094,26 @@ export default function DebateDetailPage() {
   };
 
   allFilesActionsRef.current.openVirtualPath = (virtualPath: string) => void openDebateFileFromIndex(virtualPath);
+  allFilesActionsRef.current.clickVirtualPath = (node, event) => {
+    setAllFilesContextMenu(null);
+    updateAllFilesSelection(node, event, "click");
+    if (event.shiftKey || event.ctrlKey || event.metaKey) return;
+    if (node.data.type === "dir") {
+      node.toggle();
+      return;
+    }
+    void openDebateFileFromIndex(node.data.path);
+  };
+  allFilesActionsRef.current.openContextMenu = (node, event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    updateAllFilesSelection(node, event, "contextmenu");
+    setAllFilesContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      target: { type: "node", path: node.data.path, nodeType: node.data.type }
+    });
+  };
 
   return (
     <div className="grid" style={{ gridTemplateColumns: "52px 320px 2fr 1fr", alignItems: "start" }}>
@@ -2168,6 +2444,120 @@ export default function DebateDetailPage() {
                 </div>
               </div>
             ) : null}
+          </div>
+        </div>
+      ) : null}
+      {allFileInfoOpen ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => {
+            setAllFileInfoOpen(false);
+            setAllFileInfo(null);
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            zIndex: 1001
+          }}
+        >
+          <div className="panel stack" onClick={(event) => event.stopPropagation()} style={{ width: "min(560px, 100%)" }}>
+            <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+              <strong>文件信息</strong>
+              <button
+                className="btn"
+                type="button"
+                onClick={() => {
+                  setAllFileInfoOpen(false);
+                  setAllFileInfo(null);
+                }}
+              >
+                关闭
+              </button>
+            </div>
+            {allFileInfoLoading ? (
+              <div className="muted">读取中...</div>
+            ) : allFileInfo ? (
+              <div className="stack" style={{ gap: 10 }}>
+                <div className="panel">
+                  <div className="muted" style={{ marginBottom: 6 }}>路径</div>
+                  <div style={{ wordBreak: "break-all" }}>{allFileInfo.displayPath}</div>
+                </div>
+                <div className="grid grid-2" style={{ gap: 10 }}>
+                  <div className="panel stack" style={{ gap: 6 }}>
+                    <span className="muted">字数</span>
+                    <strong>{allFileInfo.charCount.toLocaleString()}</strong>
+                  </div>
+                  <div className="panel stack" style={{ gap: 6 }}>
+                    <span className="muted">大小</span>
+                    <strong>{allFileInfo.byteSize.toLocaleString()} bytes</strong>
+                  </div>
+                  <div className="panel stack" style={{ gap: 6 }}>
+                    <span className="muted">创建时间</span>
+                    <strong>{allFileInfo.createdAt ? new Date(allFileInfo.createdAt).toLocaleString() : "-"}</strong>
+                  </div>
+                  <div className="panel stack" style={{ gap: 6 }}>
+                    <span className="muted">修改时间</span>
+                    <strong>{allFileInfo.updatedAt ? new Date(allFileInfo.updatedAt).toLocaleString() : "-"}</strong>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="muted">暂无可显示的信息</div>
+            )}
+          </div>
+        </div>
+      ) : null}
+      {allFilesDownloadProgress ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            zIndex: 1001
+          }}
+        >
+          <div className="panel stack" style={{ width: "min(520px, 100%)", gap: 12 }}>
+            <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+              <strong style={{ fontSize: 14 }}>下载进度</strong>
+              <span className="muted">
+                {formatBytes(allFilesDownloadProgress.loadedBytes)}
+                {allFilesDownloadProgress.totalBytes ? ` / ${formatBytes(allFilesDownloadProgress.totalBytes)}` : ""}
+                {downloadProgressPct !== null ? ` · ${downloadProgressPct}%` : " · 准备中..."}
+              </span>
+            </div>
+            <div
+              style={{
+                width: "100%",
+                height: 12,
+                borderRadius: 999,
+                overflow: "hidden",
+                background: "rgba(148, 163, 184, 0.18)"
+              }}
+            >
+              <div
+                className={downloadProgressPct === null ? "downloadProgressBarIndeterminate" : ""}
+                style={{
+                  height: "100%",
+                  width: downloadProgressPct === null ? "35%" : `${downloadProgressPct}%`,
+                  borderRadius: 999,
+                  background:
+                    "linear-gradient(90deg, rgba(37, 99, 235, 0.85), rgba(59, 130, 246, 0.95), rgba(96, 165, 250, 0.9))"
+                }}
+              />
+            </div>
+            <div className="muted">文件准备完成后会自动开始浏览器下载。</div>
           </div>
         </div>
       ) : null}
@@ -2504,17 +2894,38 @@ export default function DebateDetailPage() {
           <div className="panel stack">
             <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
               <strong>辩论文件</strong>
-              <button className="btn" type="button" disabled={allFilesLoading} onClick={() => void loadAllFilesIndex(true)}>
-                刷新
-              </button>
+              <div className="row" style={{ gap: 8 }}>
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={selectedAllFileVirtualPaths.length === 0 || allFilesDownloading}
+                  onClick={() => void downloadSelectedAllFiles()}
+                >
+                  {allFilesDownloading ? "下载中..." : `下载选中${selectedAllFileVirtualPaths.length > 0 ? `（${selectedAllFileVirtualPaths.length}）` : ""}`}
+                </button>
+                <button className="btn" type="button" disabled={allFilesLoading} onClick={() => void loadAllFilesIndex(true)}>
+                  刷新
+                </button>
+              </div>
             </div>
-            <div className="muted">包含辩论文件（debate/*）与每席位文件（agents/*）。点击文件可打开查看。</div>
+            <div className="muted">包含辩论文件（debate/*）与每席位文件（agents/*）。</div>
             {allFilesLoading ? (
               <div className="muted">读取中...</div>
             ) : Object.keys(allFilesMetaByVirtualPath).length === 0 ? (
               <div className="muted">暂无文件（通常需要至少一轮发言后才会逐步生成）。</div>
             ) : (
-              <div className="treeRoot" style={{ maxHeight: "calc(100vh - 260px)" }}>
+              <div
+                className="treeRoot"
+                style={{ maxHeight: "calc(100vh - 260px)" }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setAllFilesContextMenu({
+                    x: event.clientX,
+                    y: event.clientY,
+                    target: { type: "root" }
+                  });
+                }}
+              >
                 <Tree<FsNode>
                   data={allFilesTree}
                   width="100%"
@@ -2527,6 +2938,39 @@ export default function DebateDetailPage() {
                 </Tree>
               </div>
             )}
+            {allFilesContextMenu ? (
+              <div className="contextOverlay" onClick={() => setAllFilesContextMenu(null)}>
+                <div
+                  className="contextMenu"
+                  style={{ left: allFilesContextMenu.x, top: allFilesContextMenu.y }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <button
+                    className="contextMenuItem"
+                    type="button"
+                    disabled={allFilesContextMenu.target.type !== "node" || allFilesContextMenu.target.nodeType !== "file"}
+                    onClick={() => {
+                      if (allFilesContextMenu.target.type !== "node" || allFilesContextMenu.target.nodeType !== "file") return;
+                      void openAllFileInfo(allFilesContextMenu.target.path);
+                    }}
+                  >
+                    获取文件信息
+                  </button>
+                  <button
+                    className="contextMenuItem"
+                    type="button"
+                    disabled={selectedAllFileVirtualPaths.length === 0 || allFilesDownloading}
+                    onClick={() => void downloadSelectedAllFiles()}
+                  >
+                    {allFilesDownloading
+                      ? "下载中..."
+                      : selectedAllFileVirtualPaths.length > 0
+                        ? `下载选中项（${selectedAllFileVirtualPaths.length}）`
+                        : "下载选中项"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : (
           <div className="muted">公开辩论不支持读取辩论文件。</div>

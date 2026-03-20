@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { DocMarkdown } from "@/components/docs/doc-markdown";
+import { MarkdownView } from "@/components/ui/markdown";
 import { readRepoTextFile } from "@/lib/docs";
 import { DOCS, getDocBySlug } from "@/lib/docs-registry";
 
@@ -40,9 +40,8 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
       </aside>
 
       <main className="panel">
-        <DocMarkdown value={content} />
+        <MarkdownView value={content} />
       </main>
     </div>
   );
 }
-

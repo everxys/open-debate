@@ -840,15 +840,3 @@ export function RoleFilesManagerColumns({
     </>
   );
 }
-
-export function RoleFilesManager(props: {
-  strategyId: string;
-  roleId: string;
-  readOnly?: boolean;
-}) {
-  return (
-    <div className="grid grid-2">
-      <RoleFilesManagerColumns {...props} />
-    </div>
-  );
-}
