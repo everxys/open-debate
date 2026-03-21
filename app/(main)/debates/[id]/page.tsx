@@ -615,12 +615,6 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
                   {`#${turn.turnNumber} · 第 ${round} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${turn.agent.name}`}
                 </span>
                 <span className="muted"> · {new Date(turn.createdAt).toLocaleTimeString()}</span>
-                {turn.preview ? (
-                  <span className="muted" style={{ display: "block", marginTop: 4 }}>
-                    {turn.preview}
-                    {turn.contentLength > turn.preview.length ? "..." : ""}
-                  </span>
-                ) : null}
               </button>
             );
           })}
@@ -2489,6 +2483,9 @@ export default function DebateDetailPage() {
   const loadingDebateIdRef = useRef<string | null>(null);
   const workflowRulesLoadingRef = useRef(false);
   const lastTurnNumberRef = useRef(0);
+  const missingContextUsageAtTurnRef = useRef<number | null>(null);
+  const missingContextUsageTotalsAtTurnRef = useRef<number | null>(null);
+  const missingOpenVoteAtTurnRef = useRef<number | null>(null);
   const liveMessageNumberRef = useRef<number | null>(null);
   const sseConnectedRef = useRef(false);
   const lastSseEventAtRef = useRef(0);
@@ -2660,12 +2657,16 @@ export default function DebateDetailPage() {
 
   const loadContextUsage = useCallback(async () => {
     if (!id) return null;
+    if (missingContextUsageAtTurnRef.current === lastTurnNumberRef.current) return null;
     try {
       const response = await fetch(`/api/debates/${id}/files?path=${encodeURIComponent("context/usage.json")}`, {
         cache: "no-store"
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) return null;
+      if (!response.ok) {
+        if (response.status === 404) missingContextUsageAtTurnRef.current = lastTurnNumberRef.current;
+        return null;
+      }
 
       const content = String(payload.data?.content ?? "");
       let parsed: unknown = null;
@@ -2701,6 +2702,7 @@ export default function DebateDetailPage() {
           turnNumber: Number.isFinite(turnNumber) ? Math.floor(turnNumber) : 0
         };
       }
+      missingContextUsageAtTurnRef.current = null;
       setContextUsageByDebateAgentId(next);
       return next;
     } catch {
@@ -2710,12 +2712,16 @@ export default function DebateDetailPage() {
 
   const loadContextUsageTotals = useCallback(async () => {
     if (!id) return null;
+    if (missingContextUsageTotalsAtTurnRef.current === lastTurnNumberRef.current) return null;
     try {
       const response = await fetch(`/api/debates/${id}/files?path=${encodeURIComponent("context/usage_totals.json")}`, {
         cache: "no-store"
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) return null;
+      if (!response.ok) {
+        if (response.status === 404) missingContextUsageTotalsAtTurnRef.current = lastTurnNumberRef.current;
+        return null;
+      }
       const content = String(payload.data?.content ?? "");
       let parsed: unknown = null;
       try {
@@ -2746,6 +2752,7 @@ export default function DebateDetailPage() {
           ...(Number.isFinite(sessionId) && sessionId >= 1 ? { sessionId: Math.floor(sessionId) } : {})
         };
       }
+      missingContextUsageTotalsAtTurnRef.current = null;
       setContextTotalsByDebateAgentId(next);
       return next;
     } catch {
@@ -2770,6 +2777,7 @@ export default function DebateDetailPage() {
         showToast("error", payload.error?.message ?? "重置失败");
         return;
       }
+      missingContextUsageTotalsAtTurnRef.current = null;
       showToast("success", "已开始新会话（该席位）");
       void loadContextUsageTotals();
     } catch (error) {
@@ -2816,6 +2824,9 @@ export default function DebateDetailPage() {
     lastLoadErrorAtRef.current = 0;
     lastVoteIndexAtRef.current = 0;
     lastContextUsageAtRef.current = 0;
+    missingContextUsageAtTurnRef.current = null;
+    missingContextUsageTotalsAtTurnRef.current = null;
+    missingOpenVoteAtTurnRef.current = null;
     sseConnectedRef.current = false;
     lastSseEventAtRef.current = 0;
     allFilesLoadedRef.current = false;
@@ -2905,12 +2916,14 @@ export default function DebateDetailPage() {
 
   const loadOpenVoteState = useCallback(async () => {
     if (!id) return null;
+    if (missingOpenVoteAtTurnRef.current === lastTurnNumberRef.current) return null;
     try {
       const response = await fetch(`/api/debates/${id}/files?path=${encodeURIComponent("votes/open.json")}`, {
         cache: "no-store"
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
+        if (response.status === 404) missingOpenVoteAtTurnRef.current = lastTurnNumberRef.current;
         setOpenVoteState(null);
         return null;
       }
@@ -2930,6 +2943,7 @@ export default function DebateDetailPage() {
         title: String(parsed.title ?? "投票"),
         tieRound: Number.isFinite(tieRoundRaw) && tieRoundRaw > 0 ? Math.floor(tieRoundRaw) : 0
       };
+      missingOpenVoteAtTurnRef.current = null;
       setOpenVoteState(next);
       return next;
     } catch {
@@ -2992,15 +3006,27 @@ export default function DebateDetailPage() {
             updateTurnWindow((current) => {
               const merged = mergeTurnSummaries(current, incoming);
               const last = merged.length ? merged[merged.length - 1] : null;
-              lastTurnNumberRef.current =
+              const nextTurnNumber =
                 last && typeof last.turnNumber === "number" ? Math.floor(last.turnNumber) : lastTurnNumberRef.current;
+              if (nextTurnNumber !== lastTurnNumberRef.current) {
+                missingContextUsageAtTurnRef.current = null;
+                missingContextUsageTotalsAtTurnRef.current = null;
+                missingOpenVoteAtTurnRef.current = null;
+              }
+              lastTurnNumberRef.current = nextTurnNumber;
               return merged;
             });
           }
         } else {
           updateTurnWindow(incoming);
           const last = incoming.length ? incoming[incoming.length - 1] : null;
-          lastTurnNumberRef.current = last && typeof last.turnNumber === "number" ? Math.floor(last.turnNumber) : 0;
+          const nextTurnNumber = last && typeof last.turnNumber === "number" ? Math.floor(last.turnNumber) : 0;
+          if (nextTurnNumber !== lastTurnNumberRef.current) {
+            missingContextUsageAtTurnRef.current = null;
+            missingContextUsageTotalsAtTurnRef.current = null;
+            missingOpenVoteAtTurnRef.current = null;
+          }
+          lastTurnNumberRef.current = nextTurnNumber;
           setOldestLoadedTurnNumber(incoming.length ? incoming[0]?.turnNumber ?? null : null);
           setHasOlderTurns(Boolean(turnsPayload.meta?.hasMore));
         }

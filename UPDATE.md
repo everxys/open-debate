@@ -1,5 +1,7 @@
 ## 2026-03-21
 
+- 辩论页发言目录精简：右侧目录不再展示每条发言的摘要 preview，只保留轮次、回合、席位、姓名和时间，减少噪声与目录区额外文本渲染
+- 辩论页可选运行时文件探测降噪：`votes/open.json`、`context/usage.json`、`context/usage_totals.json` 在当前 turn 缺失时只记录一次 404，并在没有新 turn 产生前跳过重复探测；等到新 turn 到来后再自动重试，避免网络面板被相同 404 持续刷屏
 - 辩论页初始化请求收敛：`loadWorkflowRules` 不再依赖自身 `loading` 状态重建，避免初始化 effect 被反复触发，间接导致 `workflow.json` 与 `question/history.json` 在进入页面时连续重复请求
 - 辩论页 workflow 面板修复：`workflow` 栏改成“头部固定 + 内容区独立滚动”，不再因为左侧父容器 `overflow: hidden` 导致长规则 Markdown 被直接裁掉
 - 小说策略表达风格收紧：在 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 之外，继续把“尽量说人话、不要空泛大词、提到点子必须展开讲清机制与后果、禁止只报结论不解释过程”的约束同步补进 `docker/seed_democratic_centralism_strategy.sql` 的 `openingPrompt`、`Phase 1`、`Phase 3` 注入提示词，让新导入的策略在实际辩论中也会少说黑话、少做一句话点子汇报
