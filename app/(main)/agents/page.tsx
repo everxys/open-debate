@@ -11,6 +11,8 @@ type Agent = {
   provider: string;
   model: string;
   contextLength: number | null;
+  maxInputTokens: number | null;
+  maxOutputTokens: number | null;
   baseUrl: string;
   apiKeyMasked: string;
   isActive: boolean;
@@ -20,6 +22,7 @@ type OpenRouterModel = {
   id: string;
   name: string;
   contextLength: number | null;
+  maxOutputTokens: number | null;
 };
 
 const initialForm = {
@@ -27,6 +30,8 @@ const initialForm = {
   provider: "openai",
   model: "gpt-4.1-mini",
   contextLength: "",
+  maxInputTokens: "",
+  maxOutputTokens: "",
   baseUrl: "https://api.openai.com/v1",
   apiKey: ""
 };
@@ -40,6 +45,8 @@ export default function AgentsPage() {
     provider: string;
     model: string;
     contextLength: number | null;
+    maxInputTokens: number | null;
+    maxOutputTokens: number | null;
     baseUrl: string;
   } | null>(null);
   const { toast, showToast } = useAutoDismissToast(1200);
@@ -135,6 +142,26 @@ export default function AgentsPage() {
     return v > 0 ? v : null;
   }
 
+  function parseMaxOutputTokensInput(value: string) {
+    const raw = String(value ?? "").trim();
+    if (!raw) return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return null;
+    const v = Math.floor(n);
+    return v > 0 ? v : null;
+  }
+
+  function parseMaxInputTokensInput(value: string) {
+    const raw = String(value ?? "").trim();
+    if (!raw) return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return null;
+    const v = Math.floor(n);
+    return v > 0 ? v : null;
+  }
+
+  const catalogSelectedModel = openRouterModels.find((item) => item.id === form.model.trim()) ?? null;
+
   const filteredOpenRouterModels = (() => {
     const q = modelSearch.trim().toLowerCase();
     if (!q) return openRouterModels.slice(0, 200);
@@ -159,7 +186,9 @@ export default function AgentsPage() {
     try {
       const body = {
         ...form,
-        contextLength: parseContextLengthInput(form.contextLength)
+        contextLength: parseContextLengthInput(form.contextLength),
+        maxInputTokens: parseMaxInputTokensInput(form.maxInputTokens),
+        maxOutputTokens: parseMaxOutputTokensInput(form.maxOutputTokens)
       };
       response = await fetch("/api/agents", {
         method: "POST",
@@ -191,6 +220,8 @@ export default function AgentsPage() {
       provider: agent.provider,
       model: agent.model,
       contextLength: agent.contextLength ?? null,
+      maxInputTokens: agent.maxInputTokens ?? null,
+      maxOutputTokens: agent.maxOutputTokens ?? null,
       baseUrl: agent.baseUrl
     });
     setForm({
@@ -198,6 +229,8 @@ export default function AgentsPage() {
       provider: agent.provider,
       model: agent.model,
       contextLength: agent.contextLength ? String(agent.contextLength) : "",
+      maxInputTokens: agent.maxInputTokens ? String(agent.maxInputTokens) : "",
+      maxOutputTokens: agent.maxOutputTokens ? String(agent.maxOutputTokens) : "",
       baseUrl: agent.baseUrl,
       apiKey: ""
     });
@@ -216,6 +249,12 @@ export default function AgentsPage() {
     if (form.provider !== editingOriginal.provider) changes.push("Provider");
     if (form.model !== editingOriginal.model) changes.push("模型");
     if (parseContextLengthInput(form.contextLength) !== (editingOriginal.contextLength ?? null)) changes.push("上下文长度");
+    if (parseMaxInputTokensInput(form.maxInputTokens) !== (editingOriginal.maxInputTokens ?? null)) {
+      changes.push("最大输入");
+    }
+    if (parseMaxOutputTokensInput(form.maxOutputTokens) !== (editingOriginal.maxOutputTokens ?? null)) {
+      changes.push("最大输出");
+    }
     if (form.baseUrl !== editingOriginal.baseUrl) changes.push("Base URL");
     if (form.apiKey.trim()) changes.push("API Key");
     return changes;
@@ -236,6 +275,8 @@ export default function AgentsPage() {
       provider: form.provider,
       model: form.model,
       contextLength: parseContextLengthInput(form.contextLength),
+      maxInputTokens: parseMaxInputTokensInput(form.maxInputTokens),
+      maxOutputTokens: parseMaxOutputTokensInput(form.maxOutputTokens),
       baseUrl: form.baseUrl
     };
     if (form.apiKey.trim()) body.apiKey = form.apiKey;
@@ -708,7 +749,7 @@ export default function AgentsPage() {
                 setModelSearch(form.model.trim());
                 setModelPickerOpen(true);
               }}
-              title={openRouterModels.length === 0 ? "模型目录为空（可刷新）" : "从模型目录中选择并自动填充上下文长度"}
+              title={openRouterModels.length === 0 ? "模型目录为空（可刷新）" : "从模型目录中选择，并自动填充上下文长度、查看最大输出上限"}
             >
               从目录填充
             </button>
@@ -725,6 +766,44 @@ export default function AgentsPage() {
             {parseContextLengthInput(form.contextLength)
               ? `75% ≈ ${Math.floor((parseContextLengthInput(form.contextLength) ?? 0) * 0.75).toLocaleString()}`
               : "可用“从目录填充”自动写入，也可以手动输入。"}
+          </div>
+          {catalogSelectedModel ? (
+            <div className="hint">
+              目录信息：
+              {catalogSelectedModel.contextLength
+                ? ` 上下文 ${catalogSelectedModel.contextLength.toLocaleString()}`
+                : " 上下文未提供"}
+              {"；"}
+              {catalogSelectedModel.maxOutputTokens
+                ? `最大输出 ${catalogSelectedModel.maxOutputTokens.toLocaleString()}`
+                : "最大输出未提供"}
+            </div>
+          ) : null}
+        </div>
+        <div className="field">
+          <label>最大输入 Token（可选）</label>
+          <input
+            name="maxInputTokens"
+            autoComplete="off"
+            value={form.maxInputTokens}
+            onChange={(event) => setForm({ ...form, maxInputTokens: event.target.value })}
+            placeholder="留空=未知；例如 64000"
+          />
+          <div className="hint">这是单次请求可接受的最大输入，不等于总上下文窗口。</div>
+        </div>
+        <div className="field">
+          <label>最大输出 Token（可选）</label>
+          <input
+            name="maxOutputTokens"
+            autoComplete="off"
+            value={form.maxOutputTokens}
+            onChange={(event) => setForm({ ...form, maxOutputTokens: event.target.value })}
+            placeholder="留空=未知；例如 32000"
+          />
+          <div className="hint">
+            {parseMaxOutputTokensInput(form.maxOutputTokens)
+              ? `当前配置会把单轮输出上限夹到 ${parseMaxOutputTokensInput(form.maxOutputTokens)?.toLocaleString()} 以内`
+              : "如果知道模型官方最大输出，可以填在这里，运行时会优先参考。"}
           </div>
         </div>
         <div className="field">
@@ -842,7 +921,8 @@ export default function AgentsPage() {
                   style={{ textAlign: "left" }}
                   onClick={() => {
                     const ctx = m.contextLength ? String(m.contextLength) : "";
-                    setForm((cur) => ({ ...cur, contextLength: ctx }));
+                    const out = m.maxOutputTokens ? String(m.maxOutputTokens) : "";
+                    setForm((cur) => ({ ...cur, contextLength: ctx, maxOutputTokens: out || cur.maxOutputTokens }));
                     setModelPickerOpen(false);
                   }}
                   title={m.name || m.id}
@@ -851,6 +931,8 @@ export default function AgentsPage() {
                     <strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.id}</strong>
                     <span className="muted" style={{ flex: "0 0 auto" }}>
                       {m.contextLength ? `${m.contextLength.toLocaleString()} ctx` : "ctx ?"}
+                      {" · "}
+                      {m.maxOutputTokens ? `${m.maxOutputTokens.toLocaleString()} out` : "out ?"}
                     </span>
                   </div>
                   {m.name ? <div className="muted">{m.name}</div> : null}
@@ -922,6 +1004,10 @@ export default function AgentsPage() {
               </div>
               <div className="muted">{agent.model}</div>
               {agent.contextLength ? <div className="muted">Context: {agent.contextLength.toLocaleString()}</div> : null}
+              {agent.maxInputTokens ? <div className="muted">Max input: {agent.maxInputTokens.toLocaleString()}</div> : null}
+              {agent.maxOutputTokens ? (
+                <div className="muted">Max output: {agent.maxOutputTokens.toLocaleString()}</div>
+              ) : null}
               <div className="muted">{agent.baseUrl}</div>
               <div className="muted">Key: {agent.apiKeyMasked}</div>
               <div className="row">

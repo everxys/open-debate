@@ -1,5 +1,18 @@
 ## 2026-03-21
 
+- 辩论页参与者面板增强：每个席位现在都会显示三项长度信息：总上下文长度（context）、单次最大输入、单次最大输出；辩论详情接口也同步透传 `max_input_tokens / max_output_tokens`
+- Docker 初始化 SQL 同步：`docker/init.sql` 中的 `ai_agents` 表结构新增 `context_length`、`max_input_tokens`、`max_output_tokens`，并补了 `alter table ... add column if not exists`，保证新库初始化和旧库升级都能拿到这三个字段
+- AI 配置字段语义修正：`contextLength` 恢复为“总上下文长度”，新增的 `maxInputTokens / maxOutputTokens` 明确表示“单次请求的输入/输出上限”；三者不再互相回填或混用，避免把上下文窗口误当成单次输入上限
+- AI 配置与运行时上限控制升级：AI 配置页新增“最大输入 Token / 最大输出 Token”字段，并落库保存到 `ai_agents.max_input_tokens / max_output_tokens`；复制、导入导出也会保留它们；运行时请求生成时会优先参考 AI 配置里的最大输出上限来夹住 `max_tokens`
+- 运行时输出预算取值修正：`workflow.promptPolicies.outputBudget.* = null` 现在不再被 `?? 1800/3600` 悄悄回退成默认值；不设上限会真正保留为 `null`，再结合 AI 配置里的 `maxOutputTokens` 或应用级高上限决定最终请求值
+- AI 配置页模型目录增强：OpenRouter 模型目录现在除了 `contextLength` 之外，也会尽量解析并展示 `max_output_tokens / max_completion_tokens` 一类的最大输出上限；模型选择弹窗与编辑表单都会显示“上下文 / 最大输出”两项，方便判断像 `kimi-k2.5` 这样的模型到底有没有公开输出上限元数据
+- 辩论页诊断弹窗升级：不再只展示原始 JSON，而是先给出“平台截断 / 工具打断 / 业务逻辑覆盖 / 业务侧改写 / 正常结束”的可读总结与依据，再提供原始诊断 JSON 折叠查看，方便快速判断正文为什么看起来不完整
+- 辩论页诊断能力增强：中间栏查看某条发言时，标题区新增“查看诊断结果”按钮，可直接读取并展示该 turn 对应的 `context/generation_diagnostics.jsonl` 记录；文件查看弹窗的“末尾”定位改为内容渲染完成后统一滚动，修复多次点击仍停在开头的问题
+- 运行时可观测性增强：每轮生成现在会把 `requestedMaxTokens`、模型返回停止原因、原始正文长度、落库长度、是否被选举投票覆盖等信息写入 `context/generation_diagnostics.jsonl`，用于排查“正文像说到一半被截断”到底是平台截断、工具打断还是业务覆盖
+- 运行时输出上限语义修正：workflow 中将单轮预算设为 `null` 时，不再简单省略 `max_tokens`，而是显式向模型请求一个极高上限，避免某些 OpenAI 兼容供应商在未传 `max_tokens` 时回退到过小默认值，导致正文像“说到一半被截断”
+- 神作模式输出预算升级：workflow 现在支持把 `promptPolicies.outputBudget.discussionMaxTokens` / `writingMaxTokens` 设为 `null`，表示不再由 workflow 单轮预算硬卡输出；运行时会在这种模式下省略 `max_tokens`，`NOVEL_GODMODE_WORKFLOW.json` 与 docker seed 也同步切到“不设上限”
+- 辩论页中间查看器：切换到新的发言或投票结果时会自动回到顶部，不再继承上一条内容的滚动位置，避免长内容看起来像被截断；只有“跟随最新”的实时输出继续自动贴底
+- 辩论页文件查看修复：删除文件树“包含辩论文件（debate/*）与每席位文件（agents/*）”说明文案；点击文件后切换“开头 / 末尾”时，会按当前切片方向自动滚动到顶部或底部，避免查看末尾时仍停在显示片段开头
 - Docker seed：修正小说策略的 IDEA 注入方式，`templates/debate_question.md` 不再保留误导性的 `<<<IDEAS>>>` 占位符，改为明确说明原始点子库位于 `ideas/raw-idea-bank.md`；同时在原始点子库顶部补充“7 位外来天才 / 本土天才 / 主线弧线 / 群像智斗史诗”框架边界，避免 AI 只看到散点而看不到故事骨架
 - 辩论页直播修复：首轮首人发言时即使中途点击暂停，也会继续保留并显示当前 live 草稿，直到该条发言真正保存为 turn；暂停不再把正在生成但尚未落库的内容隐藏成“还没有发言记录”
 - 投票与阶段显示修复：发言目录现在会为存在官方投票结果的轮次直接显示“有投票结果”标志，且投票结果索引不再只对 owner 刷新；平票重投期间，当前轮阶段会优先跟随 `votes/open.json` 显示为选举/投票阶段，不再按纯轮次阈值误显示为 Phase 3

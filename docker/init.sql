@@ -59,6 +59,9 @@ create table if not exists ai_agents (
   name text not null,
   provider text not null check (provider in ('openai', 'anthropic')),
   model text not null,
+  context_length integer null,
+  max_input_tokens integer null,
+  max_output_tokens integer null,
   base_url text not null,
   api_key_encrypted text not null,
   api_key_masked text not null,
@@ -66,6 +69,10 @@ create table if not exists ai_agents (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table ai_agents add column if not exists context_length integer null;
+alter table ai_agents add column if not exists max_input_tokens integer null;
+alter table ai_agents add column if not exists max_output_tokens integer null;
 
 create table if not exists debates (
   id uuid primary key default gen_random_uuid(),

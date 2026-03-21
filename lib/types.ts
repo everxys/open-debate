@@ -27,6 +27,8 @@ export type AgentRecord = {
   provider: Provider;
   model: string;
   contextLength: number | null;
+  maxInputTokens: number | null;
+  maxOutputTokens: number | null;
   baseUrl: string;
   apiKeyEncrypted: string;
   apiKeyMasked: string;

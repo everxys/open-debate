@@ -30,6 +30,7 @@ const CONTEXT_USAGE_PATH = "context/usage.json";
 const CONTEXT_USAGE_LOG_PATH = "context/usage_log.jsonl";
 const CONTEXT_USAGE_TOTALS_PATH = "context/usage_totals.json";
 const CONTEXT_USAGE_BASELINE_PATH = "context/usage_baseline.json";
+const CONTEXT_GENERATION_DIAGNOSTICS_PATH = "context/generation_diagnostics.jsonl";
 const QUESTION_LATEST_DIFF_PATH = "question/latest_diff.md";
 const SEATS_PENDING_REORDER_PATH = "seats/pending_reorder.json";
 const MEMORY_LOG_COMPACT_THRESHOLD_CHARS = 60_000;
@@ -76,6 +77,17 @@ function appendWithTrim(current: string, appended: string, maxChars?: number | n
   if (next.length <= maxChars) return next;
   // keep tail when exceeding limit
   return next.slice(Math.max(0, next.length - maxChars));
+}
+
+async function appendGenerationDiagnostics(input: {
+  userId: string;
+  debateId: string;
+  now: string;
+  entry: Record<string, unknown>;
+}) {
+  const current = (await readDebateFile(input.userId, input.debateId, CONTEXT_GENERATION_DIAGNOSTICS_PATH)) ?? "";
+  const next = appendWithTrim(current, JSON.stringify(input.entry), 1_000_000);
+  await upsertDebateFile(input.debateId, CONTEXT_GENERATION_DIAGNOSTICS_PATH, next, input.now);
 }
 
 function estimatePromptTokensFromChars(chars: number) {
@@ -939,7 +951,7 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NormalizedDebateW
   );
   lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
   lines.push(
-    `- output budget: discussion=${workflow.promptPolicies.outputBudget.discussionMaxTokens}; writing=${workflow.promptPolicies.outputBudget.writingMaxTokens}`
+    `- output budget: discussion=${workflow.promptPolicies.outputBudget.discussionMaxTokens ?? "unlimited"}; writing=${workflow.promptPolicies.outputBudget.writingMaxTokens ?? "unlimited"}`
   );
   const first = workflow.election.speakingOrder.firstRole;
   const last = workflow.election.speakingOrder.lastRole;
@@ -1024,6 +1036,7 @@ async function openAiChatStream(args: {
     { id?: string; function?: { name?: string; arguments?: string } }
   >();
   let lastUsage: unknown = null;
+  let lastFinishReason: string | null = null;
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
@@ -1070,6 +1083,8 @@ async function openAiChatStream(args: {
     }
 
     if (payload?.usage) lastUsage = payload.usage;
+    const finishReason = payload?.choices?.[0]?.finish_reason;
+    if (typeof finishReason === "string" && finishReason) lastFinishReason = finishReason;
   });
 
   const toolCalls = [...toolCallsByIndex.entries()]
@@ -1083,7 +1098,7 @@ async function openAiChatStream(args: {
     }))
     .filter((x) => x.function.name);
 
-  return { content: contentParts.join(""), toolCalls, usage: lastUsage };
+  return { content: contentParts.join(""), toolCalls, usage: lastUsage, finishReason: lastFinishReason };
 }
 
 async function openAiChatOnce(args: { url: string; apiKey: string; body: Record<string, unknown> }) {
@@ -1113,7 +1128,8 @@ async function openAiChatOnce(args: { url: string; apiKey: string; body: Record<
       })).filter((c) => c.function.name)
     : [];
   const usage = payload?.usage ?? null;
-  return { content, toolCalls, usage };
+  const finishReason = typeof payload?.choices?.[0]?.finish_reason === "string" ? payload.choices[0].finish_reason : null;
+  return { content, toolCalls, usage, finishReason };
 }
 
 async function openAiUsageProbe(args: { url: string; apiKey: string; body: Record<string, unknown> }) {
@@ -1547,11 +1563,41 @@ function getWorkflowEarliestCompletionRound(workflow: NormalizedDebateWorkflow |
 
 function getWorkflowOutputMaxTokens(
   workflow: NormalizedDebateWorkflow | null,
-  phaseKind: "analysis" | "election" | "deliberation" | "finalization" | null
+  phaseKind: "analysis" | "election" | "deliberation" | "finalization" | null,
+  agentMaxOutputTokens: number | null
 ) {
-  const discussionMaxTokens = workflow?.promptPolicies.outputBudget.discussionMaxTokens ?? 1800;
-  const writingMaxTokens = workflow?.promptPolicies.outputBudget.writingMaxTokens ?? 3600;
-  return phaseKind === "finalization" ? writingMaxTokens : discussionMaxTokens;
+  const discussionBudget = workflow?.promptPolicies.outputBudget.discussionMaxTokens;
+  const writingBudget = workflow?.promptPolicies.outputBudget.writingMaxTokens;
+  const phaseBudget =
+    phaseKind === "finalization"
+      ? writingBudget === undefined
+        ? 3600
+        : writingBudget
+      : discussionBudget === undefined
+        ? 1800
+        : discussionBudget;
+
+  if (typeof agentMaxOutputTokens === "number" && Number.isFinite(agentMaxOutputTokens) && agentMaxOutputTokens > 0) {
+    return typeof phaseBudget === "number" && Number.isFinite(phaseBudget) && phaseBudget > 0
+      ? Math.min(Math.floor(phaseBudget), Math.floor(agentMaxOutputTokens))
+      : Math.floor(agentMaxOutputTokens);
+  }
+
+  return phaseBudget;
+}
+
+function resolveRequestedMaxTokens(maxTokens: number | null) {
+  if (typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0) {
+    return Math.floor(maxTokens);
+  }
+  // "Unlimited" in workflow means "do not cap aggressively in app code".
+  // Many OpenAI-compatible providers still apply a small default if max_tokens is omitted,
+  // so send a deliberately high ceiling instead of relying on provider defaults.
+  return 65_535;
+}
+
+function withOptionalMaxTokens<T extends Record<string, unknown>>(body: T, maxTokens: number | null) {
+  return { ...body, max_tokens: resolveRequestedMaxTokens(maxTokens) };
 }
 
 function shouldEnterWorkflowFinalization(input: {
@@ -3021,7 +3067,12 @@ async function callProvider(
     roundNumber,
     openVote
   });
-  const currentOutputMaxTokens = getWorkflowOutputMaxTokens(workflow, currentPhase?.kind ?? null);
+  const currentOutputMaxTokens = getWorkflowOutputMaxTokens(
+    workflow,
+    currentPhase?.kind ?? null,
+    agent.maxOutputTokens
+  );
+  const requestedMaxTokens = resolveRequestedMaxTokens(currentOutputMaxTokens);
   const workflowPhaseInline = buildWorkflowPhaseInline({ workflow, debate, roundNumber, openVote });
   const workflowOpeningInline = buildWorkflowOpeningInline({ workflow, roundNumber });
   const workflowIdeaBankInline = await loadWorkflowIdeaBankInline({
@@ -3103,7 +3154,18 @@ async function callProvider(
 
   if (process.env.NODE_ENV !== "production" && apiKey.startsWith("demo-")) {
     const estimatedPromptTokens = estimatePromptTokensFromChars(prompt.length);
-    return { raw: buildDemoResponse(debate, agent, messageNumber), usage: null, estimatedPromptTokens };
+    return {
+      raw: buildDemoResponse(debate, agent, messageNumber),
+      usage: null,
+      estimatedPromptTokens,
+      diagnostics: {
+        provider: agent.provider,
+        model: agent.model,
+        requestedMaxTokens,
+        finishReason: "demo_fallback",
+        toolCallsCount: 0
+      }
+    };
   }
 
   if (agent.provider === "openai") {
@@ -3157,6 +3219,7 @@ async function callProvider(
         content: string;
         toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>;
         usage: unknown;
+        finishReason?: string | null;
       } | null = null;
       try {
         streamed = await openAiChatStream({
@@ -3165,13 +3228,15 @@ async function callProvider(
           agentName: eventAgentName,
           url,
           apiKey,
-          body: {
-            model: agent.model,
-            max_tokens: currentOutputMaxTokens,
-            tools,
-            tool_choice: "auto",
-            messages
-          }
+          body: withOptionalMaxTokens(
+            {
+              model: agent.model,
+              tools,
+              tool_choice: "auto",
+              messages
+            },
+            currentOutputMaxTokens
+          )
         });
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error ?? "");
@@ -3194,8 +3259,32 @@ async function callProvider(
         );
 
       if (!toolCalls || toolCalls.length === 0) {
-        if (assistantContent) return { raw: assistantContent, usage, estimatedPromptTokens };
-        return { raw: buildDemoResponse(debate, agent, messageNumber), usage, estimatedPromptTokens };
+        if (assistantContent) {
+          return {
+            raw: assistantContent,
+            usage,
+            estimatedPromptTokens,
+            diagnostics: {
+              provider: agent.provider,
+              model: agent.model,
+              requestedMaxTokens,
+              finishReason: streamed.finishReason ?? null,
+              toolCallsCount: 0
+            }
+          };
+        }
+        return {
+          raw: buildDemoResponse(debate, agent, messageNumber),
+          usage,
+          estimatedPromptTokens,
+          diagnostics: {
+            provider: agent.provider,
+            model: agent.model,
+            requestedMaxTokens,
+            finishReason: streamed.finishReason ?? "demo_fallback",
+            toolCallsCount: 0
+          }
+        };
       }
 
       messages.push({ role: "assistant", tool_calls: toolCalls, content: assistantContent });
@@ -3303,7 +3392,7 @@ async function callProvider(
       agentName: eventAgentName,
       url,
       apiKey,
-      body: { model: agent.model, max_tokens: currentOutputMaxTokens, messages }
+      body: withOptionalMaxTokens({ model: agent.model, messages }, currentOutputMaxTokens)
     });
     const usage =
       normalizeUsage(fallback.usage) ??
@@ -3314,8 +3403,32 @@ async function callProvider(
           body: { model: agent.model, messages }
         }).catch(() => null)
       );
-    if (fallback.content) return { raw: fallback.content, usage, estimatedPromptTokens };
-    return { raw: buildDemoResponse(debate, agent, messageNumber), usage, estimatedPromptTokens };
+    if (fallback.content) {
+      return {
+        raw: fallback.content,
+        usage,
+        estimatedPromptTokens,
+        diagnostics: {
+          provider: agent.provider,
+          model: agent.model,
+          requestedMaxTokens,
+          finishReason: fallback.finishReason ?? null,
+          toolCallsCount: 0
+        }
+      };
+    }
+    return {
+      raw: buildDemoResponse(debate, agent, messageNumber),
+      usage,
+      estimatedPromptTokens,
+      diagnostics: {
+        provider: agent.provider,
+        model: agent.model,
+        requestedMaxTokens,
+        finishReason: fallback.finishReason ?? "demo_fallback",
+        toolCallsCount: 0
+      }
+    };
   }
 
   const tools = buildAnthropicTools({ enableVoting: enableVotingTools, allowedOutputPaths });
@@ -3368,13 +3481,17 @@ async function callProvider(
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01"
       },
-        body: JSON.stringify({
-          model: agent.model,
-          max_tokens: currentOutputMaxTokens,
-          system: systemParts.join("\n\n"),
-          tools,
-          messages
-        })
+        body: JSON.stringify(
+          withOptionalMaxTokens(
+            {
+              model: agent.model,
+              system: systemParts.join("\n\n"),
+              tools,
+              messages
+            },
+            currentOutputMaxTokens
+          )
+        )
     });
     const payload = await response.json();
 
@@ -3399,7 +3516,18 @@ async function callProvider(
         | undefined;
       const content = textBlock?.text ?? buildDemoResponse(debate, agent, messageNumber);
        await emitChunks(debate.id, messageNumber, agent.name, content);
-       return { raw: content, usage: normalizeAnthropicUsage(payload?.usage ?? null), estimatedPromptTokens };
+       return {
+         raw: content,
+         usage: normalizeAnthropicUsage(payload?.usage ?? null),
+         estimatedPromptTokens,
+         diagnostics: {
+           provider: agent.provider,
+           model: agent.model,
+           requestedMaxTokens,
+           finishReason: typeof payload?.stop_reason === "string" ? payload.stop_reason : null,
+           toolCallsCount: 0
+         }
+       };
      }
 
     messages.push({ role: "assistant", content: contentBlocks });
@@ -3516,12 +3644,16 @@ async function callProvider(
       "x-api-key": apiKey,
       "anthropic-version": "2023-06-01"
     },
-    body: JSON.stringify({
-      model: agent.model,
-      max_tokens: currentOutputMaxTokens,
-      system: systemParts.join("\n\n"),
-      messages: [{ role: "user", content: prompt }]
-    })
+    body: JSON.stringify(
+      withOptionalMaxTokens(
+        {
+          model: agent.model,
+          system: systemParts.join("\n\n"),
+          messages: [{ role: "user", content: prompt }]
+        },
+        currentOutputMaxTokens
+      )
+    )
   });
   const payload = await response.json();
   if (!response.ok) {
@@ -3529,7 +3661,18 @@ async function callProvider(
   }
   const content = payload.content?.[0]?.text ?? buildDemoResponse(debate, agent, messageNumber);
   await emitChunks(debate.id, messageNumber, agent.name, content);
-  return { raw: content, usage: normalizeAnthropicUsage(payload?.usage ?? null), estimatedPromptTokens };
+  return {
+    raw: content,
+    usage: normalizeAnthropicUsage(payload?.usage ?? null),
+    estimatedPromptTokens,
+    diagnostics: {
+      provider: agent.provider,
+      model: agent.model,
+      requestedMaxTokens,
+      finishReason: typeof payload?.stop_reason === "string" ? payload.stop_reason : null,
+      toolCallsCount: 0
+    }
+  };
 }
 
 async function emitChunks(debateId: string, turnNumber: number, agentName: string, raw: string) {
@@ -3576,6 +3719,10 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
 function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
   const contextLengthRaw = row.context_length ?? row.contextLength ?? null;
   const contextLength = contextLengthRaw === null ? null : Number(contextLengthRaw);
+  const maxInputTokensRaw = row.max_input_tokens ?? row.maxInputTokens ?? null;
+  const maxInputTokens = maxInputTokensRaw === null ? null : Number(maxInputTokensRaw);
+  const maxOutputTokensRaw = row.max_output_tokens ?? row.maxOutputTokens ?? null;
+  const maxOutputTokens = maxOutputTokensRaw === null ? null : Number(maxOutputTokensRaw);
   return {
     id: String(row.id),
     userId: String(row.user_id),
@@ -3584,6 +3731,14 @@ function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
     model: String(row.model),
     contextLength:
       contextLength !== null && Number.isFinite(contextLength) && contextLength > 0 ? Math.floor(contextLength) : null,
+    maxInputTokens:
+      maxInputTokens !== null && Number.isFinite(maxInputTokens) && maxInputTokens > 0
+        ? Math.floor(maxInputTokens)
+        : null,
+    maxOutputTokens:
+      maxOutputTokens !== null && Number.isFinite(maxOutputTokens) && maxOutputTokens > 0
+        ? Math.floor(maxOutputTokens)
+        : null,
     baseUrl: String(row.base_url),
     apiKeyEncrypted: String(row.api_key_encrypted),
     apiKeyMasked: String(row.api_key_masked),
@@ -4514,6 +4669,15 @@ export async function runDebate(id: string, userId: string) {
       let raw = "";
       let usage: { promptTokens: number | null; completionTokens: number | null; totalTokens: number | null } | null = null;
       let estimatedPromptTokens: number | null = null;
+      let generationDiagnostics:
+        | {
+            provider: string;
+            model: string;
+            requestedMaxTokens: number;
+            finishReason: string | null;
+            toolCallsCount: number;
+          }
+        | null = null;
       let retryCount = 0;
       const messageNumber = debate.currentTurn + 1;
       const roundNumber = completedRounds + 1;
@@ -4535,6 +4699,18 @@ export async function runDebate(id: string, userId: string) {
           estimatedPromptTokens =
             typeof (result as { estimatedPromptTokens?: unknown }).estimatedPromptTokens === "number"
               ? Number((result as { estimatedPromptTokens: number }).estimatedPromptTokens)
+              : null;
+          generationDiagnostics =
+            result && typeof result === "object" && "diagnostics" in result
+              ? ((result as {
+                  diagnostics?: {
+                    provider: string;
+                    model: string;
+                    requestedMaxTokens: number;
+                    finishReason: string | null;
+                    toolCallsCount: number;
+                  };
+                }).diagnostics ?? null)
               : null;
           break;
         } catch (error) {
@@ -4587,6 +4763,40 @@ export async function runDebate(id: string, userId: string) {
           createdAt
         ]
       );
+
+      try {
+        await appendGenerationDiagnostics({
+          userId,
+          debateId: id,
+          now: createdAt,
+          entry: {
+            at: createdAt,
+            turnNumber: debate.currentTurn + 1,
+            roundNumber,
+            debateAgentId: String(currentParticipant.id),
+            seatNumber:
+              typeof (currentParticipant as any).turn_order === "number"
+                ? Number((currentParticipant as any).turn_order)
+                : typeof (currentParticipant as any).turnOrder === "number"
+                  ? Number((currentParticipant as any).turnOrder)
+                  : currentIndex + 1,
+            agentName: eventAgentName,
+            provider: generationDiagnostics?.provider ?? agent.provider,
+            model: generationDiagnostics?.model ?? agent.model,
+            requestedMaxTokens: generationDiagnostics?.requestedMaxTokens ?? requestedMaxTokens,
+            finishReason: generationDiagnostics?.finishReason ?? null,
+            toolCallsCount: generationDiagnostics?.toolCallsCount ?? 0,
+            rawChars: raw.length,
+            persistedChars: persistedResponse.content.length,
+            parseStatus: persistedResponse.parseStatus,
+            structuredOutput: Boolean(persistedResponse.structuredOutput),
+            voteOnlyOverride:
+              Boolean(openVoteBeforeTurn?.status === "open" && openVoteBeforeTurn.kind === "election")
+          }
+        });
+      } catch (error) {
+        console.warn("generation diagnostics persistence failed", error);
+      }
 
       await query("update debate_agents set turn_count = turn_count + 1 where id = $1", [
         String(currentParticipant.id)

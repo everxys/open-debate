@@ -76,6 +76,8 @@ async function ensureSchema(pool: Pool) {
     "alter table debates add column if not exists enable_shared_facts boolean not null default true"
   );
   await pool.query("alter table ai_agents add column if not exists context_length int null");
+  await pool.query("alter table ai_agents add column if not exists max_input_tokens int null");
+  await pool.query("alter table ai_agents add column if not exists max_output_tokens int null");
   await pool.query("alter table ai_agents add column if not exists deleted_at timestamptz null");
   // Per-seat identity (cannot rely on ai_agents.name because same config can be reused).
   await pool.query("alter table debate_agents add column if not exists display_name text null");

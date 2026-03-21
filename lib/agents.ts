@@ -21,6 +21,8 @@ function toAgentView(agent: AgentRecord) {
     provider: agent.provider,
     model: agent.model,
     contextLength: agent.contextLength,
+    maxInputTokens: agent.maxInputTokens,
+    maxOutputTokens: agent.maxOutputTokens,
     baseUrl: agent.baseUrl,
     apiKeyMasked: agent.apiKeyMasked,
     isActive: agent.isActive,
@@ -32,6 +34,10 @@ function toAgentView(agent: AgentRecord) {
 function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
   const contextLengthRaw = row.context_length ?? row.contextLength ?? null;
   const contextLength = contextLengthRaw === null ? null : Number(contextLengthRaw);
+  const maxInputTokensRaw = row.max_input_tokens ?? row.maxInputTokens ?? null;
+  const maxInputTokens = maxInputTokensRaw === null ? null : Number(maxInputTokensRaw);
+  const maxOutputTokensRaw = row.max_output_tokens ?? row.maxOutputTokens ?? null;
+  const maxOutputTokens = maxOutputTokensRaw === null ? null : Number(maxOutputTokensRaw);
   return {
     id: String(row.id),
     userId: String(row.user_id),
@@ -40,6 +46,14 @@ function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
     model: String(row.model),
     contextLength:
       contextLength !== null && Number.isFinite(contextLength) && contextLength > 0 ? Math.floor(contextLength) : null,
+    maxInputTokens:
+      maxInputTokens !== null && Number.isFinite(maxInputTokens) && maxInputTokens > 0
+        ? Math.floor(maxInputTokens)
+        : null,
+    maxOutputTokens:
+      maxOutputTokens !== null && Number.isFinite(maxOutputTokens) && maxOutputTokens > 0
+        ? Math.floor(maxOutputTokens)
+        : null,
     baseUrl: String(row.base_url),
     apiKeyEncrypted: String(row.api_key_encrypted),
     apiKeyMasked: String(row.api_key_masked),
@@ -349,6 +363,8 @@ export async function exportAgentsPack(input: unknown) {
       provider: agent.provider,
       model: agent.model,
       contextLength: agent.contextLength,
+      maxInputTokens: agent.maxInputTokens,
+      maxOutputTokens: agent.maxOutputTokens,
       baseUrl: agent.baseUrl,
       isActive: agent.isActive,
       apiKey: decryptSecret(agent.apiKeyEncrypted),
@@ -369,20 +385,32 @@ export async function importAgentsPack(input: unknown) {
 
     const createdAgents: AgentRecord[] = [];
     for (const item of data.agents) {
+      const importedContextLength =
+        typeof (item as { contextLength?: unknown }).contextLength === "number"
+          ? (item as { contextLength: number }).contextLength
+          : null;
+      const importedMaxInputTokens =
+        typeof (item as { maxInputTokens?: unknown }).maxInputTokens === "number"
+          ? (item as { maxInputTokens: number }).maxInputTokens
+          : null;
+      const importedMaxOutputTokens =
+        typeof (item as { maxOutputTokens?: unknown }).maxOutputTokens === "number"
+          ? (item as { maxOutputTokens: number }).maxOutputTokens
+          : null;
       const inserted = await client.query<Record<string, unknown>>(
         `insert into ai_agents (
-          user_id, name, provider, model, context_length, base_url, api_key_encrypted, api_key_masked,
-          is_active, created_at, updated_at
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+          user_id, name, provider, model, context_length, max_input_tokens, max_output_tokens, base_url,
+          api_key_encrypted, api_key_masked, is_active, created_at, updated_at
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
         returning *`,
         [
           session.userId,
           item.name,
           item.provider,
           item.model,
-          typeof (item as { contextLength?: unknown }).contextLength === "number"
-            ? (item as { contextLength: number }).contextLength
-            : null,
+          importedContextLength,
+          importedMaxInputTokens,
+          importedMaxOutputTokens,
           item.baseUrl,
           encryptSecret(item.apiKey),
           maskSecret(item.apiKey),
@@ -621,9 +649,9 @@ export async function duplicateAgent(id: string) {
     const inserted = await client.query<Record<string, unknown>>(
       `
         insert into ai_agents (
-          user_id, name, provider, model, base_url, api_key_encrypted, api_key_masked,
-          is_active, created_at, updated_at
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+          user_id, name, provider, model, context_length, max_input_tokens, max_output_tokens, base_url,
+          api_key_encrypted, api_key_masked, is_active, created_at, updated_at
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
         returning *
       `,
       [
@@ -631,6 +659,9 @@ export async function duplicateAgent(id: string) {
         `${source.name} (copy)`,
         source.provider,
         source.model,
+        source.contextLength,
+        source.maxInputTokens,
+        source.maxOutputTokens,
         source.baseUrl,
         source.apiKeyEncrypted,
         source.apiKeyMasked,
@@ -677,9 +708,9 @@ export async function createAgent(input: unknown) {
   const now = new Date().toISOString();
   const result = await query<Record<string, unknown>>(
     `insert into ai_agents (
-      user_id, name, provider, model, context_length, base_url, api_key_encrypted, api_key_masked,
-      is_active, created_at, updated_at
-    ) values ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$9)
+      user_id, name, provider, model, context_length, max_input_tokens, max_output_tokens, base_url,
+      api_key_encrypted, api_key_masked, is_active, created_at, updated_at
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true,$11,$11)
     returning *`,
     [
       session.userId,
@@ -687,6 +718,8 @@ export async function createAgent(input: unknown) {
       data.provider,
       data.model,
       data.contextLength ?? null,
+      data.maxInputTokens ?? null,
+      data.maxOutputTokens ?? null,
       data.baseUrl,
       encryptSecret(data.apiKey),
       maskSecret(data.apiKey),
@@ -701,7 +734,19 @@ export async function updateAgent(id: string, input: unknown) {
   const session = await requireSessionUser();
   const current = await getAgentById(id);
   const hasContextLength = Object.prototype.hasOwnProperty.call(data, "contextLength");
+  const hasMaxInputTokens = Object.prototype.hasOwnProperty.call(data, "maxInputTokens");
+  const hasMaxOutputTokens = Object.prototype.hasOwnProperty.call(data, "maxOutputTokens");
   const contextLengthRaw = (data as { contextLength?: unknown }).contextLength;
+  const maxInputTokensRaw = (data as { maxInputTokens?: unknown }).maxInputTokens;
+  const maxOutputTokensRaw = (data as { maxOutputTokens?: unknown }).maxOutputTokens;
+  const nextMaxInputTokens =
+    hasMaxInputTokens
+      ? typeof maxInputTokensRaw === "number"
+        ? maxInputTokensRaw
+        : maxInputTokensRaw === null
+          ? null
+          : current.maxInputTokens
+      : current.maxInputTokens;
   const nextContextLength =
     hasContextLength
       ? typeof contextLengthRaw === "number"
@@ -710,6 +755,14 @@ export async function updateAgent(id: string, input: unknown) {
           ? null
           : current.contextLength
       : current.contextLength;
+  const nextMaxOutputTokens =
+    hasMaxOutputTokens
+      ? typeof maxOutputTokensRaw === "number"
+        ? maxOutputTokensRaw
+        : maxOutputTokensRaw === null
+          ? null
+          : current.maxOutputTokens
+      : current.maxOutputTokens;
 
   const result = await query<Record<string, unknown>>(
     `update ai_agents
@@ -717,10 +770,12 @@ export async function updateAgent(id: string, input: unknown) {
           provider = $4,
           model = $5,
           context_length = $6,
-          base_url = $7,
-          api_key_encrypted = $8,
-          api_key_masked = $9,
-          updated_at = $10
+          max_input_tokens = $7,
+          max_output_tokens = $8,
+          base_url = $9,
+          api_key_encrypted = $10,
+          api_key_masked = $11,
+          updated_at = $12
      where id = $1 and user_id = $2
      returning *`,
     [
@@ -730,6 +785,8 @@ export async function updateAgent(id: string, input: unknown) {
       data.provider ?? current.provider,
       data.model ?? current.model,
       nextContextLength,
+      nextMaxInputTokens,
+      nextMaxOutputTokens,
       data.baseUrl ?? current.baseUrl,
       data.apiKey ? encryptSecret(data.apiKey) : current.apiKeyEncrypted,
       data.apiKey ? maskSecret(data.apiKey) : current.apiKeyMasked,

@@ -5,6 +5,8 @@ export const createAgentSchema = z.object({
   provider: z.enum(["openai", "anthropic"]),
   model: z.string().min(1).max(100),
   contextLength: z.number().int().min(1).max(2_000_000).nullable().optional(),
+  maxInputTokens: z.number().int().min(1).max(2_000_000).nullable().optional(),
+  maxOutputTokens: z.number().int().min(1).max(2_000_000).nullable().optional(),
   baseUrl: z.string().url().min(1),
   apiKey: z.string().min(1)
 });
@@ -46,6 +48,8 @@ export const agentPortableSchema = z.object({
   provider: z.enum(["openai", "anthropic"]),
   model: z.string().min(1).max(100),
   contextLength: z.number().int().min(1).max(2_000_000).nullable().optional(),
+  maxInputTokens: z.number().int().min(1).max(2_000_000).nullable().optional(),
+  maxOutputTokens: z.number().int().min(1).max(2_000_000).nullable().optional(),
   baseUrl: z.string().url().min(1),
   isActive: z.boolean().optional().default(true),
   apiKey: z.string().min(1),

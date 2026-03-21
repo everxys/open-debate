@@ -2,6 +2,7 @@ type OpenRouterModelRow = {
   id: string;
   name: string;
   contextLength: number | null;
+  maxOutputTokens: number | null;
 };
 
 type Cache = { atMs: number; models: OpenRouterModelRow[] };
@@ -22,6 +23,20 @@ function extractContextLength(model: Record<string, unknown>) {
     toPositiveInt(topProvider?.context_length) ??
     toPositiveInt(model.context_length) ??
     toPositiveInt((model as { contextLength?: unknown }).contextLength) ??
+    null
+  );
+}
+
+function extractMaxOutputTokens(model: Record<string, unknown>) {
+  const topProvider = model.top_provider as Record<string, unknown> | null | undefined;
+  return (
+    toPositiveInt(topProvider?.max_completion_tokens) ??
+    toPositiveInt(topProvider?.max_output_tokens) ??
+    toPositiveInt(topProvider?.max_tokens) ??
+    toPositiveInt(model.max_completion_tokens) ??
+    toPositiveInt(model.max_output_tokens) ??
+    toPositiveInt(model.max_tokens) ??
+    toPositiveInt((model as { maxOutputTokens?: unknown }).maxOutputTokens) ??
     null
   );
 }
@@ -54,7 +69,12 @@ export async function listOpenRouterModels(): Promise<OpenRouterModelRow[]> {
     const id = typeof raw?.id === "string" ? raw.id : "";
     if (!id) continue;
     const name = typeof raw?.name === "string" ? raw.name : "";
-    models.push({ id, name, contextLength: extractContextLength(raw) });
+    models.push({
+      id,
+      name,
+      contextLength: extractContextLength(raw),
+      maxOutputTokens: extractMaxOutputTokens(raw)
+    });
   }
 
   models.sort((a, b) => a.id.localeCompare(b.id));
@@ -69,4 +89,3 @@ export async function getOpenRouterModelContextLength(modelId: string): Promise<
   const hit = models.find((m) => m.id === id);
   return hit?.contextLength ?? null;
 }
-

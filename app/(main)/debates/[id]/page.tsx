@@ -39,6 +39,8 @@ type DebateAgent = {
   name: string;
   provider: string;
   contextLength: number | null;
+  maxInputTokens: number | null;
+  maxOutputTokens: number | null;
   turnOrder: number;
   turnCount: number;
 };
@@ -197,7 +199,7 @@ function formatWorkflowRulesMarkdown(raw: string) {
   rules.push(`- 输出格式：${parsed.promptPolicies.responseFormat.requireMarkdown ? "Markdown" : "不强制 Markdown"}`);
   rules.push(`- 禁止原始 JSON：${parsed.promptPolicies.responseFormat.forbidRawJson ? "是" : "否"}`);
   rules.push(
-    `- 单轮输出预算：讨论=${parsed.promptPolicies.outputBudget.discussionMaxTokens} tokens；写作=${parsed.promptPolicies.outputBudget.writingMaxTokens} tokens`
+    `- 单轮输出预算：讨论=${parsed.promptPolicies.outputBudget.discussionMaxTokens ?? "不设上限"}；写作=${parsed.promptPolicies.outputBudget.writingMaxTokens ?? "不设上限"}`
   );
   rules.push(`- Round 1 公平性提示：${parsed.promptPolicies.round1Fairness ? "开启" : "关闭"}`);
   rules.push(
@@ -775,7 +777,6 @@ function DebateFilesPanel(props: {
         onDownload={props.onDownload}
         onRefresh={props.onRefresh}
       />
-      <div className="muted">包含辩论文件（debate/*）与每席位文件（agents/*）。</div>
       {props.loading ? (
         <div className="muted">读取中...</div>
       ) : !props.hasFiles ? (
@@ -895,6 +896,11 @@ function ParticipantsPanel(props: {
                   </button>
                 </div>
               ) : null}
+            </div>
+            <div className="stack muted" style={{ gap: 4, marginTop: 8 }}>
+              <div>总上下文：{agent.contextLength ? agent.contextLength.toLocaleString() : "未配置"}</div>
+              <div>单次最大输入：{agent.maxInputTokens ? agent.maxInputTokens.toLocaleString() : "未配置"}</div>
+              <div>单次最大输出：{agent.maxOutputTokens ? agent.maxOutputTokens.toLocaleString() : "未配置"}</div>
             </div>
             {props.isOwner ? (
               <div className="row" style={{ justifyContent: "space-between", gap: 10, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -1112,6 +1118,119 @@ type OfficialVoteOpenState = {
   title: string;
   tieRound: number;
 };
+
+type GenerationDiagnosticEntry = {
+  at: string;
+  turnNumber: number;
+  roundNumber: number;
+  debateAgentId: string;
+  seatNumber: number | null;
+  agentName: string;
+  provider: string;
+  model: string;
+  requestedMaxTokens: number;
+  finishReason: string | null;
+  toolCallsCount: number;
+  rawChars: number;
+  persistedChars: number;
+  parseStatus: string;
+  structuredOutput: boolean;
+  voteOnlyOverride: boolean;
+};
+
+type GenerationDiagnosticSummary = {
+  title: string;
+  tone: "good" | "warn" | "danger";
+  conclusion: string;
+  evidence: string[];
+};
+
+function summarizeGenerationDiagnostic(entry: GenerationDiagnosticEntry): GenerationDiagnosticSummary {
+  const finishReason = (entry.finishReason ?? "").toLowerCase();
+  const rawChars = Number.isFinite(entry.rawChars) ? entry.rawChars : 0;
+  const persistedChars = Number.isFinite(entry.persistedChars) ? entry.persistedChars : 0;
+  const evidence: string[] = [];
+
+  if (entry.voteOnlyOverride) {
+    evidence.push("当前轮是选举投票轮，业务逻辑会把正文统一替换成固定投票内容。");
+    if (rawChars > 0 || persistedChars > 0) {
+      evidence.push(`原始正文 ${rawChars} 字，最终落库 ${persistedChars} 字。`);
+    }
+    if (entry.finishReason) {
+      evidence.push(`模型停止原因：${entry.finishReason}。`);
+    }
+    return {
+      title: "业务逻辑覆盖",
+      tone: "warn",
+      conclusion: "这条发言不是页面截断，而是被投票轮的业务规则覆盖成固定内容。",
+      evidence
+    };
+  }
+
+  if (
+    finishReason === "length" ||
+    finishReason === "max_tokens" ||
+    finishReason === "max_output_tokens" ||
+    finishReason === "model_length" ||
+    finishReason === "model_context_window_exceeded" ||
+    finishReason === "output_limit"
+  ) {
+    evidence.push(`模型停止原因是 ${entry.finishReason ?? "length"}。`);
+    evidence.push(`本轮请求的输出上限是 ${entry.requestedMaxTokens} tokens。`);
+    evidence.push(`原始正文 ${rawChars} 字，最终落库 ${persistedChars} 字。`);
+    return {
+      title: "平台截断",
+      tone: "danger",
+      conclusion: "这条正文更像是被模型平台的单次输出上限截断了，而不是前端少显示。",
+      evidence
+    };
+  }
+
+  if (
+    entry.toolCallsCount > 0 ||
+    finishReason === "tool_calls" ||
+    finishReason === "function_call"
+  ) {
+    evidence.push(`本轮触发了 ${entry.toolCallsCount} 次工具调用。`);
+    if (entry.finishReason) {
+      evidence.push(`模型停止原因：${entry.finishReason}。`);
+    }
+    evidence.push(`原始正文 ${rawChars} 字，最终落库 ${persistedChars} 字。`);
+    return {
+      title: "工具打断",
+      tone: "warn",
+      conclusion: "这条输出更像是在准备或触发工具调用时结束，正文不完整主要是工具流程中断了自然续写。",
+      evidence
+    };
+  }
+
+  if (persistedChars < rawChars) {
+    evidence.push(`原始正文 ${rawChars} 字，最终落库 ${persistedChars} 字，说明落库前被重新整理过。`);
+    if (entry.structuredOutput && entry.parseStatus === "ok") {
+      evidence.push("本轮命中了结构化解析，正文可能被整理成更短的结构化结果。");
+    } else {
+      evidence.push("没有发现投票覆盖或工具调用，更像是业务侧对正文做了整理/裁剪。");
+    }
+    return {
+      title: "业务侧改写",
+      tone: "warn",
+      conclusion: "原始生成比最终看到的更长，这条内容更像是落库前被业务逻辑整理过。",
+      evidence
+    };
+  }
+
+  evidence.push(`模型停止原因：${entry.finishReason ?? "未提供"}。`);
+  evidence.push(`原始正文 ${rawChars} 字，最终落库 ${persistedChars} 字。`);
+  if (entry.structuredOutput && entry.parseStatus === "ok") {
+    evidence.push("本轮结构化解析正常完成。");
+  }
+  return {
+    title: "正常结束",
+    tone: "good",
+    conclusion: "这条发言更像是模型正常收尾，不像平台截断、工具打断或业务覆盖。",
+    evidence
+  };
+}
 
 function LineNumberTextarea(props: {
   value: string;
@@ -1422,6 +1541,12 @@ export default function DebateDetailPage() {
     totalChars: number;
     shownChars: number;
     slice: "head" | "tail" | "full";
+  } | null>(null);
+  const memoryContentRef = useRef<HTMLDivElement | null>(null);
+  const [diagnosticsDialog, setDiagnosticsDialog] = useState<{
+    turnNumber: number;
+    entry: GenerationDiagnosticEntry | null;
+    loading: boolean;
   } | null>(null);
   const [allFilesLoading, setAllFilesLoading] = useState(false);
   const [allFilesMetaByVirtualPath, setAllFilesMetaByVirtualPath] = useState<
@@ -1773,6 +1898,7 @@ export default function DebateDetailPage() {
     setOpenVoteState(null);
     setVoteLoadingRound(null);
     setInjectedPromptDialog(null);
+    setDiagnosticsDialog(null);
     setContextUsageByDebateAgentId({});
     setContextTotalsByDebateAgentId({});
     setResettingUsageByDebateAgentId({});
@@ -2328,6 +2454,7 @@ export default function DebateDetailPage() {
   }) {
     if (!id) return;
     setMemoryLoading(true);
+    setMemoryTail(input.tail);
     setMemoryUpdatedAt("");
     setMemoryContent("");
     setMemoryTruncation(null);
@@ -2366,6 +2493,40 @@ export default function DebateDetailPage() {
       showToast("error", "网络错误：读取失败");
     } finally {
       setMemoryLoading(false);
+    }
+  }
+
+  async function openGenerationDiagnostics(turnNumber: number) {
+    if (!id || !Number.isFinite(turnNumber) || turnNumber <= 0) return;
+    setDiagnosticsDialog({ turnNumber, entry: null, loading: true });
+    try {
+      const response = await fetch(
+        `/api/debates/${id}/files?path=${encodeURIComponent("context/generation_diagnostics.jsonl")}`,
+        { cache: "no-store" }
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setDiagnosticsDialog({ turnNumber, entry: null, loading: false });
+        return;
+      }
+      const content = String(payload.data?.content ?? "");
+      const entries = content
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          try {
+            return JSON.parse(line) as GenerationDiagnosticEntry;
+          } catch {
+            return null;
+          }
+        })
+        .filter((item): item is GenerationDiagnosticEntry => Boolean(item));
+      const entry = [...entries].reverse().find((item) => Number(item.turnNumber) === turnNumber) ?? null;
+      setDiagnosticsDialog({ turnNumber, entry, loading: false });
+    } catch (error) {
+      console.error(error);
+      setDiagnosticsDialog({ turnNumber, entry: null, loading: false });
     }
   }
 
@@ -2604,6 +2765,25 @@ export default function DebateDetailPage() {
     if (liveAvailable) return "__live__";
     return latestTurn?.id ?? "";
   }, [activeVoteRound, activeTurnId, liveAvailable, latestTurn?.id]);
+
+  useEffect(() => {
+    if (followLatest && viewer?.kind === "live") return;
+    const node = viewerScrollRef.current;
+    if (!node) return;
+    node.scrollTop = 0;
+  }, [followLatest, selectedViewerKey, viewer?.kind]);
+
+  useEffect(() => {
+    if (!memoryOpen || memoryLoading) return;
+    const node = memoryContentRef.current;
+    if (!node) return;
+    const timer = window.setTimeout(() => {
+      const current = memoryContentRef.current;
+      if (!current) return;
+      current.scrollTop = memoryTail ? current.scrollHeight : 0;
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [memoryContent, memoryLoading, memoryOpen, memoryTail, memoryTruncation?.slice]);
 
   const liveDisplayRound = typeof liveRoundNumber === "number" && liveRoundNumber > 0 ? liveRoundNumber : null;
   const liveDisplayMessage =
@@ -2918,6 +3098,78 @@ export default function DebateDetailPage() {
               {injectedPromptDialog.prompt}
             </div>
           </div>
+        </div>
+      ) : null}
+      {diagnosticsDialog ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setDiagnosticsDialog(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "center",
+            padding: 24,
+            zIndex: 1000
+          }}
+        >
+          {(() => {
+            const summary = diagnosticsDialog.entry ? summarizeGenerationDiagnostic(diagnosticsDialog.entry) : null;
+            const summaryStyle =
+              summary?.tone === "danger"
+                ? { background: "rgba(239, 68, 68, 0.1)", borderColor: "rgba(239, 68, 68, 0.35)" }
+                : summary?.tone === "warn"
+                  ? { background: "rgba(245, 158, 11, 0.1)", borderColor: "rgba(245, 158, 11, 0.35)" }
+                  : { background: "rgba(16, 185, 129, 0.1)", borderColor: "rgba(16, 185, 129, 0.35)" };
+            return (
+          <div
+            className="panel stack"
+            onClick={(event) => event.stopPropagation()}
+            style={{ width: "min(860px, 100%)" }}
+          >
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <div className="stack" style={{ gap: 4 }}>
+                <strong>第 {diagnosticsDialog.turnNumber} 条发言 · 生成诊断</strong>
+                <div className="muted">用于判断正文是被平台截断、工具打断，还是被业务逻辑覆盖。</div>
+              </div>
+              <button className="btn" type="button" onClick={() => setDiagnosticsDialog(null)}>
+                关闭
+              </button>
+            </div>
+            {diagnosticsDialog.loading ? (
+              <div className="panel">读取中...</div>
+            ) : diagnosticsDialog.entry ? (
+              <div className="stack">
+                <div className="panel stack" style={summaryStyle}>
+                  <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                    <strong>{summary?.title ?? "诊断结果"}</strong>
+                    <span className="muted">
+                      {diagnosticsDialog.entry.provider} / {diagnosticsDialog.entry.model}
+                    </span>
+                  </div>
+                  <div>{summary?.conclusion}</div>
+                  <div className="stack muted" style={{ gap: 6 }}>
+                    {(summary?.evidence ?? []).map((item, index) => (
+                      <div key={`${index}-${item}`}>- {item}</div>
+                    ))}
+                  </div>
+                </div>
+                <details className="panel">
+                  <summary style={{ cursor: "pointer", fontWeight: 600 }}>查看原始诊断 JSON</summary>
+                  <pre style={{ margin: "12px 0 0", whiteSpace: "pre-wrap", maxHeight: "45vh", overflowY: "auto" }}>
+                    {JSON.stringify(diagnosticsDialog.entry, null, 2)}
+                  </pre>
+                </details>
+              </div>
+            ) : (
+              <div className="panel">未找到该条发言的诊断记录。</div>
+            )}
+          </div>
+            );
+          })()}
         </div>
       ) : null}
       {saveSuccessOpen ? (
@@ -3343,7 +3595,7 @@ export default function DebateDetailPage() {
                 {memoryTruncation.totalChars} chars
               </div>
             ) : null}
-            <div className="panel" style={{ height: "70vh", overflowY: "auto" }}>
+            <div ref={memoryContentRef} className="panel" style={{ height: "70vh", overflowY: "auto" }}>
               {memoryLoading ? (
                 <div className="muted">加载中...</div>
               ) : memoryPath.toLowerCase().endsWith(".md") ? (
@@ -3547,15 +3799,23 @@ export default function DebateDetailPage() {
         ) : viewer?.kind === "turn" ? (
           <div className="stack" style={{ flex: 1, minHeight: 0 }}>
             <div className="row" style={{ justifyContent: "space-between" }}>
-              <strong>
-                {(() => {
-                  const round = Math.floor((viewer.turn.turnNumber - 1) / agentCount) + 1;
-                  const turnInRound = ((viewer.turn.turnNumber - 1) % agentCount) + 1;
-                  const seat = viewer.turn.seatNumber ? `Seat-${viewer.turn.seatNumber}` : "";
-                  return `#${viewer.turn.turnNumber} · 第 ${round} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${viewer.turn.agent.name}`;
-                })()}
-              </strong>
-              <span className="muted">{new Date(viewer.turn.createdAt).toLocaleTimeString()}</span>
+              <div className="stack" style={{ gap: 4 }}>
+                <strong>
+                  {(() => {
+                    const round = Math.floor((viewer.turn.turnNumber - 1) / agentCount) + 1;
+                    const turnInRound = ((viewer.turn.turnNumber - 1) % agentCount) + 1;
+                    const seat = viewer.turn.seatNumber ? `Seat-${viewer.turn.seatNumber}` : "";
+                    return `#${viewer.turn.turnNumber} · 第 ${round} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${viewer.turn.agent.name}`;
+                  })()}
+                </strong>
+                <span className="muted">{viewer.turn.content.length} chars</span>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="btn" type="button" onClick={() => void openGenerationDiagnostics(viewer.turn.turnNumber)}>
+                  查看诊断结果
+                </button>
+                <span className="muted">{new Date(viewer.turn.createdAt).toLocaleTimeString()}</span>
+              </div>
             </div>
             <div ref={viewerScrollRef} className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
               <MarkdownView value={viewer.turn.content} />

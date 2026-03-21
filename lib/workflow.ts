@@ -178,8 +178,8 @@ export type NormalizedDebateWorkflow = {
       forbidRawJson: boolean;
     };
     outputBudget: {
-      discussionMaxTokens: number;
-      writingMaxTokens: number;
+      discussionMaxTokens: number | null;
+      writingMaxTokens: number | null;
     };
   };
   deliverables: {
@@ -287,9 +287,9 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         requireMarkdown: true,
         forbidRawJson: true
       },
-      outputBudget: {
-        discussionMaxTokens: 1200,
-        writingMaxTokens: 2400
+    outputBudget: {
+      discussionMaxTokens: 1200,
+      writingMaxTokens: 2400
       }
     },
     deliverables: {
@@ -655,8 +655,10 @@ function normalizePromptPolicies(value: unknown) {
       forbidRawJson: forbidRawJsonRaw === undefined ? true : Boolean(forbidRawJsonRaw)
     },
     outputBudget: {
-      discussionMaxTokens: toPositiveInt(discussionMaxTokensRaw) ?? 1800,
-      writingMaxTokens: toPositiveInt(writingMaxTokensRaw) ?? 3600
+      discussionMaxTokens:
+        discussionMaxTokensRaw === null ? null : (toPositiveInt(discussionMaxTokensRaw) ?? 1800),
+      writingMaxTokens:
+        writingMaxTokensRaw === null ? null : (toPositiveInt(writingMaxTokensRaw) ?? 3600)
     }
   };
 }

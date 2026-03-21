@@ -182,8 +182,8 @@ common_files as (
       "forbidRawJson": true
     },
     "outputBudget": {
-      "discussionMaxTokens": 1800,
-      "writingMaxTokens": 3600
+      "discussionMaxTokens": null,
+      "writingMaxTokens": null
     }
   },
   "deliverables": {

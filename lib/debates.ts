@@ -635,7 +635,9 @@ export async function getDebateDetail(id: string) {
              da.turn_count,
              a.name as agent_name,
              a.provider as agent_provider,
-             a.context_length as context_length
+             a.context_length as context_length,
+             a.max_input_tokens as max_input_tokens,
+             a.max_output_tokens as max_output_tokens
         from debate_agents da
         join ai_agents a on a.id = da.ai_agent_id
        where da.debate_id = $1
@@ -651,6 +653,8 @@ export async function getDebateDetail(id: string) {
     name: item.agent_name ? String(item.agent_name) : "Unknown",
     provider: item.agent_provider ? String(item.agent_provider) : "openai",
     contextLength: item.context_length === null ? null : Number(item.context_length),
+    maxInputTokens: item.max_input_tokens === null ? null : Number(item.max_input_tokens),
+    maxOutputTokens: item.max_output_tokens === null ? null : Number(item.max_output_tokens),
     turnOrder: Number(item.turn_order),
     turnCount: Number(item.turn_count)
   }));
