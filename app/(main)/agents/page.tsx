@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 
@@ -92,7 +92,7 @@ export default function AgentsPage() {
     };
   }
 
-  async function loadAgents() {
+  const loadAgents = useCallback(async () => {
     let response: Response;
     try {
       // Avoid stale list after create/update/delete (browser/proxy caching can keep GET results).
@@ -109,11 +109,11 @@ export default function AgentsPage() {
       return;
     }
     setAgents(payload.data ?? []);
-  }
+  }, [showToast]);
 
   useEffect(() => {
     void loadAgents();
-  }, []);
+  }, [loadAgents]);
 
   async function loadCatalogModels() {
     if (openRouterLoading) return;

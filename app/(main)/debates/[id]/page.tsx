@@ -62,12 +62,15 @@ type Debate = {
   agents: DebateAgent[];
 };
 
-type Turn = {
+type TurnSummary = {
   id: string;
   turnNumber: number;
+  roundNumber: number;
   debateAgentId: string | null;
   seatNumber: number | null;
-  content: string;
+  preview: string;
+  contentLength: number;
+  hasStructuredOutput: boolean;
   parseStatus: string;
   tokenUsed: number;
   createdAt: string;
@@ -75,11 +78,45 @@ type Turn = {
     name: string;
     provider: string;
   };
+};
+
+type TurnDetail = TurnSummary & {
+  content: string;
   structuredOutput: {
     proposed_solution?: string;
     arguments?: Array<{ type: "support" | "rebuttal"; content: string }>;
     agreement_score?: number;
   } | null;
+};
+
+type TurnRoundGroup = {
+  roundNumber: number;
+  turns: TurnSummary[];
+};
+
+type TurnWindowState = {
+  summaries: TurnSummary[];
+  byId: Record<string, TurnSummary>;
+  roundGroups: TurnRoundGroup[];
+  latest: TurnSummary | null;
+};
+
+type DebateRoundDirectoryItemProps = {
+  round: number;
+  roundTurns: TurnSummary[];
+  agentCount: number;
+  isOpen: boolean;
+  phase: DebateDirectoryPhaseInfo | null;
+  hasInjectedPrompt: boolean;
+  isCurrentPhaseRound: boolean;
+  hasVoteResult: boolean;
+  selectedViewerKey: string;
+  votePath: string | undefined;
+  onToggleRound: (round: number, open: boolean) => void;
+  onOpenInjectedPrompt: (input: { round: number; phaseTitle: string; prompt: string }) => void;
+  onOpenVoteRound: (round: number) => void;
+  onSelectTurn: (turnId: string) => void;
+  onMeasuredHeight: (round: number, height: number) => void;
 };
 
 type LeftTab = "status" | "participants" | "workflow" | "memory";
@@ -90,6 +127,27 @@ type WorkflowRulesState = {
   markdown: string;
   loading: boolean;
 };
+
+type TurnsListResponse<T> = {
+  success?: boolean;
+  data?: T[];
+  meta?: {
+    hasMore?: boolean;
+    mode?: "summary" | "full";
+  };
+};
+
+type TurnDetailResponse = {
+  success?: boolean;
+  data?: TurnDetail;
+};
+
+type DebateViewerState =
+  | { kind: "live" }
+  | { kind: "vote_loading"; round: number }
+  | { kind: "vote"; vote: OfficialVoteClosed }
+  | { kind: "turn_loading"; turn: TurnSummary }
+  | { kind: "turn"; turn: TurnDetail };
 
 type DebateDirectoryPhaseInfo = {
   phaseId: string;
@@ -128,6 +186,17 @@ type AllFileInfoState = {
   updatedAt: string;
 };
 
+type QuestionDiffRow =
+  | { kind: "skip"; leftSkip: number; rightSkip: number }
+  | {
+      kind: "row";
+      type: "same" | "add" | "del" | "change";
+      leftNo: number | null;
+      rightNo: number | null;
+      leftText: string;
+      rightText: string;
+    };
+
 const WORKFLOW_RULES_DISABLED_MARKDOWN = [
   "**Workflow 规则（未启用）**",
   "",
@@ -138,6 +207,74 @@ const WORKFLOW_RULES_DISABLED_MARKDOWN = [
 ].join("\n");
 
 const WORKFLOW_RULES_ERROR_MARKDOWN = "**Workflow 规则**\n\n- 读取失败（网络错误或内容非 JSON）。";
+const RECENT_TURNS_LIMIT = 120;
+const OLDER_TURNS_PAGE_SIZE = 50;
+const TURN_DETAIL_CACHE_LIMIT = 80;
+const SSE_STALE_MS = 10_000;
+const FALLBACK_POLL_MS = 5_000;
+const MODAL_OVERLAY_STYLE: CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(15, 23, 42, 0.45)",
+  display: "flex",
+  justifyContent: "center",
+  padding: 24
+};
+const MODAL_PANEL_CLICK_STOP = (event: ReactMouseEvent<HTMLDivElement>) => event.stopPropagation();
+
+function mergeTurnSummaries(current: TurnSummary[], incoming: TurnSummary[]) {
+  if (incoming.length === 0) return current;
+  const byId = new Map<string, TurnSummary>();
+  for (const item of current) byId.set(item.id, item);
+  for (const item of incoming) byId.set(item.id, item);
+  return Array.from(byId.values()).sort((a, b) => a.turnNumber - b.turnNumber);
+}
+
+function buildTurnWindowState(summaries: TurnSummary[]): TurnWindowState {
+  const byId: Record<string, TurnSummary> = {};
+  const grouped = new Map<number, TurnSummary[]>();
+  for (const turn of summaries) {
+    byId[turn.id] = turn;
+    const list = grouped.get(turn.roundNumber) ?? [];
+    list.push(turn);
+    grouped.set(turn.roundNumber, list);
+  }
+  const roundGroups = Array.from(grouped.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([roundNumber, turns]) => ({ roundNumber, turns }));
+  const latest = summaries.length ? summaries[summaries.length - 1] : null;
+  return { summaries, byId, roundGroups, latest };
+}
+
+function touchTurnDetailCacheOrder(current: string[], id: string) {
+  return [id, ...current.filter((item) => item !== id)].slice(0, TURN_DETAIL_CACHE_LIMIT);
+}
+
+function trimTurnDetailsCacheByOrder(cache: Record<string, TurnDetail>, order: string[]) {
+  const keep = new Set(order.slice(0, TURN_DETAIL_CACHE_LIMIT));
+  return Object.fromEntries(Object.entries(cache).filter(([id]) => keep.has(id)));
+}
+
+async function fetchTurnSummaries(input: {
+  debateId: string;
+  after?: number;
+  before?: number;
+  limit?: number;
+}) {
+  const params = new URLSearchParams({ mode: "summary" });
+  if (typeof input.after === "number" && input.after >= 0) params.set("after", String(input.after));
+  if (typeof input.before === "number" && input.before > 0) params.set("before", String(input.before));
+  if (typeof input.limit === "number" && input.limit > 0) params.set("limit", String(input.limit));
+  const response = await fetch(`/api/debates/${input.debateId}/turns?${params.toString()}`, { cache: "no-store" });
+  const payload = (await response.json().catch(() => ({}))) as TurnsListResponse<TurnSummary>;
+  return { response, payload };
+}
+
+async function fetchTurnDetail(input: { debateId: string; turnNumber: number }) {
+  const response = await fetch(`/api/debates/${input.debateId}/turns/${input.turnNumber}`, { cache: "no-store" });
+  const payload = (await response.json().catch(() => ({}))) as TurnDetailResponse;
+  return { response, payload };
+}
 
 function formatWorkflowRulesMarkdown(raw: string) {
   let parsedJson: unknown = null;
@@ -339,6 +476,159 @@ function isPhaseEntryRound(workflow: NormalizedDebateWorkflow | null, round: num
 function parseDownloadFileName(header: string | null, fallbackDebateId: string) {
   return header?.match(/filename=\"([^\"]+)\"/i)?.[1] ?? `debate-${fallbackDebateId}-files.zip`;
 }
+
+const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: DebateRoundDirectoryItemProps) {
+  const {
+    round,
+    roundTurns,
+    agentCount,
+    isOpen,
+    phase,
+    hasInjectedPrompt,
+    isCurrentPhaseRound,
+    hasVoteResult,
+    selectedViewerKey,
+    votePath,
+    onToggleRound,
+    onOpenInjectedPrompt,
+    onOpenVoteRound,
+    onSelectTurn,
+    onMeasuredHeight
+  } = props;
+  const containerRef = useRef<HTMLDetailsElement | null>(null);
+
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node) return;
+    const report = () => onMeasuredHeight(round, node.getBoundingClientRect().height);
+    report();
+    const observer = new ResizeObserver(() => report());
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [round, onMeasuredHeight]);
+
+  return (
+    <details
+      ref={containerRef}
+      open={isOpen}
+      style={{ contentVisibility: "auto", containIntrinsicSize: "220px" }}
+      onToggle={(event) => {
+        onToggleRound(round, (event.currentTarget as HTMLDetailsElement).open);
+      }}
+    >
+      <summary style={{ cursor: "pointer" }}>
+        <strong>第 {round} 轮</strong>
+        <span className="muted"> · {roundTurns.length}/{agentCount}</span>
+        {phase ? (
+          <span
+            className="softBox"
+            style={{
+              marginLeft: 8,
+              padding: "2px 8px",
+              fontSize: 12,
+              borderColor: isCurrentPhaseRound ? "rgba(38, 99, 235, 0.35)" : undefined,
+              background: isCurrentPhaseRound ? "rgba(38, 99, 235, 0.1)" : undefined
+            }}
+          >
+            {phase.title}
+            {isCurrentPhaseRound ? " · 当前" : ""}
+          </span>
+        ) : null}
+        {hasInjectedPrompt ? (
+          <span
+            className="softBox"
+            title="这一轮开始进入了带有自动注入提示词的新阶段，展开后可查看注入文本。"
+            style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}
+          >
+            已注入提示词
+          </span>
+        ) : null}
+        {hasVoteResult ? (
+          <span
+            className="softBox"
+            title="这一轮已有可查看的官方投票结果。"
+            style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}
+          >
+            有投票结果
+        </span>
+      ) : null}
+    </summary>
+      {isOpen ? (
+        <div className="stack" style={{ marginTop: 10 }}>
+          {phase ? (
+            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span className="muted">阶段：{phase.title}</span>
+              {phase.description ? <span className="muted">· {phase.description}</span> : null}
+              {hasInjectedPrompt ? (
+                <button
+                  type="button"
+                  className="btn"
+                  title="查看这一阶段自动注入到运行时 Prompt 的文本"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (!phase?.injectedPrompt) return;
+                    onOpenInjectedPrompt({
+                      round,
+                      phaseTitle: phase.title,
+                      prompt: phase.injectedPrompt
+                    });
+                  }}
+                >
+                  查看注入提示词
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {votePath ? (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => onOpenVoteRound(round)}
+              style={{
+                textAlign: "left",
+                borderColor: selectedViewerKey === `__vote_round_${round}` ? "rgba(38, 99, 235, 0.55)" : undefined,
+                background: selectedViewerKey === `__vote_round_${round}` ? "rgba(38, 99, 235, 0.08)" : undefined
+              }}
+            >
+              <span>投票结果</span>
+              <span className="muted"> · 汇总</span>
+            </button>
+          ) : null}
+          {roundTurns.map((turn) => {
+            const active = selectedViewerKey === turn.id;
+            const turnInRound = ((turn.turnNumber - 1) % agentCount) + 1;
+            const seat = turn.seatNumber ? `Seat-${turn.seatNumber}` : "";
+            return (
+              <button
+                key={turn.id}
+                type="button"
+                className="btn"
+                onClick={() => onSelectTurn(turn.id)}
+                style={{
+                  textAlign: "left",
+                  borderColor: active ? "rgba(38, 99, 235, 0.55)" : undefined,
+                  background: active ? "rgba(38, 99, 235, 0.08)" : undefined
+                }}
+              >
+                <span>
+                  {`#${turn.turnNumber} · 第 ${round} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${turn.agent.name}`}
+                </span>
+                <span className="muted"> · {new Date(turn.createdAt).toLocaleTimeString()}</span>
+                {turn.preview ? (
+                  <span className="muted" style={{ display: "block", marginTop: 4 }}>
+                    {turn.preview}
+                    {turn.contentLength > turn.preview.length ? "..." : ""}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </details>
+  );
+});
 
 async function readDownloadBlobWithProgress(
   response: Response,
@@ -668,14 +958,16 @@ function WorkflowRulesPanel(props: {
   onRefresh: () => void;
 }) {
   return (
-    <div className="panel stack">
+    <div className="panel stack" style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
       <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
         <strong style={{ fontSize: 14 }}>Workflow 规则</strong>
         <button className="btn" type="button" disabled={props.loading} onClick={props.onRefresh}>
           刷新
         </button>
       </div>
-      <MarkdownView className="md-compact" value={props.markdown || "**Workflow 规则**\n\n- 读取中..."} />
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+        <MarkdownView className="md-compact" value={props.markdown || "**Workflow 规则**\n\n- 读取中..."} />
+      </div>
     </div>
   );
 }
@@ -1023,6 +1315,132 @@ function StatusSummaryPanel(props: {
   );
 }
 
+function DebateViewerPanel(props: {
+  viewer: DebateViewerState | null;
+  followLatest: boolean;
+  activeTurnId: string;
+  activeVoteRound: number | null;
+  agentCount: number;
+  liveAgentName: string;
+  liveDisplayRound: number | null;
+  liveDisplayMessage: number | null;
+  liveStatus: string;
+  liveText: string;
+  viewerScrollRef: MutableRefObject<HTMLDivElement | null>;
+  onToggleFollowLatest: () => void;
+  onReturnToCurrent: () => void;
+  onOpenDiagnostics: (turnNumber: number) => void;
+}) {
+  return (
+    <section className="panel stack" style={{ height: "calc(100vh - 140px)", overflow: "hidden" }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2 style={{ margin: 0 }}>发言内容</h2>
+        <div className="row" style={{ gap: 8 }}>
+          <button
+            className={`btn ${props.followLatest ? "btn-active" : ""}`}
+            type="button"
+            title="开启后自动滚动到最新输出"
+            onClick={props.onToggleFollowLatest}
+          >
+            跟随最新
+          </button>
+          {props.activeTurnId || props.activeVoteRound !== null ? (
+            <button className="btn" onClick={props.onReturnToCurrent}>
+              回到当前
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {props.viewer?.kind === "live" ? (
+        <div className="stack" style={{ flex: 1, minHeight: 0 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <strong>
+              当前：{props.liveAgentName || "未知"}
+              {props.liveDisplayRound ? ` · 第 ${props.liveDisplayRound} 轮` : ""}
+              {props.liveDisplayMessage
+                ? (() => {
+                    const turnInRound = props.agentCount > 0 ? ((props.liveDisplayMessage - 1) % props.agentCount) + 1 : null;
+                    return ` · #${props.liveDisplayMessage}${turnInRound ? `（第 ${turnInRound} 回）` : ""}`;
+                  })()
+                : ""}
+            </strong>
+            <span className="muted">{props.liveStatus || "运行中"}</span>
+          </div>
+          <div ref={props.viewerScrollRef} className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+            <MarkdownView value={props.liveText || "（等待输出）"} />
+          </div>
+        </div>
+      ) : props.viewer?.kind === "vote_loading" ? (
+        <div className="stack" style={{ flex: 1, minHeight: 0 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <strong>第 {props.viewer.round} 轮 · 投票结果</strong>
+            <span className="muted">加载中...</span>
+          </div>
+          <div ref={props.viewerScrollRef} className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+            <div className="muted">读取投票结果中...</div>
+          </div>
+        </div>
+      ) : props.viewer?.kind === "vote" ? (
+        <div className="stack" style={{ flex: 1, minHeight: 0 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <strong>第 {props.viewer.vote.roundNumber} 轮 · 投票结果</strong>
+            <span className="muted">汇总</span>
+          </div>
+          <div ref={props.viewerScrollRef} className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+            <MarkdownView value={buildVoteMarkdown(props.viewer.vote)} />
+          </div>
+        </div>
+      ) : props.viewer?.kind === "turn_loading" ? (
+        <div className="stack" style={{ flex: 1, minHeight: 0 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div className="stack" style={{ gap: 4 }}>
+              <strong>
+                {(() => {
+                  const turnInRound = ((props.viewer.turn.turnNumber - 1) % props.agentCount) + 1;
+                  const seat = props.viewer.turn.seatNumber ? `Seat-${props.viewer.turn.seatNumber}` : "";
+                  return `#${props.viewer.turn.turnNumber} · 第 ${props.viewer.turn.roundNumber} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${props.viewer.turn.agent.name}`;
+                })()}
+              </strong>
+              <span className="muted">{props.viewer.turn.contentLength} chars</span>
+            </div>
+            <span className="muted">正文加载中...</span>
+          </div>
+          <div ref={props.viewerScrollRef} className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+            <div className="muted">正在按需读取这条发言的完整正文...</div>
+          </div>
+        </div>
+      ) : props.viewer?.kind === "turn" ? (
+        <div className="stack" style={{ flex: 1, minHeight: 0 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div className="stack" style={{ gap: 4 }}>
+              <strong>
+                {(() => {
+                  const turnInRound = ((props.viewer.turn.turnNumber - 1) % props.agentCount) + 1;
+                  const seat = props.viewer.turn.seatNumber ? `Seat-${props.viewer.turn.seatNumber}` : "";
+                  return `#${props.viewer.turn.turnNumber} · 第 ${props.viewer.turn.roundNumber} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${props.viewer.turn.agent.name}`;
+                })()}
+              </strong>
+              <span className="muted">{props.viewer.turn.contentLength} chars</span>
+            </div>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn" type="button" onClick={() => props.onOpenDiagnostics(props.viewer!.turn.turnNumber)}>
+                查看诊断结果
+              </button>
+              <span className="muted">{new Date(props.viewer.turn.createdAt).toLocaleTimeString()}</span>
+            </div>
+          </div>
+          <div ref={props.viewerScrollRef} className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+            <MarkdownView value={props.viewer.turn.content} />
+          </div>
+        </div>
+      ) : (
+        <div className="muted">还没有发言记录</div>
+      )}
+    </section>
+  );
+}
+
 function LeftTabIcon({ name }: { name: LeftTabIconName }) {
   const baseProps = {
     viewBox: "0 0 24 24",
@@ -1245,6 +1663,476 @@ function summarizeGenerationDiagnostic(entry: GenerationDiagnosticEntry): Genera
     conclusion: "这条发言更像是模型正常收尾，不像平台截断、工具打断或业务覆盖。",
     evidence
   };
+}
+
+function buildVoteMarkdown(vote: OfficialVoteClosed) {
+  const lines: string[] = [];
+  lines.push(`# 第 ${vote.roundNumber} 轮 · 投票结果`);
+  lines.push("");
+  lines.push(`- 标题：${vote.title}`);
+  lines.push("");
+
+  if (vote.kind === "election") {
+    const roles = Array.isArray(vote.result.roles)
+      ? vote.result.roles
+      : Object.keys((vote.result.roleCounts as Record<string, unknown>) ?? {});
+    const winners = (vote.result.winners ?? {}) as Record<string, string | null>;
+    const roleCounts = (vote.result.roleCounts ?? {}) as Record<string, Record<string, number>>;
+
+    lines.push("## 结果");
+    if (roles.length === 0) lines.push("- （未声明角色）");
+    for (const role of roles) lines.push(`- ${role}：${winners?.[role] ?? "未能选出"}`);
+    lines.push("");
+
+    lines.push("## 票数");
+    for (const role of roles) {
+      const tally = Object.entries(roleCounts?.[role] ?? {})
+        .map(([seat, count]) => ({ seat, count }))
+        .sort((a, b) => b.count - a.count || a.seat.localeCompare(b.seat));
+      lines.push(`### ${role}`);
+      if (tally.length === 0) lines.push("- （无人投票）");
+      for (const item of tally) lines.push(`- ${item.seat}: ${item.count}`);
+      lines.push("");
+    }
+
+    lines.push("## 逐票明细");
+    for (const ballot of vote.result.ballots ?? []) {
+      const reason = ballot.reason ? ` · ${ballot.reason}` : "";
+      const pairs = roles.map((role) => `${role}=${ballot.selections?.[role] ?? "?"}`).join(" · ");
+      const who = ballot.voterSeat ? `${ballot.voterSeat} · ${ballot.voter}` : ballot.voter;
+      lines.push(`- ${who}: ${pairs}${reason}`);
+    }
+
+    return lines.join("\n");
+  }
+
+  const tally = Object.entries(vote.result.counts ?? {})
+    .map(([choice, count]) => ({ choice, count }))
+    .sort((a, b) => b.count - a.count || a.choice.localeCompare(b.choice));
+
+  lines.push(`- Winner：${vote.result.winner ?? "未能选出"}`);
+  lines.push("");
+  lines.push(`- Prompt：${vote.prompt}`);
+  lines.push("");
+
+  lines.push("## 票数");
+  if (tally.length === 0) lines.push("- （无人投票）");
+  for (const item of tally) lines.push(`- ${item.choice}: ${item.count}`);
+  lines.push("");
+
+  lines.push("## 逐票明细");
+  for (const ballot of vote.result.ballots ?? []) {
+    const reason = ballot.reason ? ` · ${ballot.reason}` : "";
+    const who = ballot.voterSeat ? `${ballot.voterSeat} · ${ballot.voter}` : ballot.voter;
+    lines.push(`- ${who}: ${ballot.choice}${reason}`);
+  }
+
+  return lines.join("\n");
+}
+
+function DiagnosticsDialog(props: {
+  dialog: { turnNumber: number; entry: GenerationDiagnosticEntry | null; loading: boolean } | null;
+  onClose: () => void;
+}) {
+  const { dialog, onClose } = props;
+  if (!dialog) return null;
+  const summary = dialog.entry ? summarizeGenerationDiagnostic(dialog.entry) : null;
+  const summaryStyle =
+    summary?.tone === "danger"
+      ? { background: "rgba(239, 68, 68, 0.1)", borderColor: "rgba(239, 68, 68, 0.35)" }
+      : summary?.tone === "warn"
+        ? { background: "rgba(245, 158, 11, 0.1)", borderColor: "rgba(245, 158, 11, 0.35)" }
+        : { background: "rgba(16, 185, 129, 0.1)", borderColor: "rgba(16, 185, 129, 0.35)" };
+
+  return (
+    <div role="dialog" aria-modal="true" onClick={onClose} style={{ ...MODAL_OVERLAY_STYLE, alignItems: "flex-start", zIndex: 1000 }}>
+      <div className="panel stack" onClick={MODAL_PANEL_CLICK_STOP} style={{ width: "min(860px, 100%)" }}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div className="stack" style={{ gap: 4 }}>
+            <strong>第 {dialog.turnNumber} 条发言 · 生成诊断</strong>
+            <div className="muted">用于判断正文是被平台截断、工具打断，还是被业务逻辑覆盖。</div>
+          </div>
+          <button className="btn" type="button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        {dialog.loading ? (
+          <div className="panel">读取中...</div>
+        ) : dialog.entry ? (
+          <div className="stack">
+            <div className="panel stack" style={summaryStyle}>
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                <strong>{summary?.title ?? "诊断结果"}</strong>
+                <span className="muted">
+                  {dialog.entry.provider} / {dialog.entry.model}
+                </span>
+              </div>
+              <div>{summary?.conclusion}</div>
+              <div className="stack muted" style={{ gap: 6 }}>
+                {(summary?.evidence ?? []).map((item, index) => (
+                  <div key={`${index}-${item}`}>- {item}</div>
+                ))}
+              </div>
+            </div>
+            <details className="panel">
+              <summary style={{ cursor: "pointer", fontWeight: 600 }}>查看原始诊断 JSON</summary>
+              <pre style={{ margin: "12px 0 0", whiteSpace: "pre-wrap", maxHeight: "45vh", overflowY: "auto" }}>
+                {JSON.stringify(dialog.entry, null, 2)}
+              </pre>
+            </details>
+          </div>
+        ) : (
+          <div className="panel">未找到该条发言的诊断记录。</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SaveSuccessDialog(props: {
+  open: boolean;
+  version: number | null;
+  onClose: () => void;
+  onOpenHistory: () => void;
+}) {
+  const { open, version, onClose, onOpenHistory } = props;
+  if (!open) return null;
+  return (
+    <div role="dialog" aria-modal="true" onClick={onClose} style={{ ...MODAL_OVERLAY_STYLE, alignItems: "center", zIndex: 1001 }}>
+      <div className="panel stack" onClick={MODAL_PANEL_CLICK_STOP} style={{ width: "min(520px, 100%)" }}>
+        <strong>保存成功</strong>
+        <div className="muted">{version ? `当前版本：v${version}` : "已更新问题并生成版本"}</div>
+        <div className="row" style={{ justifyContent: "flex-end" }}>
+          <button className="btn" type="button" onClick={onClose}>
+            关闭
+          </button>
+          <button className="btn btn-primary" type="button" onClick={onOpenHistory}>
+            查看对比
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuestionZoomDialog(props: {
+  open: boolean;
+  canEdit: boolean;
+  value: string;
+  baseline: string;
+  questionDirty: boolean;
+  isSavingQuestion: boolean;
+  onClose: () => void;
+  onChange: (next: string) => void;
+  onSave: () => void;
+}) {
+  const { open, canEdit, value, baseline, questionDirty, isSavingQuestion, onClose, onChange, onSave } = props;
+  if (!open) return null;
+  return (
+    <div role="dialog" aria-modal="true" onClick={onClose} style={{ ...MODAL_OVERLAY_STYLE, alignItems: "flex-start", zIndex: 1000 }}>
+      <div className="panel stack" onClick={MODAL_PANEL_CLICK_STOP} style={{ width: "min(980px, 100%)" }}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <strong>问题（放大查看）</strong>
+          <button className="btn" type="button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        <LineNumberTextarea
+          readOnly={!canEdit}
+          value={value}
+          onChange={onChange}
+          maxLength={50_000}
+          height={"60vh"}
+          autoFocus
+          baseline={baseline}
+        />
+        {canEdit ? (
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="muted">{value.length.toLocaleString()}/50,000</span>
+            <button className="btn btn-primary" disabled={isSavingQuestion || !questionDirty} type="button" onClick={onSave}>
+              {isSavingQuestion ? "保存中..." : "保存"}
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function QuestionHistoryDialog(props: {
+  open: boolean;
+  questionVersion: number | null;
+  loading: boolean;
+  error: string;
+  history: Array<{ version: number; path: string; at: string }>;
+  diffFromVersion: number | null;
+  diffToVersion: number | null;
+  diffLoading: boolean;
+  diffRows: QuestionDiffRow[];
+  onClose: () => void;
+  onRefresh: () => void;
+  onSelectFromVersion: (version: number | null) => void;
+  onSelectToVersion: (version: number | null) => void;
+  onGenerateDiff: () => void;
+  onSelectHistoryVersion: (version: number) => void;
+}) {
+  const {
+    open,
+    questionVersion,
+    loading,
+    error,
+    history,
+    diffFromVersion,
+    diffToVersion,
+    diffLoading,
+    diffRows,
+    onClose,
+    onRefresh,
+    onSelectFromVersion,
+    onSelectToVersion,
+    onGenerateDiff,
+    onSelectHistoryVersion
+  } = props;
+  if (!open) return null;
+  return (
+    <div role="dialog" aria-modal="true" onClick={onClose} style={{ ...MODAL_OVERLAY_STYLE, alignItems: "flex-start", zIndex: 1000 }}>
+      <div className="panel stack" onClick={MODAL_PANEL_CLICK_STOP} style={{ width: "min(1080px, 100%)" }}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <strong>问题版本与对比</strong>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn" type="button" onClick={onRefresh}>
+              刷新
+            </button>
+            <button className="btn" type="button" onClick={onClose}>
+              关闭
+            </button>
+          </div>
+        </div>
+
+        {loading ? <div className="muted">加载中...</div> : null}
+        {!loading && error ? <div className="muted">{error}</div> : null}
+
+        {!loading && !error ? (
+          <div className="grid" style={{ gridTemplateColumns: "320px 1fr", alignItems: "start" }}>
+            <div className="panel stack">
+              <strong>历史</strong>
+              <div className="muted">当前版本：v{questionVersion ?? (history.at(-1)?.version ?? 1)}</div>
+              <div className="stack" style={{ gap: 8, maxHeight: "60vh", overflowY: "auto" }}>
+                {history.length === 0 ? <div className="muted">暂无</div> : null}
+                {history.map((item) => (
+                  <button
+                    key={item.version}
+                    type="button"
+                    className="btn"
+                    style={{
+                      textAlign: "left",
+                      borderColor:
+                        item.version === diffToVersion || item.version === diffFromVersion
+                          ? "rgba(38, 99, 235, 0.55)"
+                          : undefined,
+                      background:
+                        item.version === diffToVersion || item.version === diffFromVersion
+                          ? "rgba(38, 99, 235, 0.08)"
+                          : undefined
+                    }}
+                    onClick={() => onSelectHistoryVersion(item.version)}
+                  >
+                    <div>
+                      <strong>v{item.version}</strong>
+                    </div>
+                    <div className="muted">{item.at ? new Date(item.at).toLocaleString() : ""}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="panel stack">
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <strong>Diff</strong>
+                <div className="row" style={{ gap: 8 }}>
+                  <select value={diffFromVersion ?? ""} onChange={(event) => onSelectFromVersion(event.target.value ? Number(event.target.value) : null)}>
+                    <option value="">From</option>
+                    {history.map((item) => (
+                      <option key={item.version} value={item.version}>
+                        v{item.version}
+                      </option>
+                    ))}
+                  </select>
+                  <select value={diffToVersion ?? ""} onChange={(event) => onSelectToVersion(event.target.value ? Number(event.target.value) : null)}>
+                    <option value="">To</option>
+                    {history.map((item) => (
+                      <option key={item.version} value={item.version}>
+                        v{item.version}
+                      </option>
+                    ))}
+                  </select>
+                  <button className="btn btn-primary" type="button" disabled={diffLoading || !diffFromVersion || !diffToVersion} onClick={onGenerateDiff}>
+                    {diffLoading ? "生成中..." : "生成 Diff"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="panel" style={{ height: "60vh", overflowY: "auto" }}>
+                {diffLoading ? <div className="muted">生成中...</div> : null}
+                {!diffLoading ? (
+                  diffRows.length > 0 ? (
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "1fr 1fr",
+                        gap: 0,
+                        fontFamily:
+                          "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+                        fontSize: 12
+                      }}
+                    >
+                      {diffRows.map((row, index) => {
+                        if (row.kind === "skip") {
+                          return (
+                            <div key={`skip_${index}`} className="muted" style={{ gridColumn: "1 / span 2", padding: "8px 10px" }}>
+                              … 跳过 {row.leftSkip} 行未变更 …
+                            </div>
+                          );
+                        }
+
+                        const baseCell: CSSProperties = {
+                          display: "flex",
+                          gap: 10,
+                          padding: "4px 10px",
+                          whiteSpace: "pre-wrap",
+                          alignItems: "flex-start"
+                        };
+                        const leftBg =
+                          row.type === "del" ? "rgba(220, 38, 38, 0.10)" : row.type === "change" ? "rgba(37, 99, 235, 0.10)" : "transparent";
+                        const rightBg =
+                          row.type === "add" ? "rgba(22, 163, 74, 0.10)" : row.type === "change" ? "rgba(37, 99, 235, 0.10)" : "transparent";
+                        const leftNoBg =
+                          row.type === "del" ? "rgba(220, 38, 38, 0.22)" : row.type === "change" ? "rgba(37, 99, 235, 0.18)" : "transparent";
+                        const rightNoBg =
+                          row.type === "add" ? "rgba(22, 163, 74, 0.22)" : row.type === "change" ? "rgba(37, 99, 235, 0.18)" : "transparent";
+
+                        return (
+                          <Fragment key={`row_${index}`}>
+                            <div style={{ ...baseCell, background: leftBg }}>
+                              <span
+                                className="muted"
+                                style={{
+                                  width: 44,
+                                  flex: "0 0 auto",
+                                  textAlign: "right",
+                                  background: leftNoBg,
+                                  borderRadius: 6,
+                                  padding: "0 6px",
+                                  lineHeight: "18px",
+                                  marginTop: 1
+                                }}
+                              >
+                                {row.leftNo ?? ""}
+                              </span>
+                              <span style={{ flex: 1 }}>{row.leftText}</span>
+                            </div>
+                            <div style={{ ...baseCell, background: rightBg }}>
+                              <span
+                                className="muted"
+                                style={{
+                                  width: 44,
+                                  flex: "0 0 auto",
+                                  textAlign: "right",
+                                  background: rightNoBg,
+                                  borderRadius: 6,
+                                  padding: "0 6px",
+                                  lineHeight: "18px",
+                                  marginTop: 1
+                                }}
+                              >
+                                {row.rightNo ?? ""}
+                              </span>
+                              <span style={{ flex: 1 }}>{row.rightText}</span>
+                            </div>
+                          </Fragment>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="muted">选择版本并点击“生成 Diff”</div>
+                  )
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function MemoryDialog(props: {
+  open: boolean;
+  title: string;
+  path: string;
+  updatedAt: string;
+  target: { scope: "debate"; path: string } | { scope: "agent"; debateAgentId: string; path: string } | null;
+  loading: boolean;
+  tail: boolean;
+  truncation: { truncated: boolean; slice: "head" | "tail"; shownChars: number; totalChars: number } | null;
+  content: string;
+  preWrapStyle: CSSProperties;
+  contentRef: React.RefObject<HTMLDivElement | null>;
+  onClose: () => void;
+  onShowHead: () => void;
+  onShowTail: () => void;
+  onLoadMore: () => void;
+}) {
+  const { open, title, path, updatedAt, target, loading, tail, truncation, content, preWrapStyle, contentRef, onClose, onShowHead, onShowTail, onLoadMore } =
+    props;
+  if (!open) return null;
+  return (
+    <div role="dialog" aria-modal="true" onClick={onClose} style={{ ...MODAL_OVERLAY_STYLE, alignItems: "flex-start", zIndex: 1000 }}>
+      <div className="panel stack" onClick={MODAL_PANEL_CLICK_STOP} style={{ width: "min(980px, 100%)" }}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <strong>{title || "记忆文件"}</strong>
+          <div className="row" style={{ gap: 8 }}>
+            {target ? (
+              <>
+                <button className="btn" type="button" disabled={loading} onClick={onShowHead} title="显示开头（适合查看 jsonl 的前半部分）">
+                  开头
+                </button>
+                <button className="btn" type="button" disabled={loading} onClick={onShowTail} title="显示末尾（默认）">
+                  末尾
+                </button>
+                {truncation?.truncated ? (
+                  <button className="btn" type="button" disabled={loading} onClick={onLoadMore} title="增大读取上限（最多 2,000,000 chars）">
+                    加载更多
+                  </button>
+                ) : null}
+              </>
+            ) : null}
+            <button className="btn" type="button" onClick={onClose}>
+              关闭
+            </button>
+          </div>
+        </div>
+        <div className="muted">
+          {path}
+          {updatedAt ? ` · ${new Date(updatedAt).toLocaleString()}` : ""}
+        </div>
+        {truncation?.truncated ? (
+          <div className="muted">
+            内容过大已截断：显示{truncation.slice === "tail" ? "末尾" : "开头"} {truncation.shownChars}/{truncation.totalChars} chars
+          </div>
+        ) : null}
+        <div ref={contentRef} className="panel" style={{ height: "70vh", overflowY: "auto" }}>
+          {loading ? (
+            <div className="muted">加载中...</div>
+          ) : path.toLowerCase().endsWith(".md") ? (
+            <MarkdownView value={content || "（空）"} />
+          ) : (
+            <pre style={preWrapStyle}>{content || "（空）"}</pre>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function LineNumberTextarea(props: {
@@ -1507,7 +2395,13 @@ export default function DebateDetailPage() {
   const id = params.id;
   const [leftTab, setLeftTab] = useState<LeftTab>("status");
   const [debate, setDebate] = useState<Debate | null>(null);
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [turnWindow, setTurnWindow] = useState<TurnWindowState>(() => buildTurnWindowState([]));
+  const [turnDetailsById, setTurnDetailsById] = useState<Record<string, TurnDetail>>({});
+  const [turnDetailCacheOrder, setTurnDetailCacheOrder] = useState<string[]>([]);
+  const [hasOlderTurns, setHasOlderTurns] = useState(false);
+  const [oldestLoadedTurnNumber, setOldestLoadedTurnNumber] = useState<number | null>(null);
+  const [loadingOlderTurns, setLoadingOlderTurns] = useState(false);
+  const [turnDetailLoadingId, setTurnDetailLoadingId] = useState<string>("");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [newAgentId, setNewAgentId] = useState<string>("");
   const [isAddingAgent, setIsAddingAgent] = useState(false);
@@ -1523,19 +2417,7 @@ export default function DebateDetailPage() {
   const [diffFromVersion, setDiffFromVersion] = useState<number | null>(null);
   const [diffToVersion, setDiffToVersion] = useState<number | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
-  const [diffRows, setDiffRows] = useState<
-    Array<
-      | { kind: "skip"; leftSkip: number; rightSkip: number }
-      | {
-          kind: "row";
-          type: "same" | "add" | "del" | "change";
-          leftNo: number | null;
-          rightNo: number | null;
-          leftText: string;
-          rightText: string;
-        }
-    >
-  >([]);
+  const [diffRows, setDiffRows] = useState<QuestionDiffRow[]>([]);
   const [saveSuccessOpen, setSaveSuccessOpen] = useState(false);
   const [saveSuccessVersion, setSaveSuccessVersion] = useState<number | null>(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -1605,7 +2487,17 @@ export default function DebateDetailPage() {
   const lastContextUsageAtRef = useRef(0);
   const activeDebateIdRef = useRef<string>("");
   const loadingDebateIdRef = useRef<string | null>(null);
+  const workflowRulesLoadingRef = useRef(false);
   const lastTurnNumberRef = useRef(0);
+  const liveMessageNumberRef = useRef<number | null>(null);
+  const sseConnectedRef = useRef(false);
+  const lastSseEventAtRef = useRef(0);
+  const memoryFetchAbortRef = useRef<AbortController | null>(null);
+  const memoryFetchTokenRef = useRef(0);
+  const directoryScrollRef = useRef<HTMLDivElement | null>(null);
+  const [directoryScrollTop, setDirectoryScrollTop] = useState(0);
+  const [directoryViewportHeight, setDirectoryViewportHeight] = useState(0);
+  const [directoryRoundHeights, setDirectoryRoundHeights] = useState<Record<number, number>>({});
   const { toast, showToast } = useAutoDismissToast(1200);
   const preWrapStyle = useMemo(
     () =>
@@ -1668,80 +2560,105 @@ export default function DebateDetailPage() {
     }
   }, [leftTabStorageKey, leftTab]);
 
-  async function loadDebate() {
-    if (!id) return;
-    const expectedId = id;
-    if (loadingDebateIdRef.current === expectedId) return;
-    loadingDebateIdRef.current = expectedId;
-    try {
-      const after = lastTurnNumberRef.current;
-      const turnsUrl = after > 0 ? `/api/debates/${expectedId}/turns?after=${after}` : `/api/debates/${expectedId}/turns`;
-      const [debateResponse, turnsResponse] = await Promise.all([
-        fetch(`/api/debates/${expectedId}`, { cache: "no-store" }),
-        fetch(turnsUrl, { cache: "no-store" })
-      ]);
-      const debatePayload = await debateResponse.json().catch(() => ({}));
-      const turnsPayload = await turnsResponse.json().catch(() => ({}));
+  const closeMemoryDialog = useCallback(() => {
+    memoryFetchAbortRef.current?.abort();
+    memoryFetchAbortRef.current = null;
+    memoryFetchTokenRef.current += 1;
+    setMemoryOpen(false);
+    setMemoryTitle("");
+    setMemoryPath("");
+    setMemoryUpdatedAt("");
+    setMemoryContent("");
+    setMemoryLoading(false);
+    setMemoryTarget(null);
+    setMemoryTail(false);
+    setMemoryMaxChars(null);
+    setMemoryTruncation(null);
+  }, []);
 
-      if (activeDebateIdRef.current && activeDebateIdRef.current !== expectedId) {
+  useEffect(() => {
+    return () => {
+      memoryFetchAbortRef.current?.abort();
+      memoryFetchAbortRef.current = null;
+    };
+  }, []);
+
+  const updateTurnWindow = useCallback((updater: TurnSummary[] | ((current: TurnSummary[]) => TurnSummary[])) => {
+    setTurnWindow((current) => {
+      const nextSummaries = typeof updater === "function" ? updater(current.summaries) : updater;
+      return buildTurnWindowState(nextSummaries);
+    });
+  }, []);
+
+  async function loadOlderTurnSummaries() {
+    if (!id || loadingOlderTurns) return;
+    if (!oldestLoadedTurnNumber || oldestLoadedTurnNumber <= 1) {
+      setHasOlderTurns(false);
+      return;
+    }
+    setLoadingOlderTurns(true);
+    try {
+      const { response, payload } = await fetchTurnSummaries({
+        debateId: id,
+        before: oldestLoadedTurnNumber,
+        limit: OLDER_TURNS_PAGE_SIZE
+      });
+      if (!response.ok) {
+        showToast("error", "加载更早发言失败");
         return;
       }
-
-      if (debateResponse.ok) {
-        setDebate(debatePayload.data ?? null);
-        const now = Date.now();
-        if (now - lastVoteIndexAtRef.current > 5000) {
-          lastVoteIndexAtRef.current = now;
-          void loadVoteIndex();
-          void loadOpenVoteState();
-        }
-        const isOwner = Boolean(debatePayload.data?.isOwner);
-        if (isOwner) {
-          if (now - lastContextUsageAtRef.current > 1500) {
-            lastContextUsageAtRef.current = now;
-            void loadContextUsage();
-            void loadContextUsageTotals();
-          }
-        }
-      } else {
-        const message = debatePayload?.error?.message ?? "加载辩论失败";
-        const now = Date.now();
-        if (now - lastLoadErrorAtRef.current > 5000) {
-          lastLoadErrorAtRef.current = now;
-          showToast("error", message);
-        }
+      const incoming = Array.isArray(payload.data) ? payload.data : [];
+      if (incoming.length === 0) {
+        setHasOlderTurns(false);
+        return;
       }
-
-      if (turnsResponse.ok) {
-        const incoming = Array.isArray(turnsPayload.data) ? (turnsPayload.data as Turn[]) : [];
-        if (after > 0) {
-          if (incoming.length > 0) {
-            setTurns((current) => {
-              const merged = [...current, ...incoming];
-              const last = merged.length ? merged[merged.length - 1] : null;
-              lastTurnNumberRef.current = last && typeof last.turnNumber === "number" ? Math.floor(last.turnNumber) : lastTurnNumberRef.current;
-              return merged;
-            });
-          }
-        } else {
-          setTurns(incoming);
-          const last = incoming.length ? incoming[incoming.length - 1] : null;
-          lastTurnNumberRef.current = last && typeof last.turnNumber === "number" ? Math.floor(last.turnNumber) : 0;
-        }
-      }
+      updateTurnWindow((current) => mergeTurnSummaries(current, incoming));
+      setOldestLoadedTurnNumber(incoming[0]?.turnNumber ?? oldestLoadedTurnNumber);
+      setHasOlderTurns(Boolean(payload.meta?.hasMore));
     } catch (error) {
       console.error(error);
-      const now = Date.now();
-      if (now - lastLoadErrorAtRef.current > 5000) {
-        lastLoadErrorAtRef.current = now;
-        showToast("error", "网络错误：加载失败（将自动重试）");
-      }
+      showToast("error", "网络错误：加载更早发言失败");
     } finally {
-      if (loadingDebateIdRef.current === expectedId) loadingDebateIdRef.current = null;
+      setLoadingOlderTurns(false);
     }
   }
 
-  async function loadContextUsage() {
+  const ensureTurnDetail = useCallback(async (summary: TurnSummary) => {
+    if (!id) return;
+    if (turnDetailsById[summary.id]) {
+      setTurnDetailCacheOrder((current) => touchTurnDetailCacheOrder(current, summary.id));
+      return;
+    }
+    if (turnDetailLoadingId === summary.id) return;
+    setTurnDetailLoadingId(summary.id);
+    try {
+      const { response, payload } = await fetchTurnDetail({ debateId: id, turnNumber: summary.turnNumber });
+      if (!response.ok || !payload.data) {
+        showToast("error", "读取发言正文失败");
+        return;
+      }
+      setTurnDetailCacheOrder((current) => {
+        const nextOrder = touchTurnDetailCacheOrder(current, payload.data!.id);
+        setTurnDetailsById((currentCache) =>
+          trimTurnDetailsCacheByOrder(
+            {
+              ...currentCache,
+              [payload.data!.id]: payload.data!
+            },
+            nextOrder
+          )
+        );
+        return nextOrder;
+      });
+    } catch (error) {
+      console.error(error);
+      showToast("error", "网络错误：读取发言正文失败");
+    } finally {
+      setTurnDetailLoadingId((current) => (current === summary.id ? "" : current));
+    }
+  }, [id, showToast, turnDetailLoadingId, turnDetailsById]);
+
+  const loadContextUsage = useCallback(async () => {
     if (!id) return null;
     try {
       const response = await fetch(`/api/debates/${id}/files?path=${encodeURIComponent("context/usage.json")}`, {
@@ -1789,9 +2706,9 @@ export default function DebateDetailPage() {
     } catch {
       return null;
     }
-  }
+  }, [id]);
 
-  async function loadContextUsageTotals() {
+  const loadContextUsageTotals = useCallback(async () => {
     if (!id) return null;
     try {
       const response = await fetch(`/api/debates/${id}/files?path=${encodeURIComponent("context/usage_totals.json")}`, {
@@ -1834,7 +2751,7 @@ export default function DebateDetailPage() {
     } catch {
       return null;
     }
-  }
+  }, [id]);
 
   async function resetAgentUsageSession(debateAgentId: string) {
     if (!id || !debateAgentId) return;
@@ -1863,9 +2780,10 @@ export default function DebateDetailPage() {
     }
   }
 
-  async function loadWorkflowRules() {
+  const loadWorkflowRules = useCallback(async () => {
     if (!id) return null;
-    if (workflowRulesState.loading) return null;
+    if (workflowRulesLoadingRef.current) return null;
+    workflowRulesLoadingRef.current = true;
     setWorkflowRulesState((current) => ({ ...current, loading: true }));
     try {
       const content = await fetchWorkflowRulesMarkdown(id);
@@ -1882,9 +2800,10 @@ export default function DebateDetailPage() {
       setWorkflowRulesState({ markdown: WORKFLOW_RULES_ERROR_MARKDOWN, loading: false });
       return null;
     } finally {
+      workflowRulesLoadingRef.current = false;
       setWorkflowRulesState((current) => (current.loading ? { ...current, loading: false } : current));
     }
-  }
+  }, [id]);
 
   useEffect(() => {
     if (!id) {
@@ -1897,9 +2816,17 @@ export default function DebateDetailPage() {
     lastLoadErrorAtRef.current = 0;
     lastVoteIndexAtRef.current = 0;
     lastContextUsageAtRef.current = 0;
+    sseConnectedRef.current = false;
+    lastSseEventAtRef.current = 0;
     allFilesLoadedRef.current = false;
     setDebate(null);
-    setTurns([]);
+    updateTurnWindow([]);
+    setTurnDetailsById({});
+    setTurnDetailCacheOrder([]);
+    setHasOlderTurns(false);
+    setOldestLoadedTurnNumber(null);
+    setLoadingOlderTurns(false);
+    setTurnDetailLoadingId("");
     setIsStreaming(false);
     setLiveRoundNumber(null);
     setLiveMessageNumber(null);
@@ -1930,26 +2857,9 @@ export default function DebateDetailPage() {
     setAllFilesMetaByVirtualPath({});
     setActiveAllFileVirtualPath("");
     setOpenRoundsByNumber({});
-    void loadDebate().catch(() => {});
-    void loadQuestionVersionMeta();
-    void loadWorkflowRules();
-    const timer = setInterval(() => {
-      void loadDebate().catch(() => {});
-    }, 1500);
+  }, [closeMemoryDialog, id, updateTurnWindow]);
 
-    return () => {
-      clearInterval(timer);
-    };
-  }, [id]);
-
-  useEffect(() => {
-    if (!id) return;
-    if (leftTab !== "memory") return;
-    if (!debate?.isOwner) return;
-    void loadAllFilesIndex().catch(() => {});
-  }, [id, leftTab, debate?.isOwner]);
-
-  async function loadQuestionVersionMeta() {
+  const loadQuestionVersionMeta = useCallback(async () => {
     if (!id) return null;
     try {
       const response = await fetch(`/api/debates/${id}/files?path=${encodeURIComponent("question/history.json")}`);
@@ -1968,9 +2878,9 @@ export default function DebateDetailPage() {
       setQuestionVersion(null);
       return null;
     }
-  }
+  }, [id]);
 
-  async function loadVoteIndex() {
+  const loadVoteIndex = useCallback(async () => {
     if (!id) return;
     try {
       const response = await fetch(`/api/debates/${id}/files?prefix=${encodeURIComponent("votes/round-")}`, {
@@ -1991,9 +2901,9 @@ export default function DebateDetailPage() {
       setVotePathsByRound(next);
     } catch {
     }
-  }
+  }, [id]);
 
-  async function loadOpenVoteState() {
+  const loadOpenVoteState = useCallback(async () => {
     if (!id) return null;
     try {
       const response = await fetch(`/api/debates/${id}/files?path=${encodeURIComponent("votes/open.json")}`, {
@@ -2026,7 +2936,93 @@ export default function DebateDetailPage() {
       setOpenVoteState(null);
       return null;
     }
-  }
+  }, [id]);
+
+  const loadDebate = useCallback(async () => {
+    if (!id) return;
+    const expectedId = id;
+    if (loadingDebateIdRef.current === expectedId) return;
+    loadingDebateIdRef.current = expectedId;
+    try {
+      const after = lastTurnNumberRef.current;
+      const [debateResponse, turnsResponse] = await Promise.all([
+        fetch(`/api/debates/${expectedId}`, { cache: "no-store" }),
+        fetchTurnSummaries({
+          debateId: expectedId,
+          ...(after > 0 ? { after } : { limit: RECENT_TURNS_LIMIT })
+        }).then((result) => ({
+          ok: result.response.ok,
+          payload: result.payload
+        }))
+      ]);
+      const debatePayload = await debateResponse.json().catch(() => ({}));
+      const turnsPayload = turnsResponse.payload;
+
+      if (activeDebateIdRef.current && activeDebateIdRef.current !== expectedId) {
+        return;
+      }
+
+      if (debateResponse.ok) {
+        setDebate(debatePayload.data ?? null);
+        const now = Date.now();
+        if (now - lastVoteIndexAtRef.current > 5000) {
+          lastVoteIndexAtRef.current = now;
+          void loadVoteIndex();
+          void loadOpenVoteState();
+        }
+        const isOwner = Boolean(debatePayload.data?.isOwner);
+        if (isOwner && now - lastContextUsageAtRef.current > 1500) {
+          lastContextUsageAtRef.current = now;
+          void loadContextUsage();
+          void loadContextUsageTotals();
+        }
+      } else {
+        const message = debatePayload?.error?.message ?? "加载辩论失败";
+        const now = Date.now();
+        if (now - lastLoadErrorAtRef.current > 5000) {
+          lastLoadErrorAtRef.current = now;
+          showToast("error", message);
+        }
+      }
+
+      if (turnsResponse.ok) {
+        const incoming = Array.isArray(turnsPayload.data) ? (turnsPayload.data as TurnSummary[]) : [];
+        if (after > 0) {
+          if (incoming.length > 0) {
+            updateTurnWindow((current) => {
+              const merged = mergeTurnSummaries(current, incoming);
+              const last = merged.length ? merged[merged.length - 1] : null;
+              lastTurnNumberRef.current =
+                last && typeof last.turnNumber === "number" ? Math.floor(last.turnNumber) : lastTurnNumberRef.current;
+              return merged;
+            });
+          }
+        } else {
+          updateTurnWindow(incoming);
+          const last = incoming.length ? incoming[incoming.length - 1] : null;
+          lastTurnNumberRef.current = last && typeof last.turnNumber === "number" ? Math.floor(last.turnNumber) : 0;
+          setOldestLoadedTurnNumber(incoming.length ? incoming[0]?.turnNumber ?? null : null);
+          setHasOlderTurns(Boolean(turnsPayload.meta?.hasMore));
+        }
+      }
+    } catch (error) {
+      console.error(error);
+      const now = Date.now();
+      if (now - lastLoadErrorAtRef.current > 5000) {
+        lastLoadErrorAtRef.current = now;
+        showToast("error", "网络错误：加载失败（将自动重试）");
+      }
+    } finally {
+      if (loadingDebateIdRef.current === expectedId) loadingDebateIdRef.current = null;
+    }
+  }, [id, loadContextUsage, loadContextUsageTotals, loadOpenVoteState, loadVoteIndex, showToast, updateTurnWindow]);
+
+  useEffect(() => {
+    if (!id) return;
+    void loadDebate().catch(() => {});
+    void loadQuestionVersionMeta();
+    void loadWorkflowRules();
+  }, [id, loadDebate, loadQuestionVersionMeta, loadWorkflowRules]);
 
   async function loadVoteRound(round: number) {
     if (!id) return null;
@@ -2228,7 +3224,7 @@ export default function DebateDetailPage() {
     }
   }
 
-  async function refreshQuestionDiff() {
+  const refreshQuestionDiff = useCallback(async () => {
     if (!id) return;
     if (!diffFromVersion || !diffToVersion) return;
     const from = questionHistory.find((item) => item.version === diffFromVersion);
@@ -2263,7 +3259,7 @@ export default function DebateDetailPage() {
     } finally {
       setDiffLoading(false);
     }
-  }
+  }, [diffFromVersion, diffToVersion, id, questionHistory]);
 
   useEffect(() => {
     if (!id) return;
@@ -2281,33 +3277,43 @@ export default function DebateDetailPage() {
   }, [id]);
 
   useEffect(() => {
-    if (!debate) return;
+    if (typeof debate?.question !== "string") return;
     if (!questionDirty) {
       setQuestionDraft(debate.question ?? "");
     }
-  }, [debate, questionDirty]);
+  }, [debate?.question, questionDirty]);
 
   useEffect(() => {
-    if (!id || !debate || !["running", "paused"].includes(debate.status)) return;
+    liveMessageNumberRef.current = liveMessageNumber;
+  }, [liveMessageNumber]);
 
+  useEffect(() => {
+    const debateStatus = debate?.status ?? "";
+    if (!id || !["running", "paused"].includes(debateStatus)) return;
     const source = new EventSource(`/api/debates/${id}/events`);
+    source.onopen = () => {
+      sseConnectedRef.current = true;
+      lastSseEventAtRef.current = Date.now();
+    };
     source.addEventListener("turn_start", (event) => {
       try {
+        lastSseEventAtRef.current = Date.now();
         const payload = JSON.parse((event as MessageEvent).data) as {
           progress?: { roundNumber: number; messageNumber: number; agentName: string };
         };
         if (!payload.progress) return;
-        setIsStreaming(debate.status === "running");
+        setIsStreaming(debateStatus === "running");
         setLiveRoundNumber(payload.progress.roundNumber);
         setLiveMessageNumber((current) => {
           const next = payload.progress?.messageNumber;
           return typeof next === "number" ? next : current;
         });
         setLiveAgentName(payload.progress.agentName);
-        setLiveStatus(debate.status === "paused" ? "已暂停（当前发言完成前保留实时草稿）" : "生成中...");
+        setLiveStatus(debateStatus === "paused" ? "已暂停（当前发言完成前保留实时草稿）" : "生成中...");
         setLiveText((current) => {
           const nextMessageNumber = payload.progress?.messageNumber;
-          const sameTurn = typeof nextMessageNumber === "number" && nextMessageNumber === liveMessageNumber;
+          const sameTurn =
+            typeof nextMessageNumber === "number" && nextMessageNumber === liveMessageNumberRef.current;
           return sameTurn && current ? current : "";
         });
       } catch {
@@ -2315,6 +3321,7 @@ export default function DebateDetailPage() {
     });
     source.addEventListener("status", (event) => {
       try {
+        lastSseEventAtRef.current = Date.now();
         const payload = JSON.parse((event as MessageEvent).data) as { message?: string };
         if (payload.message) setLiveStatus(payload.message);
       } catch {
@@ -2322,6 +3329,7 @@ export default function DebateDetailPage() {
     });
     source.addEventListener("chunk", (event) => {
       try {
+        lastSseEventAtRef.current = Date.now();
         const payload = JSON.parse((event as MessageEvent).data) as {
           text?: string;
           agentName?: string;
@@ -2339,18 +3347,39 @@ export default function DebateDetailPage() {
       }
     });
     source.addEventListener("turn_end", () => {
+      lastSseEventAtRef.current = Date.now();
       setLiveStatus("本轮完成（等待保存/下一轮）");
       setIsStreaming(false);
+      void loadDebate().catch(() => {});
     });
     source.onerror = () => {
+      sseConnectedRef.current = false;
       source.close();
       setIsStreaming(false);
+      void loadDebate().catch(() => {});
     };
 
     return () => {
+      sseConnectedRef.current = false;
       source.close();
     };
-  }, [id, debate?.status, liveMessageNumber]);
+  }, [id, debate?.status, loadDebate]);
+
+  useEffect(() => {
+    const debateStatus = debate?.status ?? "";
+    if (!id || !["running", "paused"].includes(debateStatus)) return;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const isStale = !lastSseEventAtRef.current || now - lastSseEventAtRef.current > SSE_STALE_MS;
+      if (!sseConnectedRef.current || isStale) {
+        void loadDebate().catch(() => {});
+      }
+    }, FALLBACK_POLL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [id, debate?.status, loadDebate]);
 
   useEffect(() => {
     if (!questionHistoryOpen) return;
@@ -2367,7 +3396,8 @@ export default function DebateDetailPage() {
     diffLoading,
     diffFromVersion,
     diffToVersion,
-    diffRows.length
+    diffRows.length,
+    refreshQuestionDiff
   ]);
 
   async function action(name: "start" | "pause" | "resume" | "stop") {
@@ -2410,7 +3440,7 @@ export default function DebateDetailPage() {
     if (debate.status === "paused") return action("resume");
   }
 
-  async function loadAllFilesIndex(force?: boolean) {
+  const loadAllFilesIndex = useCallback(async (force?: boolean) => {
     if (!id) return null;
     if (!debate?.isOwner) return null;
     if (allFilesLoading) return null;
@@ -2437,7 +3467,14 @@ export default function DebateDetailPage() {
     } finally {
       setAllFilesLoading(false);
     }
-  }
+  }, [allFilesLoading, debate?.isOwner, id, showToast]);
+
+  useEffect(() => {
+    if (!id) return;
+    if (leftTab !== "memory") return;
+    if (!debate?.isOwner) return;
+    void loadAllFilesIndex().catch(() => {});
+  }, [id, leftTab, debate?.isOwner, loadAllFilesIndex]);
 
   async function openDebateFileFromIndex(virtualPath: string) {
     if (!id) return;
@@ -2473,6 +3510,11 @@ export default function DebateDetailPage() {
     maxChars: number | null;
   }) {
     if (!id) return;
+    memoryFetchAbortRef.current?.abort();
+    const abortController = new AbortController();
+    const requestToken = memoryFetchTokenRef.current + 1;
+    memoryFetchAbortRef.current = abortController;
+    memoryFetchTokenRef.current = requestToken;
     setMemoryLoading(true);
     setMemoryTail(input.tail);
     setMemoryUpdatedAt("");
@@ -2485,8 +3527,9 @@ export default function DebateDetailPage() {
         input.target.scope === "debate"
           ? `/api/debates/${id}/files?path=${encodeURIComponent(input.target.path)}${tailQuery}${maxCharsQuery}`
           : `/api/debates/${id}/agents/${input.target.debateAgentId}/files?path=${encodeURIComponent(input.target.path)}${tailQuery}${maxCharsQuery}`;
-      const response = await fetch(url, { cache: "no-store" });
+      const response = await fetch(url, { cache: "no-store", signal: abortController.signal });
       const payload = await response.json().catch(() => ({}));
+      if (memoryFetchTokenRef.current !== requestToken) return;
       if (!response.ok) {
         if (response.status === 404 && payload.error?.code === "NOT_FOUND") {
           setMemoryContent("尚未生成该文件（通常需要至少一轮发言后才会自动创建）。");
@@ -2508,11 +3551,15 @@ export default function DebateDetailPage() {
         });
       }
     } catch (error) {
+      if (abortController.signal.aborted) return;
       console.error(error);
       setMemoryContent("网络错误：读取失败");
       showToast("error", "网络错误：读取失败");
     } finally {
-      setMemoryLoading(false);
+      if (memoryFetchTokenRef.current === requestToken) {
+        setMemoryLoading(false);
+        memoryFetchAbortRef.current = null;
+      }
     }
   }
 
@@ -2520,29 +3567,16 @@ export default function DebateDetailPage() {
     if (!id || !Number.isFinite(turnNumber) || turnNumber <= 0) return;
     setDiagnosticsDialog({ turnNumber, entry: null, loading: true });
     try {
-      const response = await fetch(
-        `/api/debates/${id}/files?path=${encodeURIComponent("context/generation_diagnostics.jsonl")}`,
-        { cache: "no-store" }
-      );
+      const response = await fetch(`/api/debates/${id}/turns/${turnNumber}/diagnostics`, { cache: "no-store" });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         setDiagnosticsDialog({ turnNumber, entry: null, loading: false });
         return;
       }
-      const content = String(payload.data?.content ?? "");
-      const entries = content
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .map((line) => {
-          try {
-            return JSON.parse(line) as GenerationDiagnosticEntry;
-          } catch {
-            return null;
-          }
-        })
-        .filter((item): item is GenerationDiagnosticEntry => Boolean(item));
-      const entry = [...entries].reverse().find((item) => Number(item.turnNumber) === turnNumber) ?? null;
+      const entry =
+        payload && typeof payload === "object" && "data" in payload && payload.data && typeof payload.data === "object"
+          ? (payload.data as GenerationDiagnosticEntry)
+          : null;
       setDiagnosticsDialog({ turnNumber, entry, loading: false });
     } catch (error) {
       console.error(error);
@@ -2655,14 +3689,17 @@ export default function DebateDetailPage() {
     ["pending", "paused"].includes(debateStatus) &&
     (debateStatus !== "paused" || isRoundBoundary);
 
-  const latestTurn = turns.length ? turns[turns.length - 1] : null;
+  const turnSummaries = turnWindow.summaries;
+  const latestTurnSummary = turnWindow.latest;
+  const turnSummaryById = turnWindow.byId;
+  const turnRoundGroups = turnWindow.roundGroups;
 
   const hasUnpersistedLiveDraft = useMemo(() => {
     if (!liveMessageNumber || !liveAgentName) return false;
     if (!liveText.trim()) return false;
-    const latestTurnNumber = latestTurn?.turnNumber ?? 0;
+    const latestTurnNumber = latestTurnSummary?.turnNumber ?? 0;
     return latestTurnNumber < liveMessageNumber;
-  }, [liveAgentName, liveMessageNumber, liveText, latestTurn?.turnNumber]);
+  }, [liveAgentName, liveMessageNumber, liveText, latestTurnSummary?.turnNumber]);
 
   const liveAvailable = useMemo(() => {
     if (debateStatus === "running") return isStreaming || hasUnpersistedLiveDraft;
@@ -2670,77 +3707,25 @@ export default function DebateDetailPage() {
     return false;
   }, [debateStatus, hasUnpersistedLiveDraft, isStreaming]);
 
-  const activeTurn = useMemo(() => {
+  const activeTurnSummary = useMemo(() => {
     if (!activeTurnId) return null;
-    return turns.find((turn) => turn.id === activeTurnId) ?? null;
-  }, [turns, activeTurnId]);
+    return turnSummaryById[activeTurnId] ?? null;
+  }, [turnSummaryById, activeTurnId]);
 
-  function buildVoteMarkdown(vote: OfficialVoteClosed) {
-    const lines: string[] = [];
-    lines.push(`# 第 ${vote.roundNumber} 轮 · 投票结果`);
-    lines.push("");
-    lines.push(`- 标题：${vote.title}`);
-    lines.push("");
+  const selectedTurnSummary = activeTurnSummary ?? latestTurnSummary;
+  const selectedTurn = selectedTurnSummary ? turnDetailsById[selectedTurnSummary.id] ?? null : null;
 
-    if (vote.kind === "election") {
-      const roles = Array.isArray(vote.result.roles)
-        ? vote.result.roles
-        : Object.keys((vote.result.roleCounts as Record<string, unknown>) ?? {});
-      const winners = (vote.result.winners ?? {}) as Record<string, string | null>;
-      const roleCounts = (vote.result.roleCounts ?? {}) as Record<string, Record<string, number>>;
+  useEffect(() => {
+    if (!selectedTurnSummary) return;
+    if (selectedTurn) return;
+    void ensureTurnDetail(selectedTurnSummary);
+  }, [selectedTurnSummary, selectedTurn, ensureTurnDetail]);
 
-      lines.push("## 结果");
-      if (roles.length === 0) lines.push("- （未声明角色）");
-      for (const role of roles) lines.push(`- ${role}：${winners?.[role] ?? "未能选出"}`);
-      lines.push("");
-
-      lines.push("## 票数");
-      for (const role of roles) {
-        const tally = Object.entries(roleCounts?.[role] ?? {})
-          .map(([seat, count]) => ({ seat, count }))
-          .sort((a, b) => b.count - a.count || a.seat.localeCompare(b.seat));
-        lines.push(`### ${role}`);
-        if (tally.length === 0) lines.push("- （无人投票）");
-        for (const item of tally) lines.push(`- ${item.seat}: ${item.count}`);
-        lines.push("");
-      }
-
-      lines.push("## 逐票明细");
-      for (const ballot of vote.result.ballots ?? []) {
-        const reason = ballot.reason ? ` · ${ballot.reason}` : "";
-        const pairs = roles
-          .map((role) => `${role}=${ballot.selections?.[role] ?? "?"}`)
-          .join(" · ");
-        const who = ballot.voterSeat ? `${ballot.voterSeat} · ${ballot.voter}` : ballot.voter;
-        lines.push(`- ${who}: ${pairs}${reason}`);
-      }
-
-      return lines.join("\n");
-    }
-
-    const tally = Object.entries(vote.result.counts ?? {})
-      .map(([choice, count]) => ({ choice, count }))
-      .sort((a, b) => b.count - a.count || a.choice.localeCompare(b.choice));
-
-    lines.push(`- Winner：${vote.result.winner ?? "未能选出"}`);
-    lines.push("");
-    lines.push(`- Prompt：${vote.prompt}`);
-    lines.push("");
-
-    lines.push("## 票数");
-    if (tally.length === 0) lines.push("- （无人投票）");
-    for (const item of tally) lines.push(`- ${item.choice}: ${item.count}`);
-    lines.push("");
-
-    lines.push("## 逐票明细");
-    for (const ballot of vote.result.ballots ?? []) {
-      const reason = ballot.reason ? ` · ${ballot.reason}` : "";
-      const who = ballot.voterSeat ? `${ballot.voterSeat} · ${ballot.voter}` : ballot.voter;
-      lines.push(`- ${who}: ${ballot.choice}${reason}`);
-    }
-
-    return lines.join("\n");
-  }
+  useEffect(() => {
+    if (!selectedTurnSummary) return;
+    if (!turnDetailsById[selectedTurnSummary.id]) return;
+    setTurnDetailCacheOrder((current) => touchTurnDetailCacheOrder(current, selectedTurnSummary.id));
+  }, [selectedTurnSummary, turnDetailsById]);
 
   const activeVote = useMemo(() => {
     if (activeVoteRound === null) return null;
@@ -2752,11 +3737,11 @@ export default function DebateDetailPage() {
       if (activeVote) return { kind: "vote" as const, vote: activeVote };
       return { kind: "vote_loading" as const, round: activeVoteRound };
     }
-    if (activeTurn) return { kind: "turn" as const, turn: activeTurn };
+    if (selectedTurn) return { kind: "turn" as const, turn: selectedTurn };
+    if (selectedTurnSummary) return { kind: "turn_loading" as const, turn: selectedTurnSummary };
     if (liveAvailable) return { kind: "live" as const };
-    if (latestTurn) return { kind: "turn" as const, turn: latestTurn };
     return null;
-  }, [activeVoteRound, activeVote, activeTurn, liveAvailable, latestTurn]);
+  }, [activeVoteRound, activeVote, selectedTurn, selectedTurnSummary, liveAvailable]);
 
   useEffect(() => {
     if (!followLatest) return;
@@ -2777,14 +3762,14 @@ export default function DebateDetailPage() {
       node.scrollTop = node.scrollHeight;
     }, 0);
     return () => window.clearTimeout(t);
-  }, [followLatest, activeVoteRound, viewer?.kind, liveText, turns.length, latestTurn?.id]);
+  }, [followLatest, activeVoteRound, viewer?.kind, liveText, turnSummaries.length, latestTurnSummary?.id]);
 
   const selectedViewerKey = useMemo(() => {
     if (activeVoteRound !== null) return `__vote_round_${activeVoteRound}`;
     if (activeTurnId) return activeTurnId;
     if (liveAvailable) return "__live__";
-    return latestTurn?.id ?? "";
-  }, [activeVoteRound, activeTurnId, liveAvailable, latestTurn?.id]);
+    return latestTurnSummary?.id ?? "";
+  }, [activeVoteRound, activeTurnId, liveAvailable, latestTurnSummary?.id]);
 
   useEffect(() => {
     if (followLatest && viewer?.kind === "live") return;
@@ -2809,18 +3794,49 @@ export default function DebateDetailPage() {
   const liveDisplayMessage =
     typeof liveMessageNumber === "number" && liveMessageNumber > 0 ? liveMessageNumber : null;
 
-  const turnsByRound = useMemo(() => {
-    const map = new Map<number, Turn[]>();
-    for (const turn of turns) {
-      const round = Math.floor((turn.turnNumber - 1) / agentCount) + 1;
-      const list = map.get(round) ?? [];
-      list.push(turn);
-      map.set(round, list);
-    }
-    return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
-  }, [turns, agentCount]);
+  useEffect(() => {
+    const node = directoryScrollRef.current;
+    if (!node) return;
+    const update = () => setDirectoryViewportHeight(node.clientHeight);
+    update();
+    const observer = new ResizeObserver(() => update());
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
-  const latestCompletedRound = turnsByRound.length > 0 ? turnsByRound[turnsByRound.length - 1]?.[0] ?? null : null;
+  const handleDirectoryRoundHeight = useCallback((round: number, height: number) => {
+    if (!Number.isFinite(height) || height <= 0) return;
+    const nextHeight = Math.ceil(height);
+    setDirectoryRoundHeights((current) => {
+      if (current[round] === nextHeight) return current;
+      return { ...current, [round]: nextHeight };
+    });
+  }, []);
+
+  const handleToggleDirectoryRound = useCallback((round: number, open: boolean) => {
+    setOpenRoundsByNumber((current) => ({ ...current, [round]: open }));
+  }, []);
+
+  function handleOpenVoteRound(round: number) {
+    setActiveTurnId("");
+    setActiveVoteRound(round);
+    void loadVoteRound(round);
+  }
+
+  const handleSelectDirectoryTurn = useCallback((turnId: string) => {
+    setActiveVoteRound(null);
+    setActiveTurnId(turnId);
+  }, []);
+
+  const handleOpenInjectedPromptDialog = useCallback(
+    (input: { round: number; phaseTitle: string; prompt: string }) => {
+      setInjectedPromptDialog(input);
+    },
+    []
+  );
+
+  const latestCompletedRound =
+    turnRoundGroups.length > 0 ? turnRoundGroups[turnRoundGroups.length - 1]?.roundNumber ?? null : null;
   const currentDirectoryRound =
     (typeof liveDisplayRound === "number" && liveDisplayRound > 0 ? liveDisplayRound : null) ??
     latestCompletedRound ??
@@ -2837,15 +3853,88 @@ export default function DebateDetailPage() {
     );
   }, [currentDirectoryRound, debate?.consensusReached, debate?.status, workflowConfig, openVoteState]);
 
+  const virtualRounds = useMemo(() => {
+    const overscan = 500;
+    const viewportBottom = directoryScrollTop + directoryViewportHeight;
+    const items: Array<{
+      round: number;
+      roundTurns: TurnSummary[];
+      offset: number;
+      estimatedHeight: number;
+      phase: DebateDirectoryPhaseInfo | null;
+      hasInjectedPrompt: boolean;
+      isCurrentPhaseRound: boolean;
+      hasVoteResult: boolean;
+    }> = [];
+    let offset = 0;
+    for (const group of turnRoundGroups) {
+      const round = group.roundNumber;
+      const roundTurns = group.turns;
+      const phase = resolveDirectoryPhaseForRound(
+        workflowConfig,
+        round,
+        Boolean(currentDirectoryPhase?.kind === "finalization"),
+        openVoteState,
+        currentDirectoryRound
+      );
+      const phaseEntryRound = phase ? isPhaseEntryRound(workflowConfig, round, phase.kind) : false;
+      const hasInjectedPrompt = Boolean(phase?.injectedPrompt && phaseEntryRound);
+      const isCurrentPhaseRound = Boolean(currentDirectoryRound === round);
+      const hasVoteResult = Boolean(votePathsByRound[round]);
+      const isOpen = Boolean(openRoundsByNumber[round]);
+      const fallbackHeight = isOpen
+        ? 84 + roundTurns.length * 86 + (hasVoteResult ? 52 : 0) + (phase ? 40 : 0)
+        : 42;
+      const estimatedHeight = directoryRoundHeights[round] ?? fallbackHeight;
+      const visible = offset + estimatedHeight >= directoryScrollTop - overscan && offset <= viewportBottom + overscan;
+      if (visible) {
+        items.push({
+          round,
+          roundTurns,
+          offset,
+          estimatedHeight,
+          phase,
+          hasInjectedPrompt,
+          isCurrentPhaseRound,
+          hasVoteResult
+        });
+      }
+      offset += estimatedHeight;
+    }
+    const topSpacer = items.length ? items[0]!.offset : 0;
+    const last = items.length ? items[items.length - 1]! : null;
+    const bottomSpacer = last ? Math.max(0, offset - (last.offset + last.estimatedHeight)) : 0;
+    return { items, topSpacer, bottomSpacer };
+  }, [
+    turnRoundGroups,
+    workflowConfig,
+    currentDirectoryPhase?.kind,
+    openVoteState,
+    currentDirectoryRound,
+    votePathsByRound,
+    openRoundsByNumber,
+    directoryRoundHeights,
+    directoryScrollTop,
+    directoryViewportHeight
+  ]);
+
   useEffect(() => {
-    if (turnsByRound.length < 1) return;
-    const lastRound = turnsByRound[turnsByRound.length - 1]?.[0] ?? null;
+    if (turnRoundGroups.length < 1) return;
+    const lastRound = turnRoundGroups[turnRoundGroups.length - 1]?.roundNumber ?? null;
     if (!lastRound) return;
     setOpenRoundsByNumber((current) => {
       if (Object.prototype.hasOwnProperty.call(current, String(lastRound))) return current;
       return { ...current, [lastRound]: true };
     });
-  }, [turnsByRound.length]);
+  }, [turnRoundGroups]);
+
+  useEffect(() => {
+    const validRounds = new Set(turnRoundGroups.map((group) => group.roundNumber));
+    setDirectoryRoundHeights((current) => {
+      const next = Object.fromEntries(Object.entries(current).filter(([round]) => validRounds.has(Number(round))));
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, [turnRoundGroups]);
 
   const allFilesTreeModel = useMemo(
     () =>
@@ -3120,399 +4209,50 @@ export default function DebateDetailPage() {
           </div>
         </div>
       ) : null}
-      {diagnosticsDialog ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setDiagnosticsDialog(null)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15, 23, 42, 0.45)",
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "center",
-            padding: 24,
-            zIndex: 1000
-          }}
-        >
-          {(() => {
-            const summary = diagnosticsDialog.entry ? summarizeGenerationDiagnostic(diagnosticsDialog.entry) : null;
-            const summaryStyle =
-              summary?.tone === "danger"
-                ? { background: "rgba(239, 68, 68, 0.1)", borderColor: "rgba(239, 68, 68, 0.35)" }
-                : summary?.tone === "warn"
-                  ? { background: "rgba(245, 158, 11, 0.1)", borderColor: "rgba(245, 158, 11, 0.35)" }
-                  : { background: "rgba(16, 185, 129, 0.1)", borderColor: "rgba(16, 185, 129, 0.35)" };
-            return (
-          <div
-            className="panel stack"
-            onClick={(event) => event.stopPropagation()}
-            style={{ width: "min(860px, 100%)" }}
-          >
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <div className="stack" style={{ gap: 4 }}>
-                <strong>第 {diagnosticsDialog.turnNumber} 条发言 · 生成诊断</strong>
-                <div className="muted">用于判断正文是被平台截断、工具打断，还是被业务逻辑覆盖。</div>
-              </div>
-              <button className="btn" type="button" onClick={() => setDiagnosticsDialog(null)}>
-                关闭
-              </button>
-            </div>
-            {diagnosticsDialog.loading ? (
-              <div className="panel">读取中...</div>
-            ) : diagnosticsDialog.entry ? (
-              <div className="stack">
-                <div className="panel stack" style={summaryStyle}>
-                  <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
-                    <strong>{summary?.title ?? "诊断结果"}</strong>
-                    <span className="muted">
-                      {diagnosticsDialog.entry.provider} / {diagnosticsDialog.entry.model}
-                    </span>
-                  </div>
-                  <div>{summary?.conclusion}</div>
-                  <div className="stack muted" style={{ gap: 6 }}>
-                    {(summary?.evidence ?? []).map((item, index) => (
-                      <div key={`${index}-${item}`}>- {item}</div>
-                    ))}
-                  </div>
-                </div>
-                <details className="panel">
-                  <summary style={{ cursor: "pointer", fontWeight: 600 }}>查看原始诊断 JSON</summary>
-                  <pre style={{ margin: "12px 0 0", whiteSpace: "pre-wrap", maxHeight: "45vh", overflowY: "auto" }}>
-                    {JSON.stringify(diagnosticsDialog.entry, null, 2)}
-                  </pre>
-                </details>
-              </div>
-            ) : (
-              <div className="panel">未找到该条发言的诊断记录。</div>
-            )}
-          </div>
-            );
-          })()}
-        </div>
-      ) : null}
-      {saveSuccessOpen ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setSaveSuccessOpen(false)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15, 23, 42, 0.45)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 24,
-            zIndex: 1001
-          }}
-        >
-          <div className="panel stack" onClick={(event) => event.stopPropagation()} style={{ width: "min(520px, 100%)" }}>
-            <strong>保存成功</strong>
-            <div className="muted">
-              {saveSuccessVersion ? `当前版本：v${saveSuccessVersion}` : "已更新问题并生成版本"}
-            </div>
-            <div className="row" style={{ justifyContent: "flex-end" }}>
-              <button className="btn" type="button" onClick={() => setSaveSuccessOpen(false)}>
-                关闭
-              </button>
-              <button
-                className="btn btn-primary"
-                type="button"
-                onClick={() => {
-                  setSaveSuccessOpen(false);
-                  void openQuestionHistory();
-                }}
-              >
-                查看对比
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {questionZoomOpen ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setQuestionZoomOpen(false)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15, 23, 42, 0.45)",
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "center",
-            padding: 24,
-            zIndex: 1000
-          }}
-        >
-          <div
-            className="panel stack"
-            onClick={(event) => event.stopPropagation()}
-            style={{ width: "min(980px, 100%)" }}
-          >
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <strong>问题（放大查看）</strong>
-              <button className="btn" type="button" onClick={() => setQuestionZoomOpen(false)}>
-                关闭
-              </button>
-            </div>
-            <LineNumberTextarea
-              readOnly={!debate.isOwner || !["pending", "paused"].includes(debate.status)}
-              value={["pending", "paused"].includes(debate.status) ? questionDraft : debate.question}
-              onChange={(next) => {
-                setQuestionDraft(next);
-                setQuestionDirty(true);
-              }}
-              maxLength={50_000}
-              height={"60vh"}
-              autoFocus
-              baseline={debate.question}
-            />
-            {debate.isOwner && ["pending", "paused"].includes(debate.status) ? (
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <span className="muted">{questionDraft.length.toLocaleString()}/50,000</span>
-                <button
-                  className="btn btn-primary"
-                  disabled={isSavingQuestion || !questionDirty}
-                  type="button"
-                  onClick={() => void saveQuestion()}
-                >
-                  {isSavingQuestion ? "保存中..." : "保存"}
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-      {questionHistoryOpen ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setQuestionHistoryOpen(false)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15, 23, 42, 0.45)",
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "center",
-            padding: 24,
-            zIndex: 1000
-          }}
-        >
-          <div
-            className="panel stack"
-            onClick={(event) => event.stopPropagation()}
-            style={{ width: "min(1080px, 100%)" }}
-          >
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <strong>问题版本与对比</strong>
-              <div className="row" style={{ gap: 8 }}>
-                <button className="btn" type="button" onClick={() => void openQuestionHistory()}>
-                  刷新
-                </button>
-                <button className="btn" type="button" onClick={() => setQuestionHistoryOpen(false)}>
-                  关闭
-                </button>
-              </div>
-            </div>
-
-            {questionHistoryLoading ? <div className="muted">加载中...</div> : null}
-            {!questionHistoryLoading && questionHistoryError ? (
-              <div className="muted">{questionHistoryError}</div>
-            ) : null}
-
-            {!questionHistoryLoading && !questionHistoryError ? (
-              <div className="grid" style={{ gridTemplateColumns: "320px 1fr", alignItems: "start" }}>
-                <div className="panel stack">
-                  <strong>历史</strong>
-                  <div className="muted">当前版本：v{questionVersion ?? (questionHistory.at(-1)?.version ?? 1)}</div>
-                  <div className="stack" style={{ gap: 8, maxHeight: "60vh", overflowY: "auto" }}>
-                    {questionHistory.length === 0 ? <div className="muted">暂无</div> : null}
-                    {questionHistory.map((item) => (
-                      <button
-                        key={item.version}
-                        type="button"
-                        className="btn"
-                        style={{
-                          textAlign: "left",
-                          borderColor:
-                            item.version === diffToVersion || item.version === diffFromVersion
-                              ? "rgba(38, 99, 235, 0.55)"
-                              : undefined,
-                          background:
-                            item.version === diffToVersion || item.version === diffFromVersion
-                              ? "rgba(38, 99, 235, 0.08)"
-                              : undefined
-                        }}
-                        onClick={() => {
-                          setDiffFromVersion(item.version);
-                          setDiffToVersion(questionHistory.at(-1)?.version ?? item.version);
-                        }}
-                      >
-                        <div>
-                          <strong>v{item.version}</strong>
-                        </div>
-                        <div className="muted">{item.at ? new Date(item.at).toLocaleString() : ""}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="panel stack">
-                  <div className="row" style={{ justifyContent: "space-between" }}>
-                    <strong>Diff</strong>
-                    <div className="row" style={{ gap: 8 }}>
-                      <select
-                        value={diffFromVersion ?? ""}
-                        onChange={(event) => setDiffFromVersion(event.target.value ? Number(event.target.value) : null)}
-                      >
-                        <option value="">From</option>
-                        {questionHistory.map((item) => (
-                          <option key={item.version} value={item.version}>
-                            v{item.version}
-                          </option>
-                        ))}
-                      </select>
-                      <select
-                        value={diffToVersion ?? ""}
-                        onChange={(event) => setDiffToVersion(event.target.value ? Number(event.target.value) : null)}
-                      >
-                        <option value="">To</option>
-                        {questionHistory.map((item) => (
-                          <option key={item.version} value={item.version}>
-                            v{item.version}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        className="btn btn-primary"
-                        type="button"
-                        disabled={diffLoading || !diffFromVersion || !diffToVersion}
-                        onClick={() => void refreshQuestionDiff()}
-                      >
-                        {diffLoading ? "生成中..." : "生成 Diff"}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="panel" style={{ height: "60vh", overflowY: "auto" }}>
-                    {diffLoading ? <div className="muted">生成中...</div> : null}
-                    {!diffLoading ? (
-                      diffRows.length > 0 ? (
-                        <div
-                          style={{
-                            display: "grid",
-                            gridTemplateColumns: "1fr 1fr",
-                            gap: 0,
-                            fontFamily:
-                              "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
-                            fontSize: 12
-                          }}
-                        >
-                          {diffRows.map((row, index) => {
-                            if (row.kind === "skip") {
-                              return (
-                                <div
-                                  key={`skip_${index}`}
-                                  className="muted"
-                                  style={{
-                                    gridColumn: "1 / span 2",
-                                    padding: "8px 10px"
-                                  }}
-                                >
-                                  … 跳过 {row.leftSkip} 行未变更 …
-                                </div>
-                              );
-                            }
-
-                            const baseCell: CSSProperties = {
-                              display: "flex",
-                              gap: 10,
-                              padding: "4px 10px",
-                              whiteSpace: "pre-wrap",
-                              alignItems: "flex-start"
-                            };
-                            const leftBg =
-                              row.type === "del"
-                                ? "rgba(220, 38, 38, 0.10)"
-                                : row.type === "change"
-                                  ? "rgba(37, 99, 235, 0.10)"
-                                  : "transparent";
-                            const rightBg =
-                              row.type === "add"
-                                ? "rgba(22, 163, 74, 0.10)"
-                                : row.type === "change"
-                                  ? "rgba(37, 99, 235, 0.10)"
-                                  : "transparent";
-                            const leftNoBg =
-                              row.type === "del"
-                                ? "rgba(220, 38, 38, 0.22)"
-                                : row.type === "change"
-                                  ? "rgba(37, 99, 235, 0.18)"
-                                  : "transparent";
-                            const rightNoBg =
-                              row.type === "add"
-                                ? "rgba(22, 163, 74, 0.22)"
-                                : row.type === "change"
-                                  ? "rgba(37, 99, 235, 0.18)"
-                                  : "transparent";
-
-                            return (
-                              <Fragment key={`row_${index}`}>
-                                <div style={{ ...baseCell, background: leftBg }}>
-                                  <span
-                                    className="muted"
-                                    style={{
-                                      width: 44,
-                                      flex: "0 0 auto",
-                                      textAlign: "right",
-                                      background: leftNoBg,
-                                      borderRadius: 6,
-                                      padding: "0 6px",
-                                      lineHeight: "18px",
-                                      marginTop: 1
-                                    }}
-                                  >
-                                    {row.leftNo ?? ""}
-                                  </span>
-                                  <span style={{ flex: 1 }}>{row.leftText}</span>
-                                </div>
-                                <div style={{ ...baseCell, background: rightBg }}>
-                                  <span
-                                    className="muted"
-                                    style={{
-                                      width: 44,
-                                      flex: "0 0 auto",
-                                      textAlign: "right",
-                                      background: rightNoBg,
-                                      borderRadius: 6,
-                                      padding: "0 6px",
-                                      lineHeight: "18px",
-                                      marginTop: 1
-                                    }}
-                                  >
-                                    {row.rightNo ?? ""}
-                                  </span>
-                                  <span style={{ flex: 1 }}>{row.rightText}</span>
-                                </div>
-                              </Fragment>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <div className="muted">选择版本并点击“生成 Diff”</div>
-                      )
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
+      <DiagnosticsDialog dialog={diagnosticsDialog} onClose={() => setDiagnosticsDialog(null)} />
+      <SaveSuccessDialog
+        open={saveSuccessOpen}
+        version={saveSuccessVersion}
+        onClose={() => setSaveSuccessOpen(false)}
+        onOpenHistory={() => {
+          setSaveSuccessOpen(false);
+          void openQuestionHistory();
+        }}
+      />
+      <QuestionZoomDialog
+        open={questionZoomOpen}
+        canEdit={debate.isOwner && ["pending", "paused"].includes(debate.status)}
+        value={["pending", "paused"].includes(debate.status) ? questionDraft : debate.question}
+        baseline={debate.question}
+        questionDirty={questionDirty}
+        isSavingQuestion={isSavingQuestion}
+        onClose={() => setQuestionZoomOpen(false)}
+        onChange={(next) => {
+          setQuestionDraft(next);
+          setQuestionDirty(true);
+        }}
+        onSave={() => void saveQuestion()}
+      />
+      <QuestionHistoryDialog
+        open={questionHistoryOpen}
+        questionVersion={questionVersion}
+        loading={questionHistoryLoading}
+        error={questionHistoryError}
+        history={questionHistory}
+        diffFromVersion={diffFromVersion}
+        diffToVersion={diffToVersion}
+        diffLoading={diffLoading}
+        diffRows={diffRows}
+        onClose={() => setQuestionHistoryOpen(false)}
+        onRefresh={() => void openQuestionHistory()}
+        onSelectFromVersion={setDiffFromVersion}
+        onSelectToVersion={setDiffToVersion}
+        onGenerateDiff={() => void refreshQuestionDiff()}
+        onSelectHistoryVersion={(version) => {
+          setDiffFromVersion(version);
+          setDiffToVersion(questionHistory.at(-1)?.version ?? version);
+        }}
+      />
       <FileInfoDialog
         open={allFileInfoOpen}
         loading={allFileInfoLoading}
@@ -3523,110 +4263,36 @@ export default function DebateDetailPage() {
         }}
       />
       <DownloadProgressDialog progress={allFilesDownloadProgress} progressPct={downloadProgressPct} />
-      {memoryOpen ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          onClick={() => {
-            setMemoryOpen(false);
-            setMemoryTarget(null);
-          }}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15, 23, 42, 0.45)",
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "center",
-            padding: 24,
-            zIndex: 1000
-          }}
-        >
-          <div
-            className="panel stack"
-            onClick={(event) => event.stopPropagation()}
-            style={{ width: "min(980px, 100%)" }}
-          >
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <strong>{memoryTitle || "记忆文件"}</strong>
-              <div className="row" style={{ gap: 8 }}>
-                {memoryTarget ? (
-                  <>
-                    <button
-                      className="btn"
-                      type="button"
-                      disabled={memoryLoading}
-                      onClick={() => {
-                        setMemoryTail(false);
-                        void fetchMemoryTarget({ target: memoryTarget, tail: false, maxChars: memoryMaxChars });
-                      }}
-                      title="显示开头（适合查看 jsonl 的前半部分）"
-                    >
-                      开头
-                    </button>
-                    <button
-                      className="btn"
-                      type="button"
-                      disabled={memoryLoading}
-                      onClick={() => {
-                        setMemoryTail(true);
-                        void fetchMemoryTarget({ target: memoryTarget, tail: true, maxChars: memoryMaxChars });
-                      }}
-                      title="显示末尾（默认）"
-                    >
-                      末尾
-                    </button>
-                    {memoryTruncation?.truncated ? (
-                      <button
-                        className="btn"
-                        type="button"
-                        disabled={memoryLoading}
-                        onClick={() => {
-                          const next = Math.min(2_000_000, Math.max(250_000, (memoryMaxChars ?? 250_000) + 250_000));
-                          setMemoryMaxChars(next);
-                          void fetchMemoryTarget({ target: memoryTarget, tail: memoryTail, maxChars: next });
-                        }}
-                        title="增大读取上限（最多 2,000,000 chars）"
-                      >
-                        加载更多
-                      </button>
-                    ) : null}
-                  </>
-                ) : null}
-                <button
-                  className="btn"
-                  type="button"
-                  onClick={() => {
-                    setMemoryOpen(false);
-                    setMemoryTarget(null);
-                  }}
-                >
-                  关闭
-                </button>
-              </div>
-            </div>
-            <div className="muted">
-              {memoryPath}
-              {memoryUpdatedAt ? ` · ${new Date(memoryUpdatedAt).toLocaleString()}` : ""}
-            </div>
-            {memoryTruncation?.truncated ? (
-              <div className="muted">
-                内容过大已截断：显示{memoryTruncation.slice === "tail" ? "末尾" : "开头"} {memoryTruncation.shownChars}/
-                {memoryTruncation.totalChars} chars
-              </div>
-            ) : null}
-            <div ref={memoryContentRef} className="panel" style={{ height: "70vh", overflowY: "auto" }}>
-              {memoryLoading ? (
-                <div className="muted">加载中...</div>
-              ) : memoryPath.toLowerCase().endsWith(".md") ? (
-                <MarkdownView value={memoryContent || "（空）"} />
-              ) : (
-                <pre style={preWrapStyle}>{memoryContent || "（空）"}</pre>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <MemoryDialog
+        open={memoryOpen}
+        title={memoryTitle}
+        path={memoryPath}
+        updatedAt={memoryUpdatedAt}
+        target={memoryTarget}
+        loading={memoryLoading}
+        tail={memoryTail}
+        truncation={memoryTruncation}
+        content={memoryContent}
+        preWrapStyle={preWrapStyle}
+        contentRef={memoryContentRef}
+        onClose={closeMemoryDialog}
+        onShowHead={() => {
+          if (!memoryTarget) return;
+          setMemoryTail(false);
+          void fetchMemoryTarget({ target: memoryTarget, tail: false, maxChars: memoryMaxChars });
+        }}
+        onShowTail={() => {
+          if (!memoryTarget) return;
+          setMemoryTail(true);
+          void fetchMemoryTarget({ target: memoryTarget, tail: true, maxChars: memoryMaxChars });
+        }}
+        onLoadMore={() => {
+          if (!memoryTarget) return;
+          const next = Math.min(2_000_000, Math.max(250_000, (memoryMaxChars ?? 250_000) + 250_000));
+          setMemoryMaxChars(next);
+          void fetchMemoryTarget({ target: memoryTarget, tail: memoryTail, maxChars: next });
+        }}
+      />
 
       <nav
         className="panel"
@@ -3663,7 +4329,7 @@ export default function DebateDetailPage() {
         </div>
       </nav>
 
-      <section className="panel stack" style={{ maxHeight: "calc(100vh - 140px)", overflowY: "auto" }}>
+      <section className="panel stack" style={{ height: "calc(100vh - 140px)", overflow: "hidden" }}>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <strong style={{ fontSize: 14 }}>{leftTabTitle[leftTab]}</strong>
           <Link className="btn" href="/debates">
@@ -3751,100 +4417,25 @@ export default function DebateDetailPage() {
         )}
       </section>
 
-      <section className="panel stack" style={{ height: "calc(100vh - 140px)", overflow: "hidden" }}>
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <h2 style={{ margin: 0 }}>发言内容</h2>
-          <div className="row" style={{ gap: 8 }}>
-            <button
-              className={`btn ${followLatest ? "btn-active" : ""}`}
-              type="button"
-              title="开启后自动滚动到最新输出"
-              onClick={() => setFollowLatest((current) => !current)}
-            >
-              跟随最新
-            </button>
-            {activeTurnId || activeVoteRound !== null ? (
-              <button
-                className="btn"
-                onClick={() => {
-                  setActiveTurnId("");
-                  setActiveVoteRound(null);
-                }}
-              >
-                回到当前
-              </button>
-            ) : null}
-          </div>
-        </div>
-
-        {viewer?.kind === "live" ? (
-          <div className="stack" style={{ flex: 1, minHeight: 0 }}>
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <strong>
-                当前：{liveAgentName || "未知"}
-                {liveDisplayRound ? ` · 第 ${liveDisplayRound} 轮` : ""}
-                {liveDisplayMessage
-                  ? (() => {
-                      const turnInRound = agentCount > 0 ? ((liveDisplayMessage - 1) % agentCount) + 1 : null;
-                      return ` · #${liveDisplayMessage}${turnInRound ? `（第 ${turnInRound} 回）` : ""}`;
-                    })()
-                  : ""}
-              </strong>
-              <span className="muted">{liveStatus || "运行中"}</span>
-            </div>
-            <div ref={viewerScrollRef} className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-              <MarkdownView value={liveText || "（等待输出）"} />
-            </div>
-          </div>
-        ) : viewer?.kind === "vote_loading" ? (
-          <div className="stack" style={{ flex: 1, minHeight: 0 }}>
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <strong>第 {viewer.round} 轮 · 投票结果</strong>
-              <span className="muted">加载中...</span>
-            </div>
-            <div ref={viewerScrollRef} className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-              <div className="muted">读取投票结果中...</div>
-            </div>
-          </div>
-        ) : viewer?.kind === "vote" ? (
-          <div className="stack" style={{ flex: 1, minHeight: 0 }}>
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <strong>第 {viewer.vote.roundNumber} 轮 · 投票结果</strong>
-              <span className="muted">汇总</span>
-            </div>
-            <div ref={viewerScrollRef} className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-              <MarkdownView value={buildVoteMarkdown(viewer.vote)} />
-            </div>
-          </div>
-        ) : viewer?.kind === "turn" ? (
-          <div className="stack" style={{ flex: 1, minHeight: 0 }}>
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <div className="stack" style={{ gap: 4 }}>
-                <strong>
-                  {(() => {
-                    const round = Math.floor((viewer.turn.turnNumber - 1) / agentCount) + 1;
-                    const turnInRound = ((viewer.turn.turnNumber - 1) % agentCount) + 1;
-                    const seat = viewer.turn.seatNumber ? `Seat-${viewer.turn.seatNumber}` : "";
-                    return `#${viewer.turn.turnNumber} · 第 ${round} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${viewer.turn.agent.name}`;
-                  })()}
-                </strong>
-                <span className="muted">{viewer.turn.content.length} chars</span>
-              </div>
-              <div className="row" style={{ gap: 8 }}>
-                <button className="btn" type="button" onClick={() => void openGenerationDiagnostics(viewer.turn.turnNumber)}>
-                  查看诊断结果
-                </button>
-                <span className="muted">{new Date(viewer.turn.createdAt).toLocaleTimeString()}</span>
-              </div>
-            </div>
-            <div ref={viewerScrollRef} className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-              <MarkdownView value={viewer.turn.content} />
-            </div>
-          </div>
-        ) : (
-          <div className="muted">还没有发言记录</div>
-        )}
-      </section>
+      <DebateViewerPanel
+        viewer={viewer}
+        followLatest={followLatest}
+        activeTurnId={activeTurnId}
+        activeVoteRound={activeVoteRound}
+        agentCount={agentCount}
+        liveAgentName={liveAgentName}
+        liveDisplayRound={liveDisplayRound}
+        liveDisplayMessage={liveDisplayMessage}
+        liveStatus={liveStatus}
+        liveText={liveText}
+        viewerScrollRef={viewerScrollRef}
+        onToggleFollowLatest={() => setFollowLatest((current) => !current)}
+        onReturnToCurrent={() => {
+          setActiveTurnId("");
+          setActiveVoteRound(null);
+        }}
+        onOpenDiagnostics={(turnNumber) => void openGenerationDiagnostics(turnNumber)}
+      />
 
       <section className="panel stack" style={{ maxHeight: "calc(100vh - 140px)", overflowY: "auto" }}>
         <div className="row" style={{ gap: 8 }}>
@@ -3860,6 +4451,11 @@ export default function DebateDetailPage() {
           ) : null}
         </div>
         <h2 style={{ margin: 0 }}>发言目录</h2>
+        {hasOlderTurns ? (
+          <button className="btn" type="button" disabled={loadingOlderTurns} onClick={() => void loadOlderTurnSummaries()}>
+            {loadingOlderTurns ? "加载中..." : `加载更早发言（${OLDER_TURNS_PAGE_SIZE} 条）`}
+          </button>
+        ) : null}
         {currentDirectoryPhase ? (
           <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
             <span className="softBox" style={{ padding: "4px 8px", fontSize: 12 }}>
@@ -3871,7 +4467,7 @@ export default function DebateDetailPage() {
             </span>
           </div>
         ) : null}
-        {turnsByRound.length === 0 && !liveAvailable ? <div className="muted">还没有发言记录</div> : null}
+        {turnRoundGroups.length === 0 && !liveAvailable ? <div className="muted">还没有发言记录</div> : null}
 
         {liveAvailable ? (
           <button
@@ -3891,146 +4487,36 @@ export default function DebateDetailPage() {
           </button>
         ) : null}
 
-        {turnsByRound.map(([round, roundTurns]) => {
-          const isOpen = Boolean(openRoundsByNumber[round]);
-          const phase = resolveDirectoryPhaseForRound(
-            workflowConfig,
-            round,
-            Boolean(currentDirectoryPhase?.kind === "finalization"),
-            openVoteState,
-            currentDirectoryRound
-          );
-          const phaseEntryRound = phase ? isPhaseEntryRound(workflowConfig, round, phase.kind) : false;
-          const hasInjectedPrompt = Boolean(phase?.injectedPrompt && phaseEntryRound);
-          const isCurrentPhaseRound = Boolean(currentDirectoryRound === round);
-          const hasVoteResult = Boolean(votePathsByRound[round]);
-          return (
-          <details
-            key={round}
-            open={isOpen}
-            onToggle={(event) => {
-              const nextOpen = (event.currentTarget as HTMLDetailsElement).open;
-              setOpenRoundsByNumber((current) => ({ ...current, [round]: nextOpen }));
-            }}
-          >
-            <summary style={{ cursor: "pointer" }}>
-              <strong>第 {round} 轮</strong>
-              <span className="muted"> · {roundTurns.length}/{agentCount}</span>
-              {phase ? (
-                <span
-                  className="softBox"
-                  style={{
-                    marginLeft: 8,
-                    padding: "2px 8px",
-                    fontSize: 12,
-                    borderColor: isCurrentPhaseRound ? "rgba(38, 99, 235, 0.35)" : undefined,
-                    background: isCurrentPhaseRound ? "rgba(38, 99, 235, 0.1)" : undefined
-                  }}
-                >
-                  {phase.title}
-                  {isCurrentPhaseRound ? " · 当前" : ""}
-                </span>
-              ) : null}
-              {hasInjectedPrompt ? (
-                <span
-                  className="softBox"
-                  title="这一轮开始进入了带有自动注入提示词的新阶段，展开后可查看注入文本。"
-                  style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}
-                >
-                  已注入提示词
-                </span>
-              ) : null}
-              {hasVoteResult ? (
-                <span
-                  className="softBox"
-                  title="这一轮已有可查看的官方投票结果。"
-                  style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}
-                >
-                  有投票结果
-                </span>
-              ) : null}
-            </summary>
-            {isOpen ? (
-              <div className="stack" style={{ marginTop: 10 }}>
-                {phase ? (
-                  <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <span className="muted">阶段：{phase.title}</span>
-                    {phase.description ? <span className="muted">· {phase.description}</span> : null}
-                    {hasInjectedPrompt ? (
-                      <button
-                        type="button"
-                        className="btn"
-                        title="查看这一阶段自动注入到运行时 Prompt 的文本"
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          if (!phase?.injectedPrompt) return;
-                          setInjectedPromptDialog({
-                            round,
-                            phaseTitle: phase.title,
-                            prompt: phase.injectedPrompt
-                          });
-                        }}
-                      >
-                        查看注入提示词
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
-                {votePathsByRound[round] ? (
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => {
-                      setActiveTurnId("");
-                      setActiveVoteRound(round);
-                      void loadVoteRound(round);
-                    }}
-                    style={{
-                      textAlign: "left",
-                      borderColor:
-                        selectedViewerKey === `__vote_round_${round}` ? "rgba(38, 99, 235, 0.55)" : undefined,
-                      background:
-                        selectedViewerKey === `__vote_round_${round}` ? "rgba(38, 99, 235, 0.08)" : undefined
-                    }}
-                  >
-                    <span>投票结果</span>
-                    <span className="muted"> · 汇总</span>
-                  </button>
-                ) : null}
-                {roundTurns.map((turn) => {
-                  const active = selectedViewerKey === turn.id;
-                  return (
-                    <button
-                      key={turn.id}
-                      type="button"
-                      className="btn"
-                      onClick={() => {
-                        setActiveVoteRound(null);
-                        setActiveTurnId(turn.id);
-                      }}
-                      style={{
-                        textAlign: "left",
-                        borderColor: active ? "rgba(38, 99, 235, 0.55)" : undefined,
-                        background: active ? "rgba(38, 99, 235, 0.08)" : undefined
-                    }}
-                  >
-                    <span>
-                        {(() => {
-                          const turnInRound = ((turn.turnNumber - 1) % agentCount) + 1;
-                          const seat = turn.seatNumber ? `Seat-${turn.seatNumber}` : "";
-                          return `#${turn.turnNumber} · 第 ${round} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${turn.agent.name}`;
-                        })()}
-                    </span>
-                    <span className="muted"> · {new Date(turn.createdAt).toLocaleTimeString()}</span>
-                  </button>
-                );
-              })}
-              </div>
-            ) : null}
-          </details>
-        );
-        })}
+        <div
+          ref={directoryScrollRef}
+          style={{ minHeight: 0, overflowY: "auto", flex: 1 }}
+          onScroll={(event) => setDirectoryScrollTop(event.currentTarget.scrollTop)}
+        >
+          {virtualRounds.topSpacer > 0 ? <div style={{ height: virtualRounds.topSpacer }} /> : null}
+          {virtualRounds.items.map(({ round, roundTurns, phase, hasInjectedPrompt, isCurrentPhaseRound, hasVoteResult }) => {
+            return (
+              <DebateRoundDirectoryItem
+                key={round}
+                round={round}
+                roundTurns={roundTurns}
+                agentCount={agentCount}
+                isOpen={Boolean(openRoundsByNumber[round])}
+                phase={phase}
+                hasInjectedPrompt={hasInjectedPrompt}
+                isCurrentPhaseRound={isCurrentPhaseRound}
+                hasVoteResult={hasVoteResult}
+                selectedViewerKey={selectedViewerKey}
+                votePath={votePathsByRound[round]}
+                onToggleRound={handleToggleDirectoryRound}
+                onOpenInjectedPrompt={handleOpenInjectedPromptDialog}
+                onOpenVoteRound={handleOpenVoteRound}
+                onSelectTurn={handleSelectDirectoryTurn}
+                onMeasuredHeight={handleDirectoryRoundHeight}
+              />
+            );
+          })}
+          {virtualRounds.bottomSpacer > 0 ? <div style={{ height: virtualRounds.bottomSpacer }} /> : null}
+        </div>
       </section>
     </div>
   );

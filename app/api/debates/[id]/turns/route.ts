@@ -29,9 +29,16 @@ export async function GET(
     const { id } = await context.params;
     const url = new URL(request.url);
     const after = toOptionalNonNegativeInt(url.searchParams.get("after"));
+    const before = toOptionalNonNegativeInt(url.searchParams.get("before"));
     const limit = toOptionalPositiveInt(url.searchParams.get("limit"));
-    const turns = await listDebateTurns(id, { afterTurnNumber: after ?? undefined, limit: limit ?? undefined });
-    return NextResponse.json({ success: true, data: turns });
+    const mode = url.searchParams.get("mode") === "full" ? "full" : "summary";
+    const turns = await listDebateTurns(id, {
+      afterTurnNumber: after ?? undefined,
+      beforeTurnNumber: before ?? undefined,
+      limit: limit ?? undefined,
+      mode
+    });
+    return NextResponse.json({ success: true, data: turns.items, meta: { hasMore: turns.hasMore, mode } });
   } catch (error) {
     return toErrorResponse(error);
   }

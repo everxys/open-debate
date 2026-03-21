@@ -4,7 +4,7 @@ import MonacoEditor from "@monaco-editor/react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import type { CSSProperties, MouseEvent as ReactMouseEvent, MutableRefObject } from "react";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Tree, type NodeApi } from "react-arborist";
 
 import { useAutoDismissToast } from "@/components/ui/use-toast";
@@ -166,7 +166,7 @@ export default function AgentFilesPage() {
     moveFile: () => {}
   });
 
-  async function load() {
+  const load = useCallback(async () => {
     if (!id) return;
     const [agentRes, filesRes] = await Promise.all([
       fetch(`/api/agents/${id}`),
@@ -191,11 +191,11 @@ export default function AgentFilesPage() {
     setTabs([]);
     setActivePath("");
     resetTree(nextFiles.map((file) => file.path));
-  }
+  }, [id, resetTree, showToast]);
 
   useEffect(() => {
     void load();
-  }, [id]);
+  }, [load]);
 
   const displayFiles = useMemo(() => files.filter((file) => !isInternalDirMarker(file.path)), [files]);
 

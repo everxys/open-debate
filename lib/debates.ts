@@ -884,46 +884,142 @@ export async function listDebateTurns(
   id: string,
   options?: {
     afterTurnNumber?: number;
+    beforeTurnNumber?: number;
     limit?: number;
+    mode?: "summary" | "full";
   }
 ) {
   const session = await requireSessionUser();
   const { debate } = await getDebateForView(id, session.userId);
   const afterRaw = options?.afterTurnNumber ?? null;
   const afterTurnNumber = typeof afterRaw === "number" && Number.isFinite(afterRaw) && afterRaw >= 0 ? Math.floor(afterRaw) : null;
+  const beforeRaw = options?.beforeTurnNumber ?? null;
+  const beforeTurnNumber =
+    typeof beforeRaw === "number" && Number.isFinite(beforeRaw) && beforeRaw > 0 ? Math.floor(beforeRaw) : null;
   const limitRaw = options?.limit ?? null;
-  const limit = typeof limitRaw === "number" && Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : null;
+  const requestedLimit = typeof limitRaw === "number" && Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : null;
+  const limit = requestedLimit ? Math.min(requestedLimit, 500) : null;
+  const mode = options?.mode === "full" ? "full" : "summary";
+  const previewChars = 220;
+  const isBackfill = beforeTurnNumber !== null;
+  const countResult = await query<{ count: number }>(
+    "select count(*)::int as count from debate_agents where debate_id = $1",
+    [debate.id]
+  );
+  const participantCount = Math.max(1, Number(countResult.rows[0]?.count ?? 0) || 1);
   const turnRows = await query<Record<string, unknown>>(
     `
       select t.*,
              coalesce(da.display_name, a.name) as agent_name,
-             a.provider as agent_provider
+             a.provider as agent_provider,
+             left(t.content, $4::int) as content_preview,
+             char_length(t.content) as content_length,
+             (t.structured_output is not null) as has_structured_output
         from debate_turns t
         join ai_agents a on a.id = t.ai_agent_id
         left join debate_agents da on da.id = t.debate_agent_id
        where t.debate_id = $1
          and ($2::int is null or t.turn_number > $2::int)
-       order by t.turn_number asc
-       ${limit ? "limit $3::int" : ""}
+         and ($3::int is null or t.turn_number < $3::int)
+       order by t.turn_number ${isBackfill ? "desc" : "asc"}
+       ${limit ? `limit $5::int` : ""}
     `,
-    limit ? [debate.id, afterTurnNumber, limit] : [debate.id, afterTurnNumber]
+    limit
+      ? [debate.id, afterTurnNumber, beforeTurnNumber, previewChars, limit + 1]
+      : [debate.id, afterTurnNumber, beforeTurnNumber, previewChars]
   );
 
-  return turnRows.rows.map((turn) => ({
-    id: String(turn.id),
-    turnNumber: Number(turn.turn_number),
-    content: String(turn.content),
-    structuredOutput: (turn.structured_output as Record<string, unknown> | null) ?? null,
-    parseStatus: String(turn.parse_status),
-    tokenUsed: Number(turn.token_used),
-    createdAt: String(turn.created_at),
-    debateAgentId: turn.debate_agent_id ? String(turn.debate_agent_id) : null,
-    seatNumber: turn.seat_number === null || turn.seat_number === undefined ? null : Number(turn.seat_number),
+  let rows = turnRows.rows;
+  const hasMore = limit ? rows.length > limit : false;
+  if (limit && rows.length > limit) rows = rows.slice(0, limit);
+  if (isBackfill) rows = rows.reverse();
+
+  const items = rows.map((turn) => {
+    const turnNumber = Number(turn.turn_number);
+    const roundNumber = Math.floor((turnNumber - 1) / participantCount) + 1;
+    const base = {
+      id: String(turn.id),
+      turnNumber,
+      roundNumber,
+      preview: String(turn.content_preview ?? ""),
+      contentLength: Number(turn.content_length ?? 0),
+      hasStructuredOutput: Boolean(turn.has_structured_output),
+      parseStatus: String(turn.parse_status),
+      tokenUsed: Number(turn.token_used),
+      createdAt: String(turn.created_at),
+      debateAgentId: turn.debate_agent_id ? String(turn.debate_agent_id) : null,
+      seatNumber: turn.seat_number === null || turn.seat_number === undefined ? null : Number(turn.seat_number),
+      agent: {
+        name: turn.agent_name ? String(turn.agent_name) : "Unknown",
+        provider: turn.agent_provider ? String(turn.agent_provider) : "openai"
+      }
+    };
+    if (mode === "summary") return base;
+    return {
+      ...base,
+      content: String(turn.content),
+      structuredOutput: (turn.structured_output as Record<string, unknown> | null) ?? null
+    };
+  });
+
+  return {
+    items,
+    hasMore
+  };
+}
+
+export async function getDebateTurnDetail(id: string, turnNumber: number) {
+  const session = await requireSessionUser();
+  const { debate } = await getDebateForView(id, session.userId);
+  if (!Number.isFinite(turnNumber) || turnNumber <= 0) {
+    throw new AppError("VALIDATION_ERROR", 400, "Invalid turn number");
+  }
+  const safeTurnNumber = Math.max(1, Math.floor(turnNumber));
+  const countResult = await query<{ count: number }>(
+    "select count(*)::int as count from debate_agents where debate_id = $1",
+    [debate.id]
+  );
+  const participantCount = Math.max(1, Number(countResult.rows[0]?.count ?? 0) || 1);
+  const result = await query<Record<string, unknown>>(
+    `
+      select t.*,
+             coalesce(da.display_name, a.name) as agent_name,
+             a.provider as agent_provider,
+             left(t.content, $3::int) as content_preview,
+             char_length(t.content) as content_length,
+             (t.structured_output is not null) as has_structured_output
+        from debate_turns t
+        join ai_agents a on a.id = t.ai_agent_id
+        left join debate_agents da on da.id = t.debate_agent_id
+       where t.debate_id = $1
+         and t.turn_number = $2
+       limit 1
+    `,
+    [debate.id, safeTurnNumber, 220]
+  );
+  if ((result.rowCount ?? 0) !== 1) {
+    throw new AppError("NOT_FOUND", 404, "Turn not found");
+  }
+  const row = result.rows[0];
+  return {
+    id: String(row.id),
+    turnNumber: safeTurnNumber,
+    roundNumber: Math.floor((safeTurnNumber - 1) / participantCount) + 1,
+    preview: String(row.content_preview ?? ""),
+    contentLength: Number(row.content_length ?? 0),
+    hasStructuredOutput: Boolean(row.has_structured_output),
+    content: String(row.content),
+    structuredOutput: (row.structured_output as Record<string, unknown> | null) ?? null,
+    parseStatus: String(row.parse_status),
+    tokenUsed: Number(row.token_used),
+    createdAt: String(row.created_at),
+    debateAgentId: row.debate_agent_id ? String(row.debate_agent_id) : null,
+    seatNumber: row.seat_number === null || row.seat_number === undefined ? null : Number(row.seat_number),
     agent: {
-      name: turn.agent_name ? String(turn.agent_name) : "Unknown",
-      provider: turn.agent_provider ? String(turn.agent_provider) : "openai"
+      name: row.agent_name ? String(row.agent_name) : "Unknown",
+      provider: row.agent_provider ? String(row.agent_provider) : "openai"
     }
-  }));
+  };
 }
 
 export type DebateAllFileEntry =

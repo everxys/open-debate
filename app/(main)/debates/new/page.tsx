@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 
@@ -88,7 +88,7 @@ export default function NewDebatePage() {
     return `row_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   }
 
-  async function loadAgents() {
+  const loadAgents = useCallback(async () => {
     const response = await fetch("/api/agents");
     const payload = await response.json();
     if (!response.ok) {
@@ -96,16 +96,16 @@ export default function NewDebatePage() {
       return;
     }
     setAgents(payload.data ?? []);
-  }
+  }, [showToast]);
 
-  async function loadStrategies() {
+  const loadStrategies = useCallback(async () => {
     const response = await fetch("/api/strategies?scope=mine");
     const payload = await response.json();
     if (!response.ok) {
       return;
     }
     setStrategies(payload.data ?? []);
-  }
+  }, []);
 
   async function loadStrategyDetail(id: string) {
     if (!id) {
@@ -196,7 +196,7 @@ export default function NewDebatePage() {
   useEffect(() => {
     void loadAgents();
     void loadStrategies();
-  }, []);
+  }, [loadAgents, loadStrategies]);
 
   useEffect(() => {
     const id = searchParams.get("strategyId") ?? "";

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 
@@ -55,7 +55,7 @@ export default function StrategiesPage() {
 
   const items = useMemo(() => (scope === "mine" ? mine : shared), [scope, mine, shared]);
 
-  async function load(target: "mine" | "shared") {
+  const load = useCallback(async (target: "mine" | "shared") => {
     let response: Response;
     try {
       response = await fetch(`/api/strategies?scope=${target}`);
@@ -73,12 +73,12 @@ export default function StrategiesPage() {
 
     if (target === "mine") setMine(payload.data ?? []);
     else setShared(payload.data ?? []);
-  }
+  }, [showToast]);
 
   useEffect(() => {
     void load("mine");
     void load("shared");
-  }, []);
+  }, [load]);
 
   async function toggleShare(id: string) {
     if (isBusyId) return;

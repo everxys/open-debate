@@ -1,5 +1,23 @@
 ## 2026-03-21
 
+- 辩论页初始化请求收敛：`loadWorkflowRules` 不再依赖自身 `loading` 状态重建，避免初始化 effect 被反复触发，间接导致 `workflow.json` 与 `question/history.json` 在进入页面时连续重复请求
+- 辩论页 workflow 面板修复：`workflow` 栏改成“头部固定 + 内容区独立滚动”，不再因为左侧父容器 `overflow: hidden` 导致长规则 Markdown 被直接裁掉
+- 小说策略表达风格收紧：在 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 之外，继续把“尽量说人话、不要空泛大词、提到点子必须展开讲清机制与后果、禁止只报结论不解释过程”的约束同步补进 `docker/seed_democratic_centralism_strategy.sql` 的 `openingPrompt`、`Phase 1`、`Phase 3` 注入提示词，让新导入的策略在实际辩论中也会少说黑话、少做一句话点子汇报
+- 辩论页 turns 索引继续内聚：将最近窗口里的 `summaries / byId / roundGroups / latest` 收成统一的 `TurnWindowState`，并通过 `updateTurnWindow()` 在摘要变更时一次性重建，避免页面其余部分再基于 `turnSummaries` 额外 `useMemo` 整批派生这些索引，进一步降低长辩论下的重复重算与临时对象分配
+- 记忆文件查看继续降驻留：辩论页记忆弹窗新增统一 `closeMemoryDialog`，关闭时会立即释放 `memoryContent / path / truncation / maxChars / target` 等大状态；切换记忆文件或切片方向时也会先 abort 旧请求，并用请求 token 防止旧响应回填，减少大字符串在前端 state 里的无意义驻留与竞态覆盖
+- 下载路由继续降峰值：`/api/debates/[id]/download` 不再先把所有选中文件正文整批查出并放进 `contentByVirtualPath / zipEntries`，而是保留排序后的文件元数据；单文件下载时按需读取这一条，多文件 zip 输出时也改成逐文件读取、逐文件写入流，进一步降低大文件/多文件下载时的服务端内存驻留峰值
+- 辩论页轮询降级为 SSE fallback：不再在进入详情页后常驻每 1.5 秒整场 `loadDebate()` 刷新；现在优先依赖 SSE 事件推进实时状态，并在 `turn_end` / 连接报错时主动刷新一次；只有 SSE 断开或超过阈值时间未收到事件时，才会以低频 fallback 轮询兜底，进一步减少长辩论下的无效请求、对象重建与前端内存压力
+- 诊断结果读取继续瘦身：新增 `/api/debates/[id]/turns/[turnNumber]/diagnostics` 单条诊断接口，辩论页“查看诊断结果”不再整份拉取 `context/generation_diagnostics.jsonl` 到浏览器再本地 split / parse / reverse，而是按 turnNumber 直接读取对应记录，进一步降低长辩论下诊断弹窗的前端内存占用
+- 辩论详情页继续瘦身：把“生成诊断 / 保存成功 / 问题放大查看 / 问题历史与对比 / 记忆文件查看”几块大弹窗抽成独立组件 `DiagnosticsDialog`、`SaveSuccessDialog`、`QuestionZoomDialog`、`QuestionHistoryDialog`、`MemoryDialog`，同时把问题 diff 行类型提为独立 `QuestionDiffRow`，进一步降低 `app/(main)/debates/[id]/page.tsx` 主渲染区复杂度
+- 辩论页 turns 窗口化：`/api/debates/[id]/turns` 现在支持 `before / after / limit / mode=summary|full`，默认返回轻量摘要并带 `hasMore`；新增 `/api/debates/[id]/turns/[turnNumber]` 按需拉取单条完整正文；辩论页改为常驻最近窗口摘要、旧记录分页回放、正文按需加载，并在发言目录中显示摘要预览，降低长辩论下的前端内存与重算压力
+- 发言目录进一步窗口化：辩论页右侧“发言目录”改成独立滚动区域，并只渲染当前滚动窗口附近的轮次，远处轮次用占位高度顶住；配合已有摘要化数据流，继续压低长辩论下的 DOM 数量与浏览器内存占用
+- 辩论页 turns 状态收口：新增按 `id` / `round` 的索引化派生结构，目录选中当前发言时不再反复全量线性查找；同时移除无意义的“最新已加载 turn”窗口状态，进一步减少长辩论下的页面重算与状态噪音
+- 发言目录虚拟化加强：右侧目录轮次项抽成可复用组件，并通过 `ResizeObserver` 记录每个轮次块的真实高度参与窗口计算，不再只靠固定估算值顶 spacer；长辩论下滚动定位和目录开合后的占位会更稳定
+- 正文详情缓存优化：中间栏按需读取的 turn detail 缓存改成显式 LRU 顺序，查看过的旧发言会提升保留优先级，不再仅按 turnNumber 粗暴截断；在长辩论里来回切换旧正文时更不容易反复重新请求
+- 辩论详情页 hooks 收口：`loadDebate / loadQuestionVersionMeta / loadWorkflowRules / loadAllFilesIndex / refreshQuestionDiff / ensureTurnDetail` 等核心加载函数改为稳定回调，相关 `useEffect` 依赖同步补齐；`app/(main)/debates/[id]/page.tsx` 这页自身的 `react-hooks/exhaustive-deps` warning 已清零
+- hooks warning 全量清零：继续把 `agents`、`agent files`、`new debate`、`strategies`、`strategy detail` 等页面里的加载函数收成 `useCallback` 并补齐 effect 依赖；`npm run lint` 现已无任何 ESLint warning 或 error
+- 辩论详情页继续拆分：把中间栏“发言内容 / 实时输出 / 投票结果 / 正文加载中”整块条件渲染抽成独立组件 `DebateViewerPanel`，同时把投票结果 Markdown 生成提为顶层 helper，主页面渲染区进一步瘦身
+- 内存风险收敛：下载路由不再先把整个 ZIP `Buffer.concat` 到内存里，而是改为边遍历边流式输出，降低大文件/多文件下载时的峰值内存；同时辩论页实时 SSE 订阅不再依赖 `liveMessageNumber` 反复重建连接，改为稳定订阅 + ref 比较当前 turn，减少长会话下的连接抖动与前端内存压力
 - 小说神作模式继续补强“广泛跨学科 + 主场学科”规则：在 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 与 `docker/seed_democratic_centralism_strategy.sql` 中明确，核心天才不应是只会一门学科的窄专家，而应普遍具备广泛跨学科能力；同时每位核心天才仍需拥有 1-2 个压倒性的主场学科或主场方法论，用来形成真正鲜明的压制方式与角色辨识度
 - 小说神作模式补回交叉学科与前沿科学：在 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 与 `docker/seed_democratic_centralism_strategy.sql` 的开局提示词、Phase 1、Phase 3 中，重新明确要求主动吸收行为经济学、认知科学、计算社会科学、复杂系统、控制论、运筹学、人工智能安全、分布式系统、网络安全、量子信息、合成生物学、脑机接口、神经工程、材料科学、纳米技术、机器人学、计算复杂性理论、科技伦理、赛博法学等交叉学科与前沿科学
 - 小说神作模式学科武器库升级为“三层结构”：把刚才补充过的传统学科、交叉学科、前沿科学统一整理成“核心层 / 增强层 / 杀手锏层”，并同步写入 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 与 `docker/seed_democratic_centralism_strategy.sql`，要求后续智斗设计遵循“核心层打底、增强层互锁、杀手锏层少量精准引爆”

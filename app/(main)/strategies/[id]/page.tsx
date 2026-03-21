@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { RoleFilesManagerColumns } from "@/components/strategies/role-files-manager";
 import { useAutoDismissToast } from "@/components/ui/use-toast";
@@ -101,7 +101,7 @@ export default function StrategyDetailPage() {
   const [workflowPhasePromptsSaving, setWorkflowPhasePromptsSaving] = useState(false);
   const [workflowPromptDialog, setWorkflowPromptDialog] = useState<WorkflowPromptDialogState>(null);
 
-  async function load() {
+  const load = useCallback(async () => {
     if (!id) return;
     const response = await fetch(`/api/strategies/${id}`);
     const payload = await readPayload(response);
@@ -152,11 +152,11 @@ export default function StrategyDetailPage() {
     } finally {
       setWorkflowPhasePromptsLoading(false);
     }
-  }
+  }, [id, showToast]);
 
   useEffect(() => {
     void load();
-  }, [id]);
+  }, [load]);
 
   async function toggleFavorite() {
     if (!detail || detail.canEdit) return;
