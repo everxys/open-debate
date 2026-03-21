@@ -5,7 +5,11 @@ import { query } from "@/lib/db";
 import { emitDebateLiveEvent, setDebateLiveProgress, clearDebateLiveProgress } from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
 import type { AgentRecord, DebateRecord, DebateTurnRecord, StructuredOutput } from "@/lib/types";
-import { safeParseWorkflowJson, type NormalizedDebateWorkflow } from "@/lib/workflow";
+import {
+  formatRequiredDeliverableSummary,
+  safeParseWorkflowJson,
+  type NormalizedDebateWorkflow
+} from "@/lib/workflow";
 
 const activeDebates = new Set<string>();
 const MAX_TOOL_ROUNDS = 3;
@@ -295,7 +299,7 @@ async function appendContextUsageLogAndUpdateTotals(input: {
       ? Math.floor(Number(baselineRow.baselineCumulativePromptTokens))
       : Number.NaN;
   if (!Number.isFinite(baselineCumulativePromptTokens) || baselineCumulativePromptTokens < 0) {
-    baselineCumulativePromptTokens = cumulativePromptTokens;
+    baselineCumulativePromptTokens = baseCumulative;
     const nextBaselineBy = { ...baselineBy };
     nextBaselineBy[input.debateAgentId] = {
       sessionId,
@@ -824,6 +828,10 @@ function parseResponse(raw: string): {
   return { content: raw, structuredOutput: null, parseStatus: "ok" as const };
 }
 
+function buildElectionVoteOnlyContent() {
+  return ["## 选举投票", "", "本轮为角色选举投票轮。本席位仅完成投票，不发表额外意见。"].join("\n");
+}
+
 function buildDemoResponse(debate: DebateRecord, agent: AgentRecord, turnNumber: number) {
   const position = turnNumber % 2 === 0 ? "倾向方案 A" : "倾向方案 B";
   const excerpt = debate.question.slice(0, 28).replace(/\s+/g, " ").trim();
@@ -848,7 +856,19 @@ function buildBaseSystemPrompt(_agent: AgentRecord, overrideSystemPrompt?: strin
   return overrideSystemPrompt ?? "You are a rigorous debate participant.";
 }
 
-function buildFileToolInstructions(input: { enableVoting: boolean }) {
+function buildFileToolInstructions(input: {
+  enableVoting: boolean;
+  allowedOutputPaths: string[];
+  requiredFiles: Array<{
+    path: string;
+    ownerRole: string | null;
+    description: string | null;
+    minChars: number | null;
+    minMarkdownHeadings: number | null;
+    requiredSnippets: string[];
+  }>;
+}) {
+  const allowedPathsText = input.allowedOutputPaths.length > 0 ? input.allowedOutputPaths.join(", ") : "final/, outputs/";
   const lines = [
     "You can use tools to read per-agent files.",
     "Use them only when needed to get extra context or constraints.",
@@ -856,8 +876,19 @@ function buildFileToolInstructions(input: { enableVoting: boolean }) {
     "",
     "You also have an output tool:",
     "- debate_files_write: write a debate-level file (use for final deliverables).",
-    "  - Allowed paths: final/* or outputs/* (Markdown preferred).",
+    `  - Allowed paths: ${allowedPathsText} (Markdown preferred).`,
   ];
+
+  if (input.requiredFiles.length > 0) {
+    lines.push("  - Required deliverables:");
+    for (const file of input.requiredFiles) {
+      lines.push(`    - ${formatRequiredDeliverableSummary(file, "plain")}`);
+      if (file.requiredSnippets.length > 0) {
+        lines.push(`      - required structure: ${file.requiredSnippets.join(" / ")}`);
+      }
+    }
+    lines.push("  - The debate is not complete until every required deliverable has been written.");
+  }
 
   if (input.enableVoting) {
     lines.push("");
@@ -870,12 +901,56 @@ function buildFileToolInstructions(input: { enableVoting: boolean }) {
   return lines.join("\n");
 }
 
-function buildResponseFormatInstructions() {
-  return [
-    "Output must be readable Markdown for humans.",
-    "Do not output raw JSON objects.",
-    "If you were about to output JSON, rewrite it into headings and bullet points instead."
-  ].join("\n");
+function buildResponseFormatInstructions(input?: {
+  requireMarkdown?: boolean;
+  forbidRawJson?: boolean;
+}) {
+  const lines: string[] = [];
+  if (input?.requireMarkdown !== false) {
+    lines.push("Output must be readable Markdown for humans.");
+  }
+  if (input?.forbidRawJson !== false) {
+    lines.push("Do not output raw JSON objects.");
+    lines.push("If you were about to output JSON, rewrite it into headings and bullet points instead.");
+  }
+  return lines.join("\n");
+}
+
+function appendWorkflowSummaryLines(lines: string[], workflow: NormalizedDebateWorkflow | null) {
+  lines.push("## Workflow (summary)");
+  if (!workflow?.enabled) {
+    lines.push("- disabled (no workflow.json or enabled=false)");
+    return;
+  }
+
+  lines.push(`- version: v${workflow.workflowVersion}`);
+  lines.push(`- election startRound: ${workflow.election.startRound}`);
+  lines.push(
+    `- phase transitions: election@round ${workflow.phaseMachine.transitionRules.election.startRound}; election autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}`
+  );
+  lines.push(
+    `- phase finalization: onConsensus=${workflow.phaseMachine.transitionRules.finalization.enterOnConsensus ? "yes" : "no"}; onCustomVote=${workflow.phaseMachine.transitionRules.finalization.enterOnCustomVote ? "yes" : "no"}; requirePhaseForCompletion=${workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "yes" : "no"}`
+  );
+  lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
+  const first = workflow.election.speakingOrder.firstRole;
+  const last = workflow.election.speakingOrder.lastRole;
+  lines.push(`- speakingOrder (after election, next-round boundary): first=${first ?? "(none)"}; last=${last ?? "(none)"}`);
+  if (workflow.deliverables.requiredFiles.length > 0) {
+    lines.push("- required deliverables:");
+    for (const file of workflow.deliverables.requiredFiles) {
+      lines.push(`  - ${formatRequiredDeliverableSummary(file, "plain")}`);
+    }
+  }
+  if (workflow.seatOrderRules.length === 0) {
+    lines.push("- seatOrderRules: (none)");
+    return;
+  }
+  lines.push("- seatOrderRules:");
+  for (const rule of workflow.seatOrderRules) {
+    lines.push(
+      `  - afterRound=${rule.afterRound}: ${rule.policy.type}${rule.policy.type === "rotate" ? ` offset=${rule.policy.offset}` : ""}`
+    );
+  }
 }
 
 function resolveChatUrl(agent: AgentRecord) {
@@ -1339,7 +1414,12 @@ type OfficialVote =
         reason?: string;
         at: string;
       }>;
-      meta?: { forcedOpen?: boolean; reason?: string };
+      meta?: {
+        forcedOpen?: boolean;
+        reason?: string;
+        tieRound?: number;
+        reopenedBecause?: string;
+      };
       createdAt: string;
     }
   | {
@@ -1357,7 +1437,12 @@ type OfficialVote =
         reason?: string;
         at: string;
       }>;
-      meta?: { forcedOpen?: boolean; reason?: string };
+      meta?: {
+        forcedOpen?: boolean;
+        reason?: string;
+        tieRound?: number;
+        reopenedBecause?: string;
+      };
       createdAt: string;
     }
   | {
@@ -1366,7 +1451,12 @@ type OfficialVote =
       roundNumber: number;
       title: string;
       result: Record<string, unknown>;
-      meta?: { forcedOpen?: boolean; reason?: string };
+      meta?: {
+        forcedOpen?: boolean;
+        reason?: string;
+        tieRound?: number;
+        reopenedBecause?: string;
+      };
       closedAt: string;
       createdAt: string;
     }
@@ -1377,7 +1467,12 @@ type OfficialVote =
       title: string;
       prompt: string;
       result: Record<string, unknown>;
-      meta?: { forcedOpen?: boolean; reason?: string };
+      meta?: {
+        forcedOpen?: boolean;
+        reason?: string;
+        tieRound?: number;
+        reopenedBecause?: string;
+      };
       closedAt: string;
       createdAt: string;
     };
@@ -1397,7 +1492,163 @@ async function loadDebateWorkflow(userId: string, debateId: string): Promise<Nor
 
 function isOfficialVotingAllowed(workflow: NormalizedDebateWorkflow | null, roundNumber: number) {
   if (!workflow?.enabled) return false;
-  return roundNumber >= workflow.election.startRound;
+  return roundNumber >= getWorkflowElectionStartRound(workflow);
+}
+
+function getWorkflowElectionStartRound(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return 1;
+  return workflow.phaseMachine.transitionRules.election.startRound;
+}
+
+function shouldEnterWorkflowFinalization(input: {
+  workflow: NormalizedDebateWorkflow | null;
+  consensusReached: boolean;
+  roundNumber: number;
+  openVote: OfficialVote | null;
+}) {
+  if (!input.workflow?.enabled) return false;
+  if (input.roundNumber < getWorkflowElectionStartRound(input.workflow)) return false;
+  const rules = input.workflow.phaseMachine.transitionRules.finalization;
+  if (rules.enterOnCustomVote && input.openVote?.kind === "custom") return true;
+  if (rules.enterOnConsensus && input.consensusReached) return true;
+  return false;
+}
+
+function shouldAutoOpenWorkflowElectionAtBoundary(
+  workflow: NormalizedDebateWorkflow | null,
+  endedRound: number
+) {
+  if (!workflow?.enabled) return false;
+  const electionRules = workflow.phaseMachine.transitionRules.election;
+  return electionRules.autoOpen && endedRound === electionRules.startRound - 1;
+}
+
+async function listMissingRequiredDeliverables(input: {
+  userId: string;
+  debateId: string;
+  workflow: NormalizedDebateWorkflow | null;
+}) {
+  const requiredFiles = input.workflow?.deliverables.requiredFiles ?? [];
+  if (requiredFiles.length <= 0) return [];
+  try {
+    const requiredPaths = requiredFiles.map((file) => file.path);
+    const result = await query<{ path: string; content: string; content_length: number }>(
+      `
+        select f.path,
+               coalesce(f.content, '') as content,
+               length(trim(coalesce(f.content, '')))::int as content_length
+          from debate_files f
+          join debates d on d.id = f.debate_id
+         where f.debate_id = $1
+           and d.user_id = $2
+           and f.path = any($3::text[])
+      `,
+      [input.debateId, input.userId, requiredPaths]
+    );
+    const contentByPath = new Map(
+      result.rows.map((row) => [
+        String(row.path),
+        {
+          content: String(row.content ?? ""),
+          contentLength: Number(row.content_length ?? 0)
+        }
+      ] as const)
+    );
+    return requiredFiles.filter((file) => {
+      const payload = contentByPath.get(file.path) ?? { content: "", contentLength: 0 };
+      if (payload.contentLength <= 0) return true;
+      if (file.minChars && payload.contentLength < file.minChars) return true;
+      if (file.minMarkdownHeadings) {
+        const headingCount = payload.content
+          .split(/\r?\n/)
+          .filter((line) => /^\s{0,3}#{1,6}\s+\S/.test(line))
+          .length;
+        if (headingCount < file.minMarkdownHeadings) return true;
+      }
+      if (file.requiredSnippets.length > 0) {
+        const normalizedContent = payload.content.toLowerCase();
+        const missingSnippet = file.requiredSnippets.some((snippet) => !normalizedContent.includes(snippet.toLowerCase()));
+        if (missingSnippet) return true;
+      }
+      return false;
+    });
+  } catch (error) {
+    if (getPgErrorCode(error) === "42P01") return requiredFiles;
+    throw error;
+  }
+}
+
+function resolveCurrentWorkflowPhase(input: {
+  workflow: NormalizedDebateWorkflow | null;
+  consensusReached: boolean;
+  roundNumber: number;
+  openVote: OfficialVote | null;
+}) {
+  const phases = input.workflow?.phaseMachine.phases ?? [];
+  const byKind = new Map(phases.map((phase) => [phase.kind, phase] as const));
+  if (!input.workflow?.enabled) return null;
+  if (input.openVote?.kind === "election") return byKind.get("election") ?? null;
+  if (shouldEnterWorkflowFinalization(input)) {
+    return byKind.get("finalization") ?? null;
+  }
+  if (input.roundNumber < getWorkflowElectionStartRound(input.workflow)) {
+    return byKind.get("analysis") ?? null;
+  }
+  return byKind.get("deliberation") ?? null;
+}
+
+function buildWorkflowPhaseInline(input: {
+  workflow: NormalizedDebateWorkflow | null;
+  debate: DebateRecord;
+  roundNumber: number;
+  openVote: OfficialVote | null;
+}) {
+  const current = resolveCurrentWorkflowPhase({
+    workflow: input.workflow,
+    consensusReached: Boolean(input.debate.consensusReached),
+    roundNumber: input.roundNumber,
+    openVote: input.openVote
+  });
+  if (!current) return null;
+  const lines = [
+    "Workflow phase (IMPORTANT):",
+    `- Current phase: ${current.title}`,
+    `- Phase kind: ${current.kind}`
+  ];
+  if (current.description) lines.push(`- Goal: ${current.description}`);
+  const allPhases = input.workflow?.phaseMachine.phases ?? [];
+  if (allPhases.length > 0) {
+    lines.push("- Full phase machine:");
+    for (const phase of allPhases) {
+      lines.push(`  - ${phase.title}${phase.description ? `: ${phase.description}` : ""}`);
+    }
+  }
+  const requiredDeliverables = input.workflow?.deliverables.requiredFiles ?? [];
+  if (requiredDeliverables.length > 0) {
+    lines.push("- Completion gate: the debate cannot finish until all required deliverables are written.");
+  }
+  return lines.join("\n");
+}
+
+async function loadDebatePhaseState(input: { userId: string; debateId: string }) {
+  const result = await query<{ current_turn: number; consensus_reached: boolean; status: string }>(
+    `
+      select current_turn, consensus_reached, status
+        from debates
+       where id = $1
+         and user_id = $2
+       limit 1
+    `,
+    [input.debateId, input.userId]
+  );
+  if ((result.rowCount ?? 0) !== 1) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+  return {
+    currentTurn: Number(result.rows[0].current_turn ?? 0),
+    consensusReached: Boolean(result.rows[0].consensus_reached),
+    status: String(result.rows[0].status ?? "")
+  };
 }
 
 function rotateOrder<T>(items: T[], offset: number) {
@@ -1516,6 +1767,7 @@ async function loadOpenVoteInline(userId: string, debateId: string, seed?: strin
       "OFFICIAL VOTE (OPEN): Election",
       `- Title: ${open.title}`,
       `- Round: ${open.roundNumber}`,
+      ...(open.meta?.tieRound ? [`- Tie round: ${open.meta.tieRound}`] : []),
       `- Roles:\n${roles || "- (none)"}`,
       `- Candidates:\n${candidates}`,
       "- How to vote: call tool debate_vote_cast with { selections: { RoleA: 'Seat-X', RoleB: 'Seat-Y' }, reason?: '...' }",
@@ -1529,6 +1781,7 @@ async function loadOpenVoteInline(userId: string, debateId: string, seed?: strin
     "OFFICIAL VOTE (OPEN): Custom",
     `- Title: ${open.title}`,
     `- Round: ${open.roundNumber}`,
+    ...(open.meta?.tieRound ? [`- Tie round: ${open.meta.tieRound}`] : []),
     `- Prompt: ${open.prompt}`,
     `- Options:\n${options}`,
     "- How to vote: call tool debate_vote_cast with { choice: '...', reason?: '...' }",
@@ -1627,12 +1880,13 @@ async function toolVoteOpen(input: {
 }) {
   const now = new Date().toISOString();
   const workflow = await loadDebateWorkflow(input.userId, input.debateId);
+  const debateState = await loadDebatePhaseState({ userId: input.userId, debateId: input.debateId });
   const workflowEnabled = Boolean(workflow?.enabled);
   const allowWithoutWorkflow = Boolean(input.allowWithoutWorkflow) && input.kind === "custom";
   if (!workflowEnabled && !allowWithoutWorkflow) {
     return { ok: false, error: "Official voting is disabled (missing workflow.json or enabled=false)." };
   }
-  const startRound = workflowEnabled ? workflow.election.startRound : 1;
+  const startRound = workflowEnabled ? getWorkflowElectionStartRound(workflow) : 1;
   if (workflowEnabled && input.roundNumber < startRound && !input.bypassStartRound) {
     return {
       ok: false,
@@ -1643,6 +1897,12 @@ async function toolVoteOpen(input: {
   if (existing) {
     return { ok: false, error: "A vote is already open.", open: existing };
   }
+  const currentPhase = resolveCurrentWorkflowPhase({
+    workflow,
+    consensusReached: debateState.consensusReached,
+    roundNumber: input.roundNumber,
+    openVote: null
+  });
 
   if (input.kind === "election") {
     if (!workflowEnabled) {
@@ -1650,6 +1910,12 @@ async function toolVoteOpen(input: {
     }
     if ((workflow.election.roles ?? []).length <= 0) {
       return { ok: false, error: "Election vote is disabled: workflow.roles is empty." };
+    }
+    if (input.roundNumber !== startRound) {
+      return {
+        ok: false,
+        error: `Election vote is only allowed at ${startRound === 1 ? "Phase 2 start" : `Round ${startRound}`} in the current workflow.`
+      };
     }
     const participants = await query<Record<string, unknown>>(
       `
@@ -1684,6 +1950,12 @@ async function toolVoteOpen(input: {
   }
 
   const options = Array.isArray(input.options) ? input.options.map((x) => String(x).trim()).filter(Boolean) : [];
+  if (currentPhase?.kind !== "finalization") {
+    return {
+      ok: false,
+      error: `Custom/final vote is only allowed in Phase 4. Current phase: ${currentPhase?.title ?? "unknown"}.`
+    };
+  }
   if (!input.prompt || !input.prompt.trim()) {
     return { ok: false, error: "Custom vote requires prompt." };
   }
@@ -1724,7 +1996,7 @@ async function toolVoteCast(input: {
   if (!workflowEnabled && open.kind !== "custom") {
     return { ok: false, error: "Official voting is disabled (missing workflow.json or enabled=false)." };
   }
-  const startRound = workflowEnabled ? workflow.election.startRound : 1;
+  const startRound = workflowEnabled ? getWorkflowElectionStartRound(workflow) : 1;
   if (workflowEnabled && open.roundNumber < startRound && !forcedOpen) {
     return { ok: false, error: `Official voting starts from Round ${startRound}.` };
   }
@@ -1808,9 +2080,23 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
   if (!workflowEnabled && open.kind !== "custom") {
     return { ok: false, error: "Official voting is disabled (missing workflow.json or enabled=false)." };
   }
-  const startRound = workflowEnabled ? workflow.election.startRound : 1;
+  const startRound = workflowEnabled ? getWorkflowElectionStartRound(workflow) : 1;
   if (workflowEnabled && open.roundNumber < startRound && !forcedOpen) {
     return { ok: false, error: `Official voting starts from Round ${startRound}.` };
+  }
+  const voteGovernance = workflow?.voting.governance ?? {
+    tieBreaker: "revote" as const,
+    maxTieRounds: 2,
+    fallbackMode: "逻辑审核员" as string | null
+  };
+  const currentTieRound = Math.max(0, Math.floor(Number(open.meta?.tieRound) || 0));
+
+  function buildTieReopenMeta(reason: string) {
+    return {
+      ...(open.meta ?? {}),
+      tieRound: currentTieRound + 1,
+      reopenedBecause: reason
+    };
   }
 
   if (open.kind === "election") {
@@ -1839,7 +2125,7 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
         .filter(([seat]) => !exclude.has(seat))
         .map(([seat, count]) => ({ seat, count }));
       entries.sort((a, b) => b.count - a.count);
-      if (entries.length === 0) return null;
+      if (entries.length === 0) return { winner: null as string | null, tiedSeats: [] as string[] };
       const topCount = entries[0].count;
       const tied = entries.filter((e) => e.count === topCount).map((e) => e.seat);
       tied.sort((a, b) => {
@@ -1847,16 +2133,57 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
         const bi = Number(b.replace(/[^0-9]/g, "")) || 9999;
         return ai - bi;
       });
-      return tied[0];
+      const winner = voteGovernance.tieBreaker === "seat_order" ? tied[0] : tied.length === 1 ? tied[0] : null;
+      return { winner, tiedSeats: tied };
     }
 
     const winners: Record<string, string | null> = {};
     const usedSeats = new Set<string>();
+    const roleTies: Record<string, string[]> = {};
     for (const role of roles) {
       const counts = roleCounts.get(role) ?? new Map<string, number>();
-      const winner = pickWinner(counts, usedSeats);
+      const pick = pickWinner(counts, usedSeats);
+      const winner = pick.winner;
       winners[role] = winner;
+      if (pick.tiedSeats.length > 1 && !winner) roleTies[role] = pick.tiedSeats;
       if (winner) usedSeats.add(winner);
+    }
+
+    if (Object.keys(roleTies).length > 0 && voteGovernance.tieBreaker === "revote") {
+      if (currentTieRound >= voteGovernance.maxTieRounds) {
+        return {
+          ok: false,
+          error: `Election vote tied for ${Object.keys(roleTies).join(", ")} after ${currentTieRound} revote(s). Suggested fallback mode: ${voteGovernance.fallbackMode ?? "manual review"}.`,
+          tied: true,
+          roleTies
+        };
+      }
+
+      const reopened: OfficialVote = {
+        status: "open",
+        kind: "election",
+        roundNumber: open.roundNumber,
+        title: open.title,
+        roles: open.roles,
+        candidates: open.candidates,
+        ballots: [],
+        meta: buildTieReopenMeta("election_tie"),
+        createdAt: now
+      };
+      const tieSummary = Object.entries(roleTies)
+        .map(([role, seats]) => `- ${role}: ${seats.join(" / ")}`)
+        .join("\n");
+      const directive = [
+        "# 官方指令：本轮选举平票",
+        "",
+        "以下角色出现平票，当前不得直接任命：",
+        tieSummary,
+        "",
+        `要求：所有席位先补充新的观点/证据/取舍，再重新投票。${voteGovernance.fallbackMode ? `建议先切换到“${voteGovernance.fallbackMode}”模式补信息。` : ""}`
+      ].join("\n");
+      await upsertDebateFile(input.debateId, VOTE_DIRECTIVE_PATH, directive, now);
+      await upsertDebateFile(input.debateId, VOTE_OPEN_PATH, JSON.stringify(reopened, null, 2), now);
+      return { ok: true, reopened: true, tied: true, vote: reopened, directive };
     }
 
     const participants = await query<Record<string, unknown>>(
@@ -2023,7 +2350,49 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
   for (const ballot of open.ballots ?? []) {
     counts.set(ballot.choice, (counts.get(ballot.choice) ?? 0) + 1);
   }
-  const winner = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  const ranked = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  const topCount = ranked[0]?.[1] ?? null;
+  const tiedOptions = topCount === null ? [] : ranked.filter((item) => item[1] === topCount).map((item) => item[0]);
+  const winner =
+    voteGovernance.tieBreaker === "seat_order"
+      ? ranked[0]?.[0] ?? null
+      : tiedOptions.length === 1
+        ? tiedOptions[0]
+        : null;
+
+  if (tiedOptions.length > 1 && voteGovernance.tieBreaker === "revote") {
+    if (currentTieRound >= voteGovernance.maxTieRounds) {
+      return {
+        ok: false,
+        error: `Custom vote tied after ${currentTieRound} revote(s). Suggested fallback mode: ${voteGovernance.fallbackMode ?? "manual review"}.`,
+        tied: true,
+        options: tiedOptions
+      };
+    }
+
+    const reopened: OfficialVote = {
+      status: "open",
+      kind: "custom",
+      roundNumber: open.roundNumber,
+      title: open.title,
+      prompt: open.prompt,
+      options: open.options,
+      ballots: [],
+      meta: buildTieReopenMeta("custom_tie"),
+      createdAt: now
+    };
+    const directive = [
+      "# 官方指令：本轮投票平票",
+      "",
+      `出现平票：${tiedOptions.join(" / ")}`,
+      "",
+      `要求：所有席位先补充新的观点/证据/取舍，再重新投票。${voteGovernance.fallbackMode ? `建议先切换到“${voteGovernance.fallbackMode}”模式补信息。` : ""}`
+    ].join("\n");
+    await upsertDebateFile(input.debateId, VOTE_DIRECTIVE_PATH, directive, now);
+    await upsertDebateFile(input.debateId, VOTE_OPEN_PATH, JSON.stringify(reopened, null, 2), now);
+    return { ok: true, reopened: true, tied: true, vote: reopened, directive };
+  }
+
   const summary = [
     "# 官方投票结果",
     "",
@@ -2269,19 +2638,26 @@ async function toolSearchFilesFromAgent(userId: string, agentId: string, queryTe
   }
 }
 
-function normalizeDebateOutputPath(rawPath: string) {
+function normalizeDebateOutputPath(rawPath: string, allowedPrefixes?: string[]) {
   const normalized = rawPath.trim().replace(/\\/g, "/").replace(/^\/+/, "");
   if (!normalized) return null;
   if (normalized.includes("..")) return null;
-  if (normalized.startsWith("final/") || normalized.startsWith("outputs/")) return normalized;
+  const prefixes = Array.isArray(allowedPrefixes) && allowedPrefixes.length > 0 ? allowedPrefixes : ["final/", "outputs/"];
+  if (prefixes.some((prefix) => normalized.startsWith(prefix))) return normalized;
   return null;
 }
 
-async function toolDebateFilesWrite(input: { debateId: string; path: string; content: string; now: string }) {
-  const safePath = normalizeDebateOutputPath(input.path);
+async function toolDebateFilesWrite(input: {
+  debateId: string;
+  path: string;
+  content: string;
+  now: string;
+  allowedOutputPaths?: string[];
+}) {
+  const safePath = normalizeDebateOutputPath(input.path, input.allowedOutputPaths);
   if (!safePath) {
     return {
-      error: "Invalid path. Only final/* or outputs/* allowed (no '..')."
+      error: `Invalid path. Only ${(input.allowedOutputPaths?.length ?? 0) > 0 ? input.allowedOutputPaths?.join(", ") : "final/, outputs/"} allowed (no '..').`
     };
   }
   const content = String(input.content ?? "");
@@ -2289,7 +2665,8 @@ async function toolDebateFilesWrite(input: { debateId: string; path: string; con
   return { ok: true, path: safePath, size: content.length };
 }
 
-function buildOpenAiTools(input: { enableVoting: boolean }) {
+function buildOpenAiTools(input: { enableVoting: boolean; allowedOutputPaths: string[] }) {
+  const allowedPathsText = input.allowedOutputPaths.length > 0 ? input.allowedOutputPaths.join(", ") : "final/, outputs/";
   const tools: Array<Record<string, unknown>> = [
     {
       type: "function",
@@ -2328,7 +2705,7 @@ function buildOpenAiTools(input: { enableVoting: boolean }) {
       type: "function",
       function: {
         name: "debate_files_write",
-        description: "Write a debate-level output file (final deliverables). Allowed paths: final/* or outputs/*.",
+        description: `Write a debate-level output file (final deliverables). Allowed paths: ${allowedPathsText}.`,
         parameters: {
           type: "object",
           properties: { path: { type: "string" }, content: { type: "string" } },
@@ -2386,7 +2763,8 @@ function buildOpenAiTools(input: { enableVoting: boolean }) {
   return tools;
 }
 
-function buildAnthropicTools(input: { enableVoting: boolean }) {
+function buildAnthropicTools(input: { enableVoting: boolean; allowedOutputPaths: string[] }) {
+  const allowedPathsText = input.allowedOutputPaths.length > 0 ? input.allowedOutputPaths.join(", ") : "final/, outputs/";
   const tools: Array<Record<string, unknown>> = [
     {
       name: "agent_files_list",
@@ -2414,7 +2792,7 @@ function buildAnthropicTools(input: { enableVoting: boolean }) {
     ,
     {
       name: "debate_files_write",
-      description: "Write a debate-level output file (final deliverables). Allowed paths: final/* or outputs/*.",
+      description: `Write a debate-level output file (final deliverables). Allowed paths: ${allowedPathsText}.`,
       input_schema: {
         type: "object",
         properties: { path: { type: "string" }, content: { type: "string" } },
@@ -2489,7 +2867,14 @@ async function callProvider(
   const seatInline = await loadDebateSeatInline(userId, debate.id, debateAgentId);
   const participantsInline = messageNumber <= participantCount ? null : await loadDebateParticipantsInline(userId, debate.id);
   const workflow = await loadDebateWorkflow(userId, debate.id);
+  const allowedOutputPaths = workflow?.deliverables.allowedPaths ?? ["final/", "outputs/"];
+  const requiredDeliverables = workflow?.deliverables.requiredFiles ?? [];
+  const responseFormatPolicy = workflow?.promptPolicies.responseFormat ?? {
+    requireMarkdown: true,
+    forbidRawJson: true
+  };
   const openVote = await loadOpenVote(userId, debate.id);
+  const workflowPhaseInline = buildWorkflowPhaseInline({ workflow, debate, roundNumber, openVote });
   const openVoteInline = await loadOpenVoteInline(userId, debate.id, `${debateAgentId}:${openVote?.roundNumber ?? 0}`);
   const directiveInline = await loadOfficialDirectiveInline(userId, debate.id);
   const announcementInline = await loadVoteAnnouncementInline(userId, debate.id);
@@ -2499,8 +2884,9 @@ async function callProvider(
   const roundStart = (roundNumber - 1) * Math.max(1, participantCount) + 1;
   const roundEnd = roundNumber * Math.max(1, participantCount);
   const enableVotingTools = Boolean(openVoteInline) || isOfficialVotingAllowed(workflow, roundNumber);
+  const electionStartRound = getWorkflowElectionStartRound(workflow);
   const votingRuleInline = workflow?.enabled
-    ? `- Official voting: enabled by workflow.json. startRound=${workflow.election.startRound}. roles=[${(workflow.election.roles ?? []).join(", ")}].`
+    ? `- Official voting: enabled by workflow.json. startRound=${electionStartRound}. roles=[${(workflow.election.roles ?? []).join(", ")}].`
     : null;
 
   const alreadyVoted =
@@ -2512,8 +2898,8 @@ async function callProvider(
       ? openVote.kind === "election"
         ? [
             "VOTING REQUIRED: An official election vote is open and you haven't voted yet.",
-            "- First: call tool debate_vote_cast with { selections: { <role>: 'Seat-X', ... }, reason?: '...' }.",
-            "- Then: you may add a short message (1-3 sentences)."
+            "- Call tool debate_vote_cast with { selections: { <role>: 'Seat-X', ... }, reason?: '...' }.",
+            "- Do not add any extra analysis, argument, or commentary in this election round."
           ].join("\n")
         : [
             "VOTING REQUIRED: An official vote is open and you haven't voted yet.",
@@ -2533,8 +2919,9 @@ async function callProvider(
     `- You are generating: Round ${roundNumber} · Turn ${turnInRound}/${participantCount} (global message #${messageNumber}).`,
     `- Round ${roundNumber} covers message #${roundStart} ~ #${roundEnd}.`,
     "- IMPORTANT: Do NOT treat global message # as a seat index (e.g., Round 2 Turn 1 is global #21 when Seats=20).",
+    ...(workflowPhaseInline ? ["", workflowPhaseInline] : []),
     ...(votingRuleInline ? [votingRuleInline] : []),
-    ...(messageNumber <= participantCount
+    ...(messageNumber <= participantCount && (workflow?.promptPolicies.round1Fairness ?? true)
       ? [
           "",
           "Fairness (Round 1): You do not yet have full information about other seats. Do not pre-judge or claim you know other seats' views/roles before they speak."
@@ -2548,6 +2935,9 @@ async function callProvider(
     ...(votingActionInline ? [votingActionInline, ""] : []),
     ...(openVoteInline ? [openVoteInline, ""] : []),
     ...(recentTurnsInline ? [recentTurnsInline, ""] : []),
+    ...(openVote?.kind === "election"
+      ? ["Election silence rule: this round is vote-only. Do not provide extra discussion content beyond casting your ballot.", ""]
+      : []),
     "Please respond in Markdown for humans. You may use headings, lists, and code blocks when helpful.",
     "Do not output a raw JSON object. If you were about to output JSON, convert it to readable Markdown instead."
   ].join("\n");
@@ -2560,10 +2950,14 @@ async function callProvider(
   }
 
   if (agent.provider === "openai") {
-    const tools = buildOpenAiTools({ enableVoting: enableVotingTools });
+    const tools = buildOpenAiTools({ enableVoting: enableVotingTools, allowedOutputPaths });
     const systemParts = [
       buildBaseSystemPrompt(agent, overrideSystemPrompt),
-      buildFileToolInstructions({ enableVoting: enableVotingTools })
+      buildFileToolInstructions({
+        enableVoting: enableVotingTools,
+        allowedOutputPaths,
+        requiredFiles: requiredDeliverables
+      })
     ];
     const inline = await loadDebateAgentFilesInline(userId, debateAgentId, agent.id);
     if (inline) systemParts.push(inline);
@@ -2576,7 +2970,7 @@ async function callProvider(
         if (sharedInline) systemParts.push(sharedInline);
       }
     }
-    systemParts.push(buildResponseFormatInstructions());
+    systemParts.push(buildResponseFormatInstructions(responseFormatPolicy));
     const estimatedPromptTokens = estimatePromptTokensFromChars(systemParts.join("\n\n").length + prompt.length);
 
     const messages: Array<Record<string, unknown>> = [
@@ -2677,7 +3071,13 @@ async function callProvider(
         } else if (call.function.name === "debate_files_write") {
           const path = String((args as { path?: unknown }).path ?? "");
           const content = String((args as { content?: unknown }).content ?? "");
-          result = await toolDebateFilesWrite({ debateId: debate.id, path, content, now: new Date().toISOString() });
+          result = await toolDebateFilesWrite({
+            debateId: debate.id,
+            path,
+            content,
+            now: new Date().toISOString(),
+            allowedOutputPaths
+          });
         } else if (call.function.name === "debate_vote_open") {
           const kind = String((args as { kind?: unknown }).kind ?? "custom");
           const title = String((args as { title?: unknown }).title ?? "投票");
@@ -2760,10 +3160,14 @@ async function callProvider(
     return { raw: buildDemoResponse(debate, agent, messageNumber), usage, estimatedPromptTokens };
   }
 
-  const tools = buildAnthropicTools({ enableVoting: enableVotingTools });
+  const tools = buildAnthropicTools({ enableVoting: enableVotingTools, allowedOutputPaths });
   const systemParts = [
     buildBaseSystemPrompt(agent, overrideSystemPrompt),
-    buildFileToolInstructions({ enableVoting: enableVotingTools })
+    buildFileToolInstructions({
+      enableVoting: enableVotingTools,
+      allowedOutputPaths,
+      requiredFiles: requiredDeliverables
+    })
   ];
   const inline = await loadDebateAgentFilesInline(userId, debateAgentId, agent.id);
   if (inline) systemParts.push(inline);
@@ -2776,7 +3180,7 @@ async function callProvider(
       if (sharedInline) systemParts.push(sharedInline);
     }
   }
-  systemParts.push(buildResponseFormatInstructions());
+  systemParts.push(buildResponseFormatInstructions(responseFormatPolicy));
   const estimatedPromptTokens = estimatePromptTokensFromChars(systemParts.join("\n\n").length + prompt.length);
 
   const messages: Array<Record<string, unknown>> = [{ role: "user", content: prompt }];
@@ -2866,7 +3270,13 @@ async function callProvider(
       } else if (use.name === "debate_files_write") {
         const path = String((use.input as { path?: unknown }).path ?? "");
         const content = String((use.input as { content?: unknown }).content ?? "");
-        result = await toolDebateFilesWrite({ debateId: debate.id, path, content, now: new Date().toISOString() });
+        result = await toolDebateFilesWrite({
+          debateId: debate.id,
+          path,
+          content,
+          now: new Date().toISOString(),
+          allowedOutputPaths
+        });
       } else if (use.name === "debate_vote_open") {
         const kind = String((use.input as { kind?: unknown }).kind ?? "custom");
         const title = String((use.input as { title?: unknown }).title ?? "投票");
@@ -3103,27 +3513,7 @@ async function startAutoSegmentAtBoundary(input: {
   }
 
   lines.push("");
-  lines.push("## Workflow (summary)");
-  if (!workflow?.enabled) {
-    lines.push("- disabled (no workflow.json or enabled=false)");
-  } else {
-    lines.push(`- version: v${workflow.workflowVersion}`);
-    lines.push(`- election startRound: ${workflow.election.startRound}`);
-    lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
-    const first = workflow.election.speakingOrder.firstRole;
-    const last = workflow.election.speakingOrder.lastRole;
-    lines.push(`- speakingOrder (after election, next-round boundary): first=${first ?? "(none)"}; last=${last ?? "(none)"}`);
-    if (workflow.seatOrderRules.length === 0) {
-      lines.push("- seatOrderRules: (none)");
-    } else {
-      lines.push("- seatOrderRules:");
-      for (const rule of workflow.seatOrderRules) {
-        lines.push(
-          `  - afterRound=${rule.afterRound}: ${rule.policy.type}${rule.policy.type === "rotate" ? ` offset=${rule.policy.offset}` : ""}`
-        );
-      }
-    }
-  }
+  appendWorkflowSummaryLines(lines, workflow);
 
   if (directive.trim()) {
     lines.push("");
@@ -3223,27 +3613,7 @@ async function startAutoSegmentForDebateAgentAtBoundary(input: {
   }
 
   lines.push("");
-  lines.push("## Workflow (summary)");
-  if (!workflow?.enabled) {
-    lines.push("- disabled (no workflow.json or enabled=false)");
-  } else {
-    lines.push(`- version: v${workflow.workflowVersion}`);
-    lines.push(`- election startRound: ${workflow.election.startRound}`);
-    lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
-    const first = workflow.election.speakingOrder.firstRole;
-    const last = workflow.election.speakingOrder.lastRole;
-    lines.push(`- speakingOrder (after election, next-round boundary): first=${first ?? "(none)"}; last=${last ?? "(none)"}`);
-    if (workflow.seatOrderRules.length === 0) {
-      lines.push("- seatOrderRules: (none)");
-    } else {
-      lines.push("- seatOrderRules:");
-      for (const rule of workflow.seatOrderRules) {
-        lines.push(
-          `  - afterRound=${rule.afterRound}: ${rule.policy.type}${rule.policy.type === "rotate" ? ` offset=${rule.policy.offset}` : ""}`
-        );
-      }
-    }
-  }
+  appendWorkflowSummaryLines(lines, workflow);
 
   if (directive.trim()) {
     lines.push("");
@@ -3320,9 +3690,9 @@ async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
   const workflow = await loadDebateWorkflow(input.userId, input.debateId);
   const workflowEnabled = Boolean(workflow?.enabled);
   if (!workflowEnabled) return { ok: true, opened: false };
-
-  const startRound = workflow.election.startRound;
-  if (input.endedRound !== startRound - 1) return { ok: true, opened: false };
+  if (!shouldAutoOpenWorkflowElectionAtBoundary(workflow, input.endedRound)) {
+    return { ok: true, opened: false };
+  }
 
   const openRoundNumber = input.endedRound + 1;
   const electionRoles = workflowEnabled ? (workflow?.election.roles ?? []) : [];
@@ -3502,8 +3872,17 @@ async function maybeGenerateVoteAnnouncementWithSeat1(input: {
 
   let announcerSeatNumber = 1;
   let announcerRoleLabel: string | null = null;
+  let fallbackAnnouncerSeatNumber = 1;
+  let fallbackAnnouncerRoleLabel: string | null = null;
   if (workflow?.enabled) {
     const announcer = workflow.voting.announcement.announcer;
+    const fallback = workflow.voting.announcement.fallback;
+    if (fallback.type === "seat") {
+      fallbackAnnouncerSeatNumber = Math.max(1, Math.floor(Number(fallback.seat) || 1));
+      fallbackAnnouncerRoleLabel = null;
+    } else if (fallback.type === "role") {
+      fallbackAnnouncerRoleLabel = String(fallback.role ?? "").trim() || null;
+    }
     if (announcer.type === "seat") {
       announcerSeatNumber = Math.max(1, Math.floor(Number(announcer.seat) || 1));
     } else if (announcer.type === "role") {
@@ -3545,8 +3924,20 @@ async function maybeGenerateVoteAnnouncementWithSeat1(input: {
 
   let announcerRow: Record<string, unknown> | null = (announcer.rowCount ?? 0) === 1 ? announcer.rows[0] : null;
   if (!announcerRow) {
-    // Fallback to Seat-1
-    const seat1 = await query<Record<string, unknown>>(
+    if (fallbackAnnouncerRoleLabel && directiveJson && typeof (directiveJson as any).appointments === "object") {
+      const appointmentsRaw = (directiveJson as any).appointments as Record<string, unknown>;
+      const seat =
+        appointmentsRaw[fallbackAnnouncerRoleLabel] &&
+        typeof appointmentsRaw[fallbackAnnouncerRoleLabel] === "object" &&
+        typeof (appointmentsRaw[fallbackAnnouncerRoleLabel] as any).seat === "string"
+          ? String((appointmentsRaw[fallbackAnnouncerRoleLabel] as any).seat)
+          : "";
+      const match = seat.match(/^Seat-([0-9]{1,6})$/);
+      const n = match ? Number(match[1]) : Number.NaN;
+      if (Number.isFinite(n) && n >= 1) fallbackAnnouncerSeatNumber = Math.floor(n);
+    }
+
+    const fallbackSeat = await query<Record<string, unknown>>(
       `
         select da.id as debate_agent_id,
                a.*
@@ -3555,15 +3946,17 @@ async function maybeGenerateVoteAnnouncementWithSeat1(input: {
           join debates d on d.id = da.debate_id
          where da.debate_id = $1
            and d.user_id = $2
-           and da.turn_order = 1
+           and da.turn_order = $3
          limit 1
       `,
-      [input.debate.id, input.userId]
+      [input.debate.id, input.userId, fallbackAnnouncerSeatNumber]
     );
-    if ((seat1.rowCount ?? 0) !== 1) return { ok: false, generated: false, error: "Seat-1 agent not found." };
-    announcerSeatNumber = 1;
-    announcerRoleLabel = null;
-    announcerRow = seat1.rows[0];
+    if ((fallbackSeat.rowCount ?? 0) !== 1) {
+      return { ok: false, generated: false, error: `Seat-${fallbackAnnouncerSeatNumber} agent not found.` };
+    }
+    announcerSeatNumber = fallbackAnnouncerSeatNumber;
+    announcerRoleLabel = fallbackAnnouncerRoleLabel;
+    announcerRow = fallbackSeat.rows[0];
   }
 
   const announcerDebateAgentId = String(announcerRow.debate_agent_id);
@@ -3886,8 +4279,33 @@ export async function runDebate(id: string, userId: string) {
       }
 
       const completedRounds = Math.floor(debate.currentTurn / participantCount);
+      const workflowBeforeTurn = await loadDebateWorkflow(userId, id);
+      const openVoteBeforeTurn = await loadOpenVote(userId, id);
+      const phaseBeforeTurn = resolveCurrentWorkflowPhase({
+        workflow: workflowBeforeTurn,
+        consensusReached: Boolean(debate.consensusReached),
+        roundNumber: completedRounds + 1,
+        openVote: openVoteBeforeTurn
+      });
       if (debate.maxTurns > 0 && completedRounds >= debate.maxTurns) {
-        await finishDebate(id, "completed");
+        const requiresFinalizationPhase =
+          workflowBeforeTurn?.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ?? true;
+        const missingDeliverables = await listMissingRequiredDeliverables({
+          userId,
+          debateId: id,
+          workflow: workflowBeforeTurn
+        });
+        if ((!requiresFinalizationPhase || phaseBeforeTurn?.kind === "finalization") && missingDeliverables.length === 0) {
+          await finishDebate(id, "completed");
+        } else if (missingDeliverables.length > 0) {
+          await finishDebate(
+            id,
+            "stopped",
+            `max turns reached before required deliverables were written: ${missingDeliverables.map((file) => file.path).join(", ")}`
+          );
+        } else {
+          await finishDebate(id, "stopped", "max turns reached before Phase 4");
+        }
         break;
       }
 
@@ -3961,6 +4379,10 @@ export async function runDebate(id: string, userId: string) {
       }
 
       const parsed = parseResponse(raw);
+      const persistedResponse =
+        openVoteBeforeTurn?.status === "open" && openVoteBeforeTurn.kind === "election"
+          ? { ...parsed, content: buildElectionVoteOnlyContent(), structuredOutput: null as StructuredOutput | null }
+          : parsed;
       emitDebateLiveEvent(id, {
         type: "status",
         debateId: id,
@@ -3987,9 +4409,9 @@ export async function runDebate(id: string, userId: string) {
               ? Number((currentParticipant as any).turnOrder)
               : currentIndex + 1,
           debate.currentTurn + 1,
-          parsed.content,
-          parsed.structuredOutput ? JSON.stringify(parsed.structuredOutput) : null,
-          parsed.parseStatus,
+          persistedResponse.content,
+          persistedResponse.structuredOutput ? JSON.stringify(persistedResponse.structuredOutput) : null,
+          persistedResponse.parseStatus,
           tokenUsed,
           responseTimeMs,
           retryCount,
@@ -4007,11 +4429,15 @@ export async function runDebate(id: string, userId: string) {
           usage?.promptTokens && typeof usage.promptTokens === "number" && usage.promptTokens > 0
             ? Math.floor(usage.promptTokens)
             : null;
-        const usedPromptTokens = apiPromptTokens;
+        const fallbackPromptTokens =
+          estimatedPromptTokens !== null && Number.isFinite(estimatedPromptTokens) && estimatedPromptTokens > 0
+            ? Math.floor(estimatedPromptTokens)
+            : null;
+        const usedPromptTokens = apiPromptTokens ?? fallbackPromptTokens;
 
-        if (apiPromptTokens !== null && usedPromptTokens !== null) {
+        if (usedPromptTokens !== null) {
           const seat = `Seat-${Number((currentParticipant as any).turn_order ?? (currentParticipant as any).turnOrder ?? currentIndex + 1)}`;
-          const source = "api";
+          const source = apiPromptTokens !== null ? "api" : "estimate";
           const totals = await appendContextUsageLogAndUpdateTotals({
             userId,
             debateId: id,
@@ -4020,7 +4446,7 @@ export async function runDebate(id: string, userId: string) {
             agent,
             contextLength: agent.contextLength,
             apiPromptTokens,
-            estimatedPromptTokens: null,
+            estimatedPromptTokens: fallbackPromptTokens,
             usedPromptTokens,
             multiplier: 1,
             source,
@@ -4040,8 +4466,14 @@ export async function runDebate(id: string, userId: string) {
           debateId: id,
           debateAgentId: String(currentParticipant.id),
           agent,
-          usage: { promptTokens: apiPromptTokens, completionTokens: usage?.completionTokens ?? null, totalTokens: usage?.totalTokens ?? null },
-          source: "api",
+          usage: {
+            promptTokens: usedPromptTokens,
+            completionTokens: usage?.completionTokens ?? null,
+            totalTokens:
+              usage?.totalTokens ??
+              (usedPromptTokens !== null && usage?.completionTokens !== null ? usedPromptTokens + usage.completionTokens : null)
+          },
+          source: apiPromptTokens !== null ? "api" : "estimate",
           turnNumber: messageNumber,
           now: createdAt
         });
@@ -4066,8 +4498,8 @@ export async function runDebate(id: string, userId: string) {
             agentName: eventAgentName,
             debateQuestion: debate.question,
             turnNumber: messageNumber,
-            content: parsed.content,
-            structuredOutput: parsed.structuredOutput,
+            content: persistedResponse.content,
+            structuredOutput: persistedResponse.structuredOutput,
             now: createdAt
           }),
           persistAnswerAfterTurn({
@@ -4075,7 +4507,7 @@ export async function runDebate(id: string, userId: string) {
             debateId: id,
             turnNumber: messageNumber,
             agentName: eventAgentName,
-            content: parsed.content,
+            content: persistedResponse.content,
             now: createdAt
           }),
           ...(debate.enableSharedFacts
@@ -4085,8 +4517,8 @@ export async function runDebate(id: string, userId: string) {
                   debateId: id,
                   turnNumber: messageNumber,
                   agentName: eventAgentName,
-                  content: parsed.content,
-                  structuredOutput: parsed.structuredOutput,
+                  content: persistedResponse.content,
+                  structuredOutput: persistedResponse.structuredOutput,
                   now: createdAt
                 })
               ]
@@ -4125,9 +4557,24 @@ export async function runDebate(id: string, userId: string) {
       const openVoteBeforeUpdate = await loadOpenVote(userId, id);
       const mustKeepRunningForVote =
         Boolean(openVoteBeforeUpdate) ||
-        Boolean(workflow?.enabled) && isBoundary && endedRound === (workflow?.election.startRound ?? 1) - 1;
+        Boolean(workflow?.enabled) && isBoundary && shouldAutoOpenWorkflowElectionAtBoundary(workflow, endedRound);
+      const finalizationPhase = resolveCurrentWorkflowPhase({
+        workflow,
+        consensusReached: Boolean(consensus.reached),
+        roundNumber: endedRound + 1,
+        openVote: openVoteBeforeUpdate
+      });
+      const requiresFinalizationPhase = workflow?.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ?? true;
+      const canCompleteByPhase = requiresFinalizationPhase ? finalizationPhase?.kind === "finalization" : true;
+      const missingDeliverables = await listMissingRequiredDeliverables({
+        userId,
+        debateId: id,
+        workflow
+      });
+      const canCompleteByDeliverables = missingDeliverables.length === 0;
       const consensusReachedForDb = mustKeepRunningForVote ? false : consensus.reached;
-      const nextStatusForDb = consensusReachedForDb ? "completed" : "running";
+      const nextStatusForDb =
+        consensusReachedForDb && canCompleteByPhase && canCompleteByDeliverables ? "completed" : "running";
       await query(
         `update debates
             set current_turn = $2,

@@ -60,6 +60,22 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         headers: { "Content-Type": "application/json" }
       });
     }
+    const debateAgentOwnership = await query<{ id: string }>(
+      `
+        select da.id
+          from debate_agents da
+         where da.id = $1
+           and da.debate_id = $2
+         limit 1
+      `,
+      [debateAgentId, id]
+    );
+    if ((debateAgentOwnership.rowCount ?? 0) !== 1) {
+      return new Response(JSON.stringify({ success: false, error: { code: "NOT_FOUND" } }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
 
     const totalsRaw = await readDebateFileContent(id, "context/usage_totals.json");
     const totalsParsed = totalsRaw ? safeParseJson(totalsRaw) : null;
@@ -123,4 +139,3 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     return toErrorResponse(error);
   }
 }
-

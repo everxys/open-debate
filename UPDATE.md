@@ -1,5 +1,31 @@
 ## 2026-03-20
 
+- 重构：辩论页将“参与者面板”抽成局部组件 `ParticipantsPanel`，把新增 AI、上下文累计、席位调整等展示从主页面条件渲染中拆出，不改现有功能
+- 重构：辩论页将“辩论文件面板”整体抽成局部组件 `DebateFilesPanel`，主页面条件渲染从内联大块 JSX 调整为面板级组合，提升可读性与后续扩展性，不改现有交互
+- 重构：辩论页将文件栏右键菜单抽成局部组件 `DebateFilesContextMenu`，减少主页面文件面板分支里的内联菜单 JSX，不改现有交互
+- 重构：辩论页将文件栏顶部工具区抽成局部组件 `DebateFilesToolbar`，减少主渲染区按钮/状态绑定的内联代码，不改现有功能
+- 重构：辩论页将 `workflow` 规则面板抽成局部组件 `WorkflowRulesPanel`，减少主页面条件渲染中的内联 UI 体积，不改现有功能
+- 重构：辩论页将“文件信息弹窗”和“下载进度弹窗”抽成局部组件，并清理内联 modal JSX，降低主页面渲染区域复杂度，不改现有交互
+- 重构：辩论页文件栏抽出下载文件名解析、下载流进度读取、文件信息请求等 helper，并收敛相关类型定义，减少主组件中的请求细节代码，不改现有功能
+- 重构：辩论页文件栏抽出“文件索引映射”和“多选计算”纯函数，收敛组件内分支逻辑，提升可读性与后续扩展性，不改现有交互
+- 重构：辩论页 `workflow` 规则读取改为顶层请求 helper + 单一状态对象，减少分散的 loading/markdown 状态与重复请求拼装代码，不改现有功能
+- 重构：将辩论页 `workflow` 规则 Markdown 的格式化逻辑与默认文案提升为顶层纯函数/常量，减少页面主组件体积，提升可读性，不改功能
+- 重构：抽出 workflow 必交文件的公共格式化 helper，并合并 runtime / 页面 /摘要里的重复展示逻辑，提升可读性与后续扩展性，不改现有行为
+- 小说细纲质量门槛继续加严：`deliverables.requiredFiles` 新增 `minMarkdownHeadings` 与 `requiredSnippets`，运行时会校验标题数量和关键结构词，避免只靠堆字数过关
+- 小说细纲交付升级为“多文件 + 最少字数”机制：默认 workflow 与民主集中制 seed 不再只要求 `final/novel_outline_v2.md`，而是要求故事核心、人物卡、世界观、结构设计、章节细纲、伏笔回收表、总汇总稿等多份文件，并为每份文件增加 `minChars` 门槛
+- 运行时完成校验同步升级：`deliverables.requiredFiles` 现在会同时检查“文件存在 + 内容非空 + 达到最少字数”，否则不会自动 `completed`
+- 交付规则开始具备硬限制：`workflow.deliverables.requiredFiles` 不再只是提示词，运行时会在完成前检查这些文件是否已实际写入且非空；缺失时不会自动 `completed`
+- workflow 配置化第四阶段：新增 `phaseMachine.transitionRules`，把 Phase 2 起始轮次、是否自动开选举票、Phase 4 进入条件、是否必须进入 Phase 4 才能完成，正式收进 `workflow.json`
+- runtime 改为按 `phaseMachine.transitionRules` 判定阶段与完成条件，阶段摘要/辩论页规则面板也会直接显示这些切换规则
+- 阶段机开始具备硬限制：`Phase 2` 才允许角色选举，`Phase 4` 才允许自定义/最终投票；未进入 `Phase 4` 时不再把辩论标记为 `completed`
+- workflow 配置化第三阶段：把 Phase 1-4 正式结构化为 `phaseMachine.phases`，默认 workflow 与民主集中制 seed 同步携带四阶段定义
+- runtime 开始读取阶段机：每回合提示词会明确注入“当前阶段 + 阶段目标 + 全部阶段机”，辩论页 Workflow 摘要也会显示阶段机配置
+- 删除回滚机制：民主集中制 seed 不再要求“监管者一票否决并回滚”，监管者职责收敛为监督遗漏、指出偏差、要求补齐
+- workflow 配置化第二阶段：新增 `voting.governance`，把平票处理策略、最大重投次数、平票后的建议模式抽到 `workflow.json`
+- runtime 不再在平票时默认按最小席位偷偷判胜；当 `tieBreaker=revote` 时会按 workflow 自动保留/重开投票，并写入“先补信息再重投”的官方指令
+- workflow 配置化第一阶段：新增 `promptPolicies`、`deliverables`、`voting.announcement.fallback`，把 Round 1 公平性提示、输出格式约束、允许写入路径、必交文件、公告 fallback 从 runtime/seed 文案里抽到 `workflow.json`
+- runtime 开始真正读取 workflow 新配置：AI 提示词、`debate_files_write` 路径限制、投票公告 fallback 不再写死只认 `final/|outputs/`、`Seat-1`
+- 民主集中制 seed 与默认 workflow 同步升级：补充交付路径、最终文件、输出格式与公告 fallback 配置
 - 辩论详情页文件栏：支持 `Ctrl + 左键` 多选、`Shift + 左键` 区间多选，并增加右键菜单下载选中项
 - 辩论详情页文件栏：下载选中项时增加实时进度条与已下载大小显示
 - 辩论详情页文件栏：右键新增“获取文件信息”，可查看文件字数、大小、创建时间、修改时间
@@ -189,3 +215,9 @@
 - 文件管理：支持拖拽文件到文件夹（移动路径），文件不再显示“文件夹箭头”图标
 - 文件管理：编辑区改为 Tabs（支持同时打开多个文件，未保存用圆点提示），并修复拖拽到文件夹的交互
 - 文件管理：引入 `react-arborist`（树）+ `monaco-editor`（编辑器），替换自研 tree/textarea
+- 辩论详情页重构：将 `status` 面板中的问题编辑/查看区抽成局部组件 `StatusQuestionPanel`，减少主页面内联 JSX 并保持原有交互不变
+- 辩论详情页重构：将 `status` 面板中的运行状态摘要抽成局部组件 `StatusSummaryPanel`，让左侧状态分支结构更清晰
+- 上下文新会话修正：75% 阈值统计在缺少 provider usage 时回退到估算 prompt tokens，并修正首个 session 的 baseline 计算，避免自动切会话过晚或完全不触发
+- 上下文新会话接口修正：手动开始新会话时新增 `debateAgentId` 归属校验，避免把无效席位写进上下文统计文件
+- 投票阶段修正：即使提前达成共识，正式最终投票阶段也不会早于 workflow 的 `election.startRound`；默认会先完整跑完前两轮，再从第三轮开始进入投票阶段
+- 选举轮修正：角色选举投票时改为“只投票不发言”；提示词明确禁止追加分析，运行时也会把选举轮正文统一替换为中性占位内容，避免后续席位受前面发言影响

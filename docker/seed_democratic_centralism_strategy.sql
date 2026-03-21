@@ -38,7 +38,7 @@ inserted_strategy as (
     gen_random_uuid(),
     owner_user_id,
     '民主集中制共识算法（先赛马，再相马）',
-    '先赛马再相马：全员议员实战 -> 民主选举主持人/监管者 -> 全员同角色轮换 -> 收敛为《小说细纲》。主持人禁提案；监管者可否决并回滚；平局最多两次后强制逻辑审核补信息。',
+    '先赛马再相马：全员议员实战 -> 民主选举主持人/监管者 -> 全员同角色轮换 -> 收敛为《小说细纲》。主持人禁提案；监管者负责监督遗漏与流程偏差；平局最多两次后强制逻辑审核补信息。',
     true,
     now(),
     now()
@@ -66,13 +66,14 @@ role_prompt as (
 - 若投票结果与主持人宣布你当选【主持人】：
   - 你必须遵守 protocol/30_election_and_veto.md 的“主持人硬约束”：不准提出自己的方案，只做流程控制/汇总/投票/台账/输出《小说细纲》。
 - 若投票结果与主持人宣布你当选【监管者】：
-  - 你必须遵守 protocol/30_election_and_veto.md 的“监管者否决规则”：必要时一票否决并回滚到上一阶段，解除否决需多数同意。
+  - 你负责监督是否遗漏关键 IDEA、是否流程跑偏、是否有关键约束未被处理，并明确指出纠偏建议。
 - 若你未当选：
   - 继续作为议员参与每轮轮换讨论。
 
 辩论收尾（必须执行）：
 - 当进入最终表决并通过“关闭辩论/交付最终稿”时：
-  - 若你是【主持人/Host】：你必须在最后交付时调用 `debate_files_write` 把最终《小说细纲》写入 `final/novel_outline_v2.md`（或主持人声明的最终路径），并在正文中写明文件路径。
+- 若你是【主持人/Host】：你必须在最后交付时调用 `debate_files_write` 把最终《小说细纲》写入 `final/novel_outline_v2.md`（或主持人声明的最终路径），并在正文中写明文件路径。
+  - 并且你不能只交一份简略总纲，必须先分文件写出：故事核心、人物卡、世界观与规则、结构设计、章节级细纲、伏笔回收表，最后再汇总成 `final/novel_outline_v2.md`。
   - 若你不是主持人：你必须提醒主持人执行上述写文件动作，并确认“文件路径 + 已写入”。
 $sp$ as system_prompt
 ),
@@ -108,6 +109,45 @@ common_files as (
 {
   "workflowVersion": 1,
   "enabled": true,
+  "phaseMachine": {
+    "phases": [
+      {
+        "id": "phase-1",
+        "title": "Phase 1 · 议员实战演练",
+        "kind": "analysis",
+        "description": "所有席位先独立分析、归类、指出风险，并给出主持人/监管者候选建议。"
+      },
+      {
+        "id": "phase-2",
+        "title": "Phase 2 · 民主选举",
+        "kind": "election",
+        "description": "基于前期表现投票选出主持人和监管者，形成明确任命结果。"
+      },
+      {
+        "id": "phase-3",
+        "title": "Phase 3 · 动态轮换讨论",
+        "kind": "deliberation",
+        "description": "主持人宣布统一模式，全员围绕创意发散/逻辑审核等模式循环推进。"
+      },
+      {
+        "id": "phase-4",
+        "title": "Phase 4 · 共识收敛与最终交付",
+        "kind": "finalization",
+        "description": "进入最终表决与最终产物输出，完成收敛与交付。"
+      }
+    ],
+    "transitionRules": {
+      "election": {
+        "startRound": 3,
+        "autoOpen": true
+      },
+      "finalization": {
+        "enterOnConsensus": true,
+        "enterOnCustomVote": true,
+        "requirePhaseForCompletion": true
+      }
+    }
+  },
   "election": {
     "startRound": 3,
     "roles": ["Host", "Supervisor"],
@@ -115,9 +155,85 @@ common_files as (
   },
   "voting": {
     "custom": { "minOptions": 2, "maxOptions": null },
-    "announcement": { "announcer": { "type": "role", "role": "Host" } }
+    "announcement": {
+      "announcer": { "type": "role", "role": "Host" },
+      "fallback": { "type": "seat", "seat": 1 }
+    },
+    "governance": {
+      "tieBreaker": "revote",
+      "maxTieRounds": 2,
+      "fallbackMode": "逻辑审核员"
+    }
   },
   "consensus": { "enabled": true, "minAvgScore": 8, "requireAllSeats": true },
+  "promptPolicies": {
+    "round1Fairness": true,
+    "responseFormat": {
+      "requireMarkdown": true,
+      "forbidRawJson": true
+    }
+  },
+  "deliverables": {
+    "allowedPaths": ["final/", "outputs/"],
+    "requiredFiles": [
+      {
+        "path": "final/01-story-core.md",
+        "ownerRole": "Host",
+        "description": "核心卖点、主题、核心冲突、故事承诺",
+        "minChars": 1200,
+        "minMarkdownHeadings": 4,
+        "requiredSnippets": ["核心卖点", "主题", "核心冲突", "故事承诺"]
+      },
+      {
+        "path": "final/02-characters.md",
+        "ownerRole": "Host",
+        "description": "主角、关键配角、反派的人物卡与成长弧",
+        "minChars": 2200,
+        "minMarkdownHeadings": 8,
+        "requiredSnippets": ["主角", "关键配角", "反派", "成长弧"]
+      },
+      {
+        "path": "final/03-world-and-rules.md",
+        "ownerRole": "Host",
+        "description": "世界观、关键设定、限制条件、代价与规则",
+        "minChars": 1800,
+        "minMarkdownHeadings": 5,
+        "requiredSnippets": ["世界观", "规则", "限制条件", "代价"]
+      },
+      {
+        "path": "final/04-plot-architecture.md",
+        "ownerRole": "Host",
+        "description": "三幕或多幕结构、关键反转、冲突升级与收束",
+        "minChars": 2600,
+        "minMarkdownHeadings": 7,
+        "requiredSnippets": ["幕 1", "幕 2", "幕 3", "关键反转"]
+      },
+      {
+        "path": "final/05-chapter-outline.md",
+        "ownerRole": "Host",
+        "description": "章节级细纲，每章包含目标、冲突、转折、结果、钩子",
+        "minChars": 5000,
+        "minMarkdownHeadings": 16,
+        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子"]
+      },
+      {
+        "path": "final/06-foreshadowing-ledger.md",
+        "ownerRole": "Host",
+        "description": "伏笔与回收表，标明埋点、回收位置、作用",
+        "minChars": 1800,
+        "minMarkdownHeadings": 6,
+        "requiredSnippets": ["伏笔", "回收", "埋点", "作用"]
+      },
+      {
+        "path": "final/novel_outline_v2.md",
+        "ownerRole": "Host",
+        "description": "最终总细纲汇总稿，引用并整合上述文件",
+        "minChars": 7000,
+        "minMarkdownHeadings": 10,
+        "requiredSnippets": ["核心卖点", "人物", "世界观", "章节", "伏笔", "逻辑自检"]
+      }
+    ]
+  },
   "seatOrderRules": [
     { "afterRound": 1, "policy": { "type": "reverse" } },
     { "afterRound": 2, "policy": { "type": "reverse" } }
@@ -222,25 +338,24 @@ $f$
 建议结构：
 - ## 最终表决结论
 - ## 主持人：蓝图摘要 + 决策清单 + 里程碑
-- ## 监管者：流程合规背书（或指出遗漏并要求回到 Phase 3）
+- ## 监管者：流程合规背书（或指出仍需补齐的遗漏）
 $f$
       ),
       (
         'protocol/30_election_and_veto.md',
         $f$
-# 选举 / 否决 / 平局规则（强约束）
+# 选举 / 监督 / 平局规则（强约束）
 
 ## 主持人（Host）硬约束
 - 主持人不准提出自己的方案（不站队、不当作者）。
 - 主持人只做：流程控制、汇总、发起投票、维护台账、输出最终《小说细纲》。
 
-## 监管者（Supervisor）否决规则
-- 监管者拥有“一票否决权”：
-  - 否决发生时：必须回滚到上一阶段（例如从逻辑审核回滚到创意发散；或从最终表决回滚到逻辑审核）。
-  - 否决解除：需要多数同意才能解除（重新投票表决“是否解除否决并继续”）。
-- 监管者否决时必须给出：
-  - 否决理由（遗漏/违规/死胡同/硬冲突未解）
-  - 回滚后的“补做清单”（必须补齐哪些产物/检查哪些 IDEA）
+## 监管者（Supervisor）监督规则
+- 监管者不负责回滚，也没有单独的否决机制。
+- 监管者负责：
+  - 指出遗漏/违规/死胡同/硬冲突未解；
+  - 要求主持人明确补做清单；
+  - 在最终表决前给出“是否已满足收敛条件”的监督意见。
 
 ## 投票规则（民主）
 - 一人一票（每位参与者 1 票）。
@@ -274,30 +389,55 @@ $f$
 - 只有当所有 AI 都明确同意“该 IDEA 不重要/可忽略”，主持人才允许把它标记为“否决-可忽略”。
 - 否则必须继续留在台账里（吸收/合并/暂存/否决-不可忽略）。
 
-## 最终产物：《小说细纲》（建议结构）
-1. 一句话核心卖点（Logline）
-2. 主题与核心冲突（Theme & Central Conflict）
-3. 主角 / 关键配角 / 反派（动机、弱点、成长弧）
-4. 世界观与规则（限制条件 + 关键设定）
-5. 关键反转清单（Twists：至少 3 个；含“以为死去的人翻盘”/“陷阱”类）
-6. 故事结构（推荐三幕/起承转合）：
+## 最终产物：必须拆成多文件交付
+主持人不能只交一份几千字的简略稿，而必须先完成以下文件，再汇总总稿：
+
+1. `final/01-story-core.md`
+   - 一句话核心卖点（Logline）
+   - 主题与核心冲突
+   - 故事承诺、基调、读者期待
+
+2. `final/02-characters.md`
+   - 主角 / 关键配角 / 反派
+   - 每人至少写清：欲望、恐惧、弱点、关系、成长弧、关键决策点
+
+3. `final/03-world-and-rules.md`
+   - 世界观与规则
+   - 限制条件、资源边界、能力代价、不可破坏的硬设定
+
+4. `final/04-plot-architecture.md`
+   - 故事结构（推荐三幕/起承转合）
    - 幕 1：引子/设局/误导
    - 幕 2：升级/对抗/揭示
    - 幕 3：翻盘/代价/结局
-7. 关键事件清单（必须，按时间线/因果链）：
-   - 事件：发生了什么
-   - 目的：推动什么冲突/人物弧光
-   - 代价：牺牲/风险/不可逆后果
-   - 悬念：留给下一事件的钩子
-8. 伏笔与回收表（Foreshadowing Ledger）
-9. 逻辑自检（因果链、角色动机一致性、设定不自相矛盾）
+   - 关键反转清单（至少 3 个）
+
+5. `final/05-chapter-outline.md`
+   - 章节级细纲（必须详细）
+   - 每章至少写：章节目标、冲突、转折、结果、钩子/悬念
+   - 不能只写一句话标题列表，必须有可执行内容
+
+6. `final/06-foreshadowing-ledger.md`
+   - 伏笔与回收表（Foreshadowing Ledger）
+   - 每条写清：埋点位置、隐藏信息、回收位置、回收作用
+
+7. `final/novel_outline_v2.md`
+   - 最终总细纲汇总稿
+   - 必须整合以上所有文件，而不是重复一份简略摘要
+   - 需要包含逻辑自检（因果链、角色动机一致性、设定不自相矛盾）
 
 ## 最终交付（必须写入文件）
 为避免最终稿只存在于聊天记录里，主持人必须在最终表决通过后调用系统工具：
 - `debate_files_write(path, content)`
-并把最终《小说细纲》写入：
+并按顺序写入：
+- `final/01-story-core.md`
+- `final/02-characters.md`
+- `final/03-world-and-rules.md`
+- `final/04-plot-architecture.md`
+- `final/05-chapter-outline.md`
+- `final/06-foreshadowing-ledger.md`
 - `final/novel_outline_v2.md`
-同时在正文中明确告诉用户“最终稿文件路径”。
+同时在正文中明确告诉用户这些最终文件路径。
 $f$
       ),
       (
@@ -330,14 +470,13 @@ Phase 3（动态轮换讨论，循环迭代）：
 - 主持人每回合必须宣布当前统一模式（创意架构师 / 逻辑审核员 / 可选节奏分析员）。
 - 所有人（包括主持人、监管者、议员）都必须切换到主持人宣布的同一模式并发言。
 - 每个循环至少包含：一次创意发散 + 一次逻辑审核；必要时再补一轮发散修补。
-- 监管者负责监督是否遗漏关键 IDEA、是否流程违规、是否陷入死胡同；必要时可一票否决并要求回滚到正确阶段。
-  - 否决后必须回滚到上一阶段；解除否决需要“多数同意”投票通过。
+- 监管者负责监督是否遗漏关键 IDEA、是否流程违规、是否陷入死胡同；发现问题时必须明确指出并要求主持人补齐。
 
 Phase 4（共识收敛与蓝图生成）：
 - 只有当所有 IDEA 都被明确标记为：吸收/合并/否决（给理由），并且主要矛盾得到解决路径，才允许进入最终表决。
-- 主持人发起最终表决，监管者背书合规性，然后主持人输出最终《蓝图》。
-  - 最终《蓝图》必须是《小说细纲》（包含：主题/核心冲突/人物弧光/世界观规则/关键反转/结构/关键事件清单/伏笔回收/逻辑自检）。
-  - 交付方式（必须）：主持人必须在最终输出后调用 `debate_files_write`，把最终《小说细纲》写入 `final/novel_outline_v2.md`（Markdown），并在正文中写明该路径，便于直接在“辩论文件”里查看/下载。
+- 主持人发起最终表决，监管者给出监督意见，然后主持人输出最终《蓝图》。
+  - 最终《蓝图》必须是“多文件细纲 + 总汇总稿”，不能只交一份简略总纲。
+  - 交付方式（必须）：主持人必须在最终输出后调用 `debate_files_write`，至少写入 `final/01-story-core.md`、`final/02-characters.md`、`final/03-world-and-rules.md`、`final/04-plot-architecture.md`、`final/05-chapter-outline.md`、`final/06-foreshadowing-ledger.md`、`final/novel_outline_v2.md`，并在正文中写明这些路径。
 
 输出要求（每轮都必须满足）：
 - 输出必须是给人看的 Markdown（禁止输出 JSON 对象）。

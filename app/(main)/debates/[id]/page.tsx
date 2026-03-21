@@ -19,7 +19,7 @@ import { Tree, type NodeApi } from "react-arborist";
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 import { MarkdownView } from "@/components/ui/markdown";
 import { createFsTreeModel, type FsNode, normalizeFsPath } from "@/lib/fs-tree";
-import { normalizeDebateWorkflow } from "@/lib/workflow";
+import { formatRequiredDeliverableSummary, normalizeDebateWorkflow } from "@/lib/workflow";
 
 type Agent = {
   id: string;
@@ -79,6 +79,273 @@ type Turn = {
 type LeftTab = "status" | "participants" | "workflow" | "memory";
 
 type LeftTabIconName = "status" | "participants" | "workflow" | "memory";
+
+type WorkflowRulesState = {
+  markdown: string;
+  loading: boolean;
+};
+
+type AllFilesMeta =
+  | { scope: "debate"; path: string }
+  | { scope: "agent"; debateAgentId: string; seat: string; agentName: string; path: string };
+
+type AllFilesContextMenuState =
+  | null
+  | {
+      x: number;
+      y: number;
+      target:
+        | { type: "root" }
+        | { type: "node"; path: string; nodeType: FsNode["type"] };
+    };
+
+type AllFilesContextMenuValue = NonNullable<AllFilesContextMenuState>;
+
+type AllFilesDownloadProgress = {
+  loadedBytes: number;
+  totalBytes: number | null;
+};
+
+type AllFileInfoState = {
+  displayPath: string;
+  charCount: number;
+  byteSize: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+const WORKFLOW_RULES_DISABLED_MARKDOWN = [
+  "**Workflow 规则（未启用）**",
+  "",
+  "- 本场辩论没有启用 workflow（默认关闭）。",
+  "- 如需启用：在策略里创建 `debate/workflow.json`，然后用该策略新建辩论。",
+  "",
+  "- 注意：workflow 在“创建辩论”时复制到辩论共享文件 `workflow.json`，已有辩论不会自动更新。"
+].join("\n");
+
+const WORKFLOW_RULES_ERROR_MARKDOWN = "**Workflow 规则**\n\n- 读取失败（网络错误或内容非 JSON）。";
+
+function formatWorkflowRulesMarkdown(raw: string) {
+  let parsedJson: unknown = null;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    parsedJson = null;
+  }
+  const parsed = normalizeDebateWorkflow(parsedJson);
+  if (!parsed || !parsed.enabled) {
+    return WORKFLOW_RULES_DISABLED_MARKDOWN;
+  }
+
+  const rules: string[] = [];
+  rules.push("**Workflow 规则**");
+  rules.push("");
+  rules.push(`- 版本：v${parsed.workflowVersion}`);
+  rules.push("- 状态：已启用");
+  rules.push("");
+
+  rules.push("**阶段机**");
+  if (parsed.phaseMachine.phases.length === 0) {
+    rules.push("- （未配置）");
+  } else {
+    for (const phase of parsed.phaseMachine.phases) {
+      rules.push(`- ${phase.title}${phase.description ? `：${phase.description}` : ""}`);
+    }
+  }
+  rules.push("");
+
+  rules.push("**官方投票（选举）**");
+  rules.push(`- 允许投票起始轮次：第 ${parsed.election.startRound} 轮起`);
+  rules.push(
+    `- 阶段切换：Phase 2 从第 ${parsed.phaseMachine.transitionRules.election.startRound} 轮开始；自动开选举票=${parsed.phaseMachine.transitionRules.election.autoOpen ? "是" : "否"}`
+  );
+  rules.push(`- 选举角色：${parsed.election.roles.length ? parsed.election.roles.join(" / ") : "（无，禁止 election）"}`);
+  rules.push(`- 平票处理：${parsed.voting.governance.tieBreaker === "seat_order" ? "按席位顺序决胜" : "重新投票"}`);
+  rules.push(`- 最大平票重投次数：${parsed.voting.governance.maxTieRounds}`);
+  rules.push(`- 平票后建议模式：${parsed.voting.governance.fallbackMode ?? "（无）"}`);
+  rules.push(
+    `- 选举后顺序约束（下一轮边界生效）：${
+      parsed.election.speakingOrder.firstRole || parsed.election.speakingOrder.lastRole
+        ? `首位=${parsed.election.speakingOrder.firstRole ?? "（无）"}；末位=${parsed.election.speakingOrder.lastRole ?? "（无）"}`
+        : "无"
+    }`
+  );
+  rules.push("");
+
+  rules.push("**输出与交付**");
+  rules.push(
+    `- Phase 4 进入条件：共识达成=${parsed.phaseMachine.transitionRules.finalization.enterOnConsensus ? "是" : "否"}；打开最终票=${parsed.phaseMachine.transitionRules.finalization.enterOnCustomVote ? "是" : "否"}`
+  );
+  rules.push(
+    `- 完成限制：必须先进入 Phase 4 才能完成=${parsed.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "是" : "否"}`
+  );
+  rules.push(`- 输出格式：${parsed.promptPolicies.responseFormat.requireMarkdown ? "Markdown" : "不强制 Markdown"}`);
+  rules.push(`- 禁止原始 JSON：${parsed.promptPolicies.responseFormat.forbidRawJson ? "是" : "否"}`);
+  rules.push(`- Round 1 公平性提示：${parsed.promptPolicies.round1Fairness ? "开启" : "关闭"}`);
+  rules.push(
+    `- 允许写入路径：${parsed.deliverables.allowedPaths.length ? parsed.deliverables.allowedPaths.join(" / ") : "（无）"}`
+  );
+  rules.push(
+    `- 必交文件：${
+      parsed.deliverables.requiredFiles.length
+        ? parsed.deliverables.requiredFiles.map((item) => formatRequiredDeliverableSummary(item, "display")).join(" / ")
+        : "（无）"
+    }`
+  );
+  rules.push("");
+
+  rules.push("**轮次边界自动重排**");
+  if (parsed.seatOrderRules.length === 0) {
+    rules.push("- 无");
+    return rules.join("\n");
+  }
+
+  for (const rule of parsed.seatOrderRules) {
+    if (rule.policy.type === "reverse") {
+      rules.push(`- 第 ${rule.afterRound} 轮结束后：反转席位顺序（第 ${rule.afterRound + 1} 轮生效）`);
+    } else {
+      rules.push(`- 第 ${rule.afterRound} 轮结束后：轮换席位顺序 offset=${rule.policy.offset}（第 ${rule.afterRound + 1} 轮生效）`);
+    }
+  }
+
+  return rules.join("\n");
+}
+
+async function fetchWorkflowRulesMarkdown(debateId: string) {
+  const response = await fetch(`/api/debates/${debateId}/files?path=${encodeURIComponent("workflow.json")}`, {
+    cache: "no-store"
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return null;
+  }
+  const content = String(payload.data?.content ?? "");
+  return content.trim() ? content : null;
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${Math.floor(value)} B`;
+}
+
+function parseDownloadFileName(header: string | null, fallbackDebateId: string) {
+  return header?.match(/filename=\"([^\"]+)\"/i)?.[1] ?? `debate-${fallbackDebateId}-files.zip`;
+}
+
+async function readDownloadBlobWithProgress(
+  response: Response,
+  onProgress: (progress: AllFilesDownloadProgress) => void
+) {
+  const totalBytesHeader = Number(response.headers.get("content-length"));
+  const totalBytes = Number.isFinite(totalBytesHeader) && totalBytesHeader > 0 ? totalBytesHeader : null;
+  const reader = response.body?.getReader();
+
+  if (!reader) {
+    const blob = await response.blob();
+    onProgress({ loadedBytes: blob.size, totalBytes: totalBytes ?? blob.size });
+    return blob;
+  }
+
+  const chunks: Uint8Array[] = [];
+  let loadedBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    chunks.push(value);
+    loadedBytes += value.byteLength;
+    onProgress({ loadedBytes, totalBytes });
+  }
+
+  const blob = new Blob(chunks, { type: "application/zip" });
+  onProgress({ loadedBytes: loadedBytes || blob.size, totalBytes: totalBytes ?? blob.size });
+  return blob;
+}
+
+async function fetchAllFileInfoPayload(input: {
+  debateId: string;
+  meta: AllFilesMeta;
+}) {
+  const response = await fetch(`/api/debates/${input.debateId}/file-info`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(
+      input.meta.scope === "debate"
+        ? { scope: "debate", path: input.meta.path }
+        : { scope: "agent", debateAgentId: input.meta.debateAgentId, path: input.meta.path }
+    )
+  });
+  const payload = await response.json().catch(() => ({}));
+  return { response, payload };
+}
+
+function buildAllFilesMetaByVirtualPath(items: unknown[]) {
+  const next: Record<string, AllFilesMeta> = {};
+
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const entry = item as Record<string, unknown>;
+    const scope = entry.scope === "agent" ? "agent" : "debate";
+    const path = String(entry.path ?? "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!path) continue;
+
+    if (scope === "debate") {
+      next[`debate/${path}`] = { scope: "debate", path };
+      continue;
+    }
+
+    const debateAgentId = String(entry.debateAgentId ?? "").trim();
+    if (!debateAgentId) continue;
+    const agentName = String(entry.agentName ?? "Unknown").trim() || "Unknown";
+    const turnOrderRaw = Number(entry.turnOrder);
+    const seatNumber = Number.isFinite(turnOrderRaw) && turnOrderRaw > 0 ? Math.floor(turnOrderRaw) : null;
+    const seat = seatNumber ? `Seat-${seatNumber}` : "Seat-?";
+    const folderName = `${seat} ${agentName} (${debateAgentId.slice(0, 4)})`;
+    next[`agents/${folderName}/${path}`] = { scope: "agent", debateAgentId, seat, agentName, path };
+  }
+
+  return next;
+}
+
+function computeNextAllFilesSelection(input: {
+  path: string;
+  anchor: string;
+  visiblePaths: string[];
+  selectedPaths: string[];
+  mode: "click" | "contextmenu";
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+}) {
+  const extend = input.ctrlKey || input.metaKey;
+  const selectedPathSet = new Set(input.selectedPaths);
+
+  if (input.mode === "contextmenu" && selectedPathSet.has(input.path)) {
+    return { selectedPaths: input.selectedPaths, anchor: input.path };
+  }
+
+  let nextSelectedPaths: string[] = [input.path];
+  if (input.shiftKey) {
+    const anchor =
+      input.anchor && input.visiblePaths.includes(input.anchor) ? input.anchor : input.path;
+    const start = input.visiblePaths.indexOf(anchor);
+    const end = input.visiblePaths.indexOf(input.path);
+    if (start >= 0 && end >= 0) {
+      const [from, to] = start <= end ? [start, end] : [end, start];
+      const range = input.visiblePaths.slice(from, to + 1);
+      nextSelectedPaths = extend ? Array.from(new Set([...input.selectedPaths, ...range])) : range;
+    }
+  } else if (extend) {
+    nextSelectedPaths = selectedPathSet.has(input.path)
+      ? input.selectedPaths.filter((item) => item !== input.path)
+      : [...input.selectedPaths, input.path];
+  }
+
+  if (nextSelectedPaths.length === 0) nextSelectedPaths = [input.path];
+  return { selectedPaths: nextSelectedPaths, anchor: input.path };
+}
 
 function UsageBar({ ratio }: { ratio: number | null }) {
   const pct = ratio === null ? null : Math.max(0, Math.min(100, Math.round(ratio * 100)));
@@ -164,6 +431,486 @@ const AllFilesTreeRow = memo(
     return at === bt;
   }
 );
+
+function FileInfoDialog(props: {
+  open: boolean;
+  loading: boolean;
+  info: AllFileInfoState | null;
+  onClose: () => void;
+}) {
+  if (!props.open) return null;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={props.onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(15, 23, 42, 0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 24,
+        zIndex: 1001
+      }}
+    >
+      <div className="panel stack" onClick={(event) => event.stopPropagation()} style={{ width: "min(560px, 100%)" }}>
+        <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+          <strong>文件信息</strong>
+          <button className="btn" type="button" onClick={props.onClose}>
+            关闭
+          </button>
+        </div>
+        {props.loading ? (
+          <div className="muted">读取中...</div>
+        ) : props.info ? (
+          <div className="stack" style={{ gap: 10 }}>
+            <div className="panel">
+              <div className="muted" style={{ marginBottom: 6 }}>
+                路径
+              </div>
+              <div style={{ wordBreak: "break-all" }}>{props.info.displayPath}</div>
+            </div>
+            <div className="grid grid-2" style={{ gap: 10 }}>
+              <div className="panel stack" style={{ gap: 6 }}>
+                <span className="muted">字数</span>
+                <strong>{props.info.charCount.toLocaleString()}</strong>
+              </div>
+              <div className="panel stack" style={{ gap: 6 }}>
+                <span className="muted">大小</span>
+                <strong>{props.info.byteSize.toLocaleString()} bytes</strong>
+              </div>
+              <div className="panel stack" style={{ gap: 6 }}>
+                <span className="muted">创建时间</span>
+                <strong>{props.info.createdAt ? new Date(props.info.createdAt).toLocaleString() : "-"}</strong>
+              </div>
+              <div className="panel stack" style={{ gap: 6 }}>
+                <span className="muted">修改时间</span>
+                <strong>{props.info.updatedAt ? new Date(props.info.updatedAt).toLocaleString() : "-"}</strong>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="muted">暂无可显示的信息</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DownloadProgressDialog(props: {
+  progress: AllFilesDownloadProgress | null;
+  progressPct: number | null;
+}) {
+  if (!props.progress) return null;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(15, 23, 42, 0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 24,
+        zIndex: 1001
+      }}
+    >
+      <div className="panel stack" style={{ width: "min(520px, 100%)", gap: 12 }}>
+        <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+          <strong style={{ fontSize: 14 }}>下载进度</strong>
+          <span className="muted">
+            {formatBytes(props.progress.loadedBytes)}
+            {props.progress.totalBytes ? ` / ${formatBytes(props.progress.totalBytes)}` : ""}
+            {props.progressPct !== null ? ` · ${props.progressPct}%` : " · 准备中..."}
+          </span>
+        </div>
+        <div
+          style={{
+            width: "100%",
+            height: 12,
+            borderRadius: 999,
+            overflow: "hidden",
+            background: "rgba(148, 163, 184, 0.18)"
+          }}
+        >
+          <div
+            className={props.progressPct === null ? "downloadProgressBarIndeterminate" : ""}
+            style={{
+              height: "100%",
+              width: props.progressPct === null ? "35%" : `${props.progressPct}%`,
+              borderRadius: 999,
+              background:
+                "linear-gradient(90deg, rgba(37, 99, 235, 0.85), rgba(59, 130, 246, 0.95), rgba(96, 165, 250, 0.9))"
+            }}
+          />
+        </div>
+        <div className="muted">文件准备完成后会自动开始浏览器下载。</div>
+      </div>
+    </div>
+  );
+}
+
+function WorkflowRulesPanel(props: {
+  markdown: string;
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="panel stack">
+      <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+        <strong style={{ fontSize: 14 }}>Workflow 规则</strong>
+        <button className="btn" type="button" disabled={props.loading} onClick={props.onRefresh}>
+          刷新
+        </button>
+      </div>
+      <MarkdownView className="md-compact" value={props.markdown || "**Workflow 规则**\n\n- 读取中..."} />
+    </div>
+  );
+}
+
+function DebateFilesToolbar(props: {
+  selectedCount: number;
+  downloading: boolean;
+  loading: boolean;
+  onDownload: () => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+      <strong>辩论文件</strong>
+      <div className="row" style={{ gap: 8 }}>
+        <button
+          className="btn"
+          type="button"
+          disabled={props.selectedCount === 0 || props.downloading}
+          onClick={props.onDownload}
+        >
+          {props.downloading ? "下载中..." : `下载选中${props.selectedCount > 0 ? `（${props.selectedCount}）` : ""}`}
+        </button>
+        <button className="btn" type="button" disabled={props.loading} onClick={props.onRefresh}>
+          刷新
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DebateFilesContextMenu(props: {
+  menu: AllFilesContextMenuValue | null;
+  selectedCount: number;
+  downloading: boolean;
+  onClose: () => void;
+  onOpenFileInfo: (virtualPath: string) => void;
+  onDownload: () => void;
+}) {
+  if (!props.menu) return null;
+
+  const canOpenFileInfo = props.menu.target.type === "node" && props.menu.target.nodeType === "file";
+
+  return (
+    <div className="contextOverlay" onClick={props.onClose}>
+      <div
+        className="contextMenu"
+        style={{ left: props.menu.x, top: props.menu.y }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <button
+          className="contextMenuItem"
+          type="button"
+          disabled={!canOpenFileInfo}
+          onClick={() => {
+            if (!canOpenFileInfo) return;
+            props.onOpenFileInfo(props.menu.target.path);
+          }}
+        >
+          获取文件信息
+        </button>
+        <button
+          className="contextMenuItem"
+          type="button"
+          disabled={props.selectedCount === 0 || props.downloading}
+          onClick={props.onDownload}
+        >
+          {props.downloading
+            ? "下载中..."
+            : props.selectedCount > 0
+              ? `下载选中项（${props.selectedCount}）`
+              : "下载选中项"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DebateFilesPanel(props: {
+  selectedCount: number;
+  downloading: boolean;
+  loading: boolean;
+  hasFiles: boolean;
+  tree: FsNode[];
+  renderNode: (props: { node: NodeApi<FsNode>; style: CSSProperties }) => JSX.Element;
+  contextMenu: AllFilesContextMenuValue | null;
+  onDownload: () => void;
+  onRefresh: () => void;
+  onRootContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  onCloseContextMenu: () => void;
+  onOpenFileInfo: (virtualPath: string) => void;
+}) {
+  return (
+    <div className="panel stack">
+      <DebateFilesToolbar
+        selectedCount={props.selectedCount}
+        downloading={props.downloading}
+        loading={props.loading}
+        onDownload={props.onDownload}
+        onRefresh={props.onRefresh}
+      />
+      <div className="muted">包含辩论文件（debate/*）与每席位文件（agents/*）。</div>
+      {props.loading ? (
+        <div className="muted">读取中...</div>
+      ) : !props.hasFiles ? (
+        <div className="muted">暂无文件（通常需要至少一轮发言后才会逐步生成）。</div>
+      ) : (
+        <div className="treeRoot" style={{ maxHeight: "calc(100vh - 260px)" }} onContextMenu={props.onRootContextMenu}>
+          <Tree<FsNode> data={props.tree} width="100%" height={560} indent={18} rowHeight={34} openByDefault={false}>
+            {props.renderNode}
+          </Tree>
+        </div>
+      )}
+      <DebateFilesContextMenu
+        menu={props.contextMenu}
+        selectedCount={props.selectedCount}
+        downloading={props.downloading}
+        onClose={props.onCloseContextMenu}
+        onOpenFileInfo={props.onOpenFileInfo}
+        onDownload={props.onDownload}
+      />
+    </div>
+  );
+}
+
+function ParticipantsPanel(props: {
+  canAddAgent: boolean;
+  agentCount: number;
+  availableAgents: Agent[];
+  newAgentId: string;
+  isAddingAgent: boolean;
+  isOwner: boolean;
+  debateStatus: string;
+  canReorderSeats: boolean;
+  isReorderingSeats: boolean;
+  participantCount: number;
+  agents: DebateAgent[];
+  resettingUsageByDebateAgentId: Record<string, boolean>;
+  contextTotalsByDebateAgentId: Record<
+    string,
+    {
+      sessionPromptTokens: number;
+      contextLength: number | null;
+      ratio: number | null;
+      sessionId?: number;
+    }
+  >;
+  onChangeNewAgentId: (value: string) => void;
+  onAddAgent: () => void;
+  onResetUsageSession: (debateAgentId: string) => void;
+  onMoveSeat: (debateAgentId: string, direction: -1 | 1) => void;
+}) {
+  return (
+    <Fragment>
+      {props.canAddAgent ? (
+        <div className="panel">
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <strong>加入新的 AI（会排在最后）</strong>
+            <span className="muted">当前 {props.agentCount}</span>
+          </div>
+          <div className="row">
+            <select value={props.newAgentId} onChange={(event) => props.onChangeNewAgentId(event.target.value)} style={{ flex: 1 }}>
+              <option value="">选择一个 AI 配置</option>
+              {props.availableAgents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name} · {agent.provider} · {agent.model}
+                </option>
+              ))}
+            </select>
+            <button className="btn btn-primary" disabled={!props.newAgentId || props.isAddingAgent} onClick={props.onAddAgent}>
+              加入
+            </button>
+          </div>
+          <div className="muted">仅支持进行中/暂停中的辩论加入。</div>
+        </div>
+      ) : null}
+      {props.isOwner ? (
+        <div className="panel">
+          <strong>上下文累计</strong>
+          <div className="muted">本段累计：按“本段（新会话/新 segment）开始后”的 prompt tokens 增量计算，最多 100%。</div>
+        </div>
+      ) : null}
+      {props.agents.map((agent) => {
+        const totals = props.contextTotalsByDebateAgentId[agent.debateAgentId] ?? null;
+        const ratio = typeof totals?.ratio === "number" && Number.isFinite(totals.ratio) ? totals.ratio : null;
+
+        return (
+          <div className="panel" key={agent.debateAgentId}>
+            <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+              <span>
+                #{agent.turnOrder} {agent.displayName}
+                <span className="muted">
+                  {" "}
+                  · {agent.name} · 发言 {agent.turnCount}
+                </span>
+              </span>
+              {props.isOwner ? (
+                <div className="row" style={{ gap: 6 }}>
+                  <button
+                    className="btn"
+                    type="button"
+                    disabled={Boolean(props.resettingUsageByDebateAgentId[agent.debateAgentId])}
+                    onClick={() => props.onResetUsageSession(agent.debateAgentId)}
+                  >
+                    新会话
+                  </button>
+                  {props.isOwner && ["pending", "paused"].includes(props.debateStatus) ? (
+                    <Fragment>
+                      <button
+                        className="btn"
+                        type="button"
+                        disabled={!props.canReorderSeats || props.isReorderingSeats || agent.turnOrder <= 1}
+                        onClick={() => props.onMoveSeat(agent.debateAgentId, -1)}
+                      >
+                        上移
+                      </button>
+                      <button
+                        className="btn"
+                        type="button"
+                        disabled={!props.canReorderSeats || props.isReorderingSeats || agent.turnOrder >= props.participantCount}
+                        onClick={() => props.onMoveSeat(agent.debateAgentId, 1)}
+                      >
+                        下移
+                      </button>
+                    </Fragment>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+            {props.isOwner ? (
+              <div className="row" style={{ justifyContent: "space-between", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+                <span className="muted">本段累计</span>
+                <UsageBar ratio={ratio} />
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </Fragment>
+  );
+}
+
+function StatusQuestionPanel(props: {
+  debate: Debate;
+  questionVersion: number | null;
+  questionDraft: string;
+  questionDirty: boolean;
+  isSavingQuestion: boolean;
+  onOpenZoom: () => void;
+  onOpenHistory: () => void;
+  onSave: () => void;
+  onChangeDraft: (next: string) => void;
+}) {
+  const editable = props.debate.isOwner && ["pending", "paused"].includes(props.debate.status);
+
+  return (
+    <Fragment>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+        <strong>问题</strong>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn" type="button" onClick={props.onOpenZoom}>
+            放大
+          </button>
+          {props.debate.isOwner ? (
+            <button className="btn" type="button" onClick={props.onOpenHistory}>
+              {props.questionVersion ? `版本 v${props.questionVersion}` : "版本历史"}
+            </button>
+          ) : null}
+          {editable ? (
+            <button className="btn btn-primary" disabled={props.isSavingQuestion || !props.questionDirty} type="button" onClick={props.onSave}>
+              {props.isSavingQuestion ? "保存中..." : "保存"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {editable ? (
+        <LineNumberTextarea
+          value={props.questionDraft}
+          onChange={props.onChangeDraft}
+          maxLength={50_000}
+          height={160}
+          readOnly={!props.debate.isOwner}
+          baseline={props.debate.question}
+        />
+      ) : (
+        <div className="panel" style={{ whiteSpace: "pre-wrap", maxHeight: 200, overflowY: "auto" }}>
+          {props.debate.question}
+        </div>
+      )}
+      {editable ? (
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <span className="muted">{props.questionDraft.length.toLocaleString()}/50,000</span>
+          <span className="muted">
+            {props.debate.status === "pending" ? "开始后需先暂停才能编辑" : "保存后会把 diff 全局通知所有 AI"}
+          </span>
+        </div>
+      ) : null}
+    </Fragment>
+  );
+}
+
+function StatusSummaryPanel(props: {
+  debate: Debate;
+  agentCount: number;
+  completedRounds: number;
+  liveAgentName: string;
+  liveDisplayRound: number | null;
+  liveDisplayMessage: number | null;
+  liveStatus: string;
+}) {
+  return (
+    <Fragment>
+      {props.debate.status === "running" ? (
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <strong>
+            当前：{props.liveAgentName || "未知"}
+            {props.liveDisplayRound ? ` · 第 ${props.liveDisplayRound} 轮` : ""}
+            {props.liveDisplayMessage
+              ? (() => {
+                  const turnInRound =
+                    props.agentCount > 0 ? ((props.liveDisplayMessage - 1) % props.agentCount) + 1 : null;
+                  return ` · #${props.liveDisplayMessage}${turnInRound ? `（第 ${turnInRound} 回）` : ""}`;
+                })()
+              : ""}
+          </strong>
+          <span className="muted">{props.liveStatus || "运行中"}</span>
+        </div>
+      ) : null}
+      <div className="muted">
+        轮次 {props.completedRounds}/{props.debate.maxTurns <= 0 ? "∞" : props.debate.maxTurns} · 参与者 {props.agentCount}
+      </div>
+      <div className="muted">token {props.debate.tokenUsed}</div>
+      <div className="muted">
+        共识: {props.debate.consensusReached ? "已达成" : "未达成"}
+        {props.debate.consensusSummary
+          ? ` · ${props.debate.consensusSummary.leadingSolution} · ${props.debate.consensusSummary.score}`
+          : ""}
+      </div>
+    </Fragment>
+  );
+}
 
 function LeftTabIcon({ name }: { name: LeftTabIconName }) {
   const baseProps = {
@@ -570,39 +1317,17 @@ export default function DebateDetailPage() {
   } | null>(null);
   const [allFilesLoading, setAllFilesLoading] = useState(false);
   const [allFilesMetaByVirtualPath, setAllFilesMetaByVirtualPath] = useState<
-    Record<
-      string,
-      | { scope: "debate"; path: string }
-      | { scope: "agent"; debateAgentId: string; seat: string; agentName: string; path: string }
-    >
+    Record<string, AllFilesMeta>
   >({});
   const [activeAllFileVirtualPath, setActiveAllFileVirtualPath] = useState("");
   const [selectedAllFileVirtualPaths, setSelectedAllFileVirtualPaths] = useState<string[]>([]);
   const [allFilesSelectionAnchor, setAllFilesSelectionAnchor] = useState("");
-  const [allFilesContextMenu, setAllFilesContextMenu] = useState<
-    | null
-    | {
-        x: number;
-        y: number;
-        target:
-          | { type: "root" }
-          | { type: "node"; path: string; nodeType: FsNode["type"] };
-      }
-  >(null);
+  const [allFilesContextMenu, setAllFilesContextMenu] = useState<AllFilesContextMenuState>(null);
   const [allFilesDownloading, setAllFilesDownloading] = useState(false);
-  const [allFilesDownloadProgress, setAllFilesDownloadProgress] = useState<{
-    loadedBytes: number;
-    totalBytes: number | null;
-  } | null>(null);
+  const [allFilesDownloadProgress, setAllFilesDownloadProgress] = useState<AllFilesDownloadProgress | null>(null);
   const [allFileInfoOpen, setAllFileInfoOpen] = useState(false);
   const [allFileInfoLoading, setAllFileInfoLoading] = useState(false);
-  const [allFileInfo, setAllFileInfo] = useState<null | {
-    displayPath: string;
-    charCount: number;
-    byteSize: number;
-    createdAt: string;
-    updatedAt: string;
-  }>(null);
+  const [allFileInfo, setAllFileInfo] = useState<AllFileInfoState | null>(null);
   const allFilesLoadedRef = useRef(false);
   const [liveRoundNumber, setLiveRoundNumber] = useState<number | null>(null);
   const [liveMessageNumber, setLiveMessageNumber] = useState<number | null>(null);
@@ -619,8 +1344,7 @@ export default function DebateDetailPage() {
   const [voteByRound, setVoteByRound] = useState<Record<number, OfficialVoteClosed>>({});
   const [voteLoadingRound, setVoteLoadingRound] = useState<number | null>(null);
   const [openRoundsByNumber, setOpenRoundsByNumber] = useState<Record<number, boolean>>({});
-  const [workflowRulesMarkdown, setWorkflowRulesMarkdown] = useState<string>("");
-  const [workflowRulesLoading, setWorkflowRulesLoading] = useState(false);
+  const [workflowRulesState, setWorkflowRulesState] = useState<WorkflowRulesState>({ markdown: "", loading: false });
   const lastLoadErrorAtRef = useRef(0);
   const lastVoteIndexAtRef = useRef(0);
   const lastContextUsageAtRef = useRef(0);
@@ -883,90 +1607,23 @@ export default function DebateDetailPage() {
     }
   }
 
-  function formatWorkflowRulesMarkdown(raw: string) {
-    let parsedJson: unknown = null;
-    try {
-      parsedJson = JSON.parse(raw);
-    } catch {
-      parsedJson = null;
-    }
-    const parsed = normalizeDebateWorkflow(parsedJson);
-    if (!parsed || !parsed.enabled) {
-      return [
-        "**Workflow 规则（未启用）**",
-        "",
-        "- 本场辩论没有启用 workflow（默认关闭）。",
-        "- 如需启用：在策略里创建 `debate/workflow.json`，然后用该策略新建辩论。",
-        "",
-        "- 注意：workflow 在“创建辩论”时复制到辩论共享文件 `workflow.json`，已有辩论不会自动更新。"
-      ].join("\n");
-    }
-
-    const rules: string[] = [];
-    rules.push("**Workflow 规则**");
-    rules.push("");
-    rules.push(`- 版本：v${parsed.workflowVersion}`);
-    rules.push("- 状态：已启用");
-    rules.push("");
-
-    rules.push("**官方投票（选举）**");
-    rules.push(`- 允许投票起始轮次：第 ${parsed.election.startRound} 轮起`);
-    rules.push(
-      `- 选举角色：${parsed.election.roles.length ? parsed.election.roles.join(" / ") : "（无，禁止 election）"}`
-    );
-    rules.push(
-      `- 选举后顺序约束（下一轮边界生效）：${
-        parsed.election.speakingOrder.firstRole || parsed.election.speakingOrder.lastRole
-          ? `首位=${parsed.election.speakingOrder.firstRole ?? "（无）"}；末位=${parsed.election.speakingOrder.lastRole ?? "（无）"}`
-          : "无"
-      }`
-    );
-    rules.push("");
-
-    rules.push("**轮次边界自动重排**");
-    if (parsed.seatOrderRules.length === 0) {
-      rules.push("- 无");
-      return rules.join("\n");
-    }
-
-    for (const rule of parsed.seatOrderRules) {
-      if (rule.policy.type === "reverse") {
-        rules.push(`- 第 ${rule.afterRound} 轮结束后：反转席位顺序（第 ${rule.afterRound + 1} 轮生效）`);
-      } else {
-        rules.push(
-          `- 第 ${rule.afterRound} 轮结束后：轮换席位顺序 offset=${rule.policy.offset}（第 ${rule.afterRound + 1} 轮生效）`
-        );
-      }
-    }
-
-    return rules.join("\n");
-  }
-
   async function loadWorkflowRules() {
     if (!id) return null;
-    if (workflowRulesLoading) return null;
-    setWorkflowRulesLoading(true);
+    if (workflowRulesState.loading) return null;
+    setWorkflowRulesState((current) => ({ ...current, loading: true }));
     try {
-      const response = await fetch(`/api/debates/${id}/files?path=${encodeURIComponent("workflow.json")}`, {
-        cache: "no-store"
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        setWorkflowRulesMarkdown(formatWorkflowRulesMarkdown("{}"));
+      const content = await fetchWorkflowRulesMarkdown(id);
+      if (!content) {
+        setWorkflowRulesState({ markdown: formatWorkflowRulesMarkdown("{}"), loading: false });
         return null;
       }
-      const content = String(payload.data?.content ?? "");
-      if (!content.trim()) {
-        setWorkflowRulesMarkdown(formatWorkflowRulesMarkdown("{}"));
-        return null;
-      }
-      setWorkflowRulesMarkdown(formatWorkflowRulesMarkdown(content));
+      setWorkflowRulesState({ markdown: formatWorkflowRulesMarkdown(content), loading: false });
       return content;
     } catch {
-      setWorkflowRulesMarkdown("**Workflow 规则**\n\n- 读取失败（网络错误或内容非 JSON）。");
+      setWorkflowRulesState({ markdown: WORKFLOW_RULES_ERROR_MARKDOWN, loading: false });
       return null;
     } finally {
-      setWorkflowRulesLoading(false);
+      setWorkflowRulesState((current) => (current.loading ? { ...current, loading: false } : current));
     }
   }
 
@@ -1459,30 +2116,7 @@ export default function DebateDetailPage() {
       }
 
       const list = Array.isArray(payload.data) ? (payload.data as unknown[]) : [];
-      const next: typeof allFilesMetaByVirtualPath = {};
-
-      for (const item of list) {
-        if (!item || typeof item !== "object") continue;
-        const it = item as Record<string, unknown>;
-        const scope = it.scope === "agent" ? "agent" : "debate";
-        const path = String(it.path ?? "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
-        if (!path) continue;
-
-        if (scope === "debate") {
-          const virtualPath = `debate/${path}`;
-          next[virtualPath] = { scope: "debate", path };
-        } else {
-          const debateAgentId = String(it.debateAgentId ?? "").trim();
-          if (!debateAgentId) continue;
-          const agentName = String(it.agentName ?? "Unknown").trim() || "Unknown";
-          const turnOrderRaw = Number(it.turnOrder);
-          const seatNumber = Number.isFinite(turnOrderRaw) && turnOrderRaw > 0 ? Math.floor(turnOrderRaw) : null;
-          const seat = seatNumber ? `Seat-${seatNumber}` : "Seat-?";
-          const folderName = `${seat} ${agentName} (${debateAgentId.slice(0, 4)})`;
-          const virtualPath = `agents/${folderName}/${path}`;
-          next[virtualPath] = { scope: "agent", debateAgentId, seat, agentName, path };
-        }
-      }
+      const next = buildAllFilesMetaByVirtualPath(list);
 
       allFilesLoadedRef.current = true;
       setAllFilesMetaByVirtualPath(next);
@@ -1885,37 +2519,21 @@ export default function DebateDetailPage() {
 
   const updateAllFilesSelection = useCallback(
     (node: NodeApi<FsNode>, event: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }, mode: "click" | "contextmenu") => {
-      const path = node.data.path;
-      const extend = event.ctrlKey || event.metaKey;
-
-      if (mode === "contextmenu" && selectedAllFilesSet.has(path)) {
-        setAllFilesSelectionAnchor(path);
-        return selectedAllFileVirtualPaths;
-      }
-
-      let next: string[] = [path];
-      if (event.shiftKey) {
-        const visiblePaths = node.tree.visibleNodes.map((item) => item.data.path);
-        const anchor = allFilesSelectionAnchor && visiblePaths.includes(allFilesSelectionAnchor) ? allFilesSelectionAnchor : path;
-        const start = visiblePaths.indexOf(anchor);
-        const end = visiblePaths.indexOf(path);
-        if (start >= 0 && end >= 0) {
-          const [from, to] = start <= end ? [start, end] : [end, start];
-          const range = visiblePaths.slice(from, to + 1);
-          next = extend ? Array.from(new Set([...selectedAllFileVirtualPaths, ...range])) : range;
-        }
-      } else if (extend) {
-        next = selectedAllFilesSet.has(path)
-          ? selectedAllFileVirtualPaths.filter((item) => item !== path)
-          : [...selectedAllFileVirtualPaths, path];
-      }
-
-      if (next.length === 0) next = [path];
-      setSelectedAllFileVirtualPaths(next);
-      setAllFilesSelectionAnchor(path);
-      return next;
+      const nextSelection = computeNextAllFilesSelection({
+        path: node.data.path,
+        anchor: allFilesSelectionAnchor,
+        visiblePaths: node.tree.visibleNodes.map((item) => item.data.path),
+        selectedPaths: selectedAllFileVirtualPaths,
+        mode,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey
+      });
+      setSelectedAllFileVirtualPaths(nextSelection.selectedPaths);
+      setAllFilesSelectionAnchor(nextSelection.anchor);
+      return nextSelection.selectedPaths;
     },
-    [allFilesSelectionAnchor, selectedAllFileVirtualPaths, selectedAllFilesSet]
+    [allFilesSelectionAnchor, selectedAllFileVirtualPaths]
   );
 
   async function downloadSelectedAllFiles() {
@@ -1939,40 +2557,8 @@ export default function DebateDetailPage() {
         showToast("error", payload.error?.message ?? "下载失败");
         return;
       }
-
-      const totalBytesHeader = Number(response.headers.get("content-length"));
-      const totalBytes = Number.isFinite(totalBytesHeader) && totalBytesHeader > 0 ? totalBytesHeader : null;
-      const reader = response.body?.getReader();
-      let blob: Blob;
-
-      if (!reader) {
-        blob = await response.blob();
-        setAllFilesDownloadProgress({
-          loadedBytes: blob.size,
-          totalBytes: totalBytes ?? blob.size
-        });
-      } else {
-        const chunks: Uint8Array[] = [];
-        let loadedBytes = 0;
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (!value) continue;
-          chunks.push(value);
-          loadedBytes += value.byteLength;
-          setAllFilesDownloadProgress({ loadedBytes, totalBytes });
-        }
-        blob = new Blob(chunks, { type: "application/zip" });
-        setAllFilesDownloadProgress({
-          loadedBytes: loadedBytes || blob.size,
-          totalBytes: totalBytes ?? blob.size
-        });
-      }
-
-      const header = response.headers.get("content-disposition") ?? "";
-      const fileName =
-        header.match(/filename=\"([^\"]+)\"/i)?.[1] ??
-        `debate-${id}-files.zip`;
+      const blob = await readDownloadBlobWithProgress(response, setAllFilesDownloadProgress);
+      const fileName = parseDownloadFileName(response.headers.get("content-disposition"), id);
 
       const href = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -2010,16 +2596,7 @@ export default function DebateDetailPage() {
     setAllFileInfo(null);
 
     try {
-      const response = await fetch(`/api/debates/${id}/file-info`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          meta.scope === "debate"
-            ? { scope: "debate", path: meta.path }
-            : { scope: "agent", debateAgentId: meta.debateAgentId, path: meta.path }
-        )
-      });
-      const payload = await response.json().catch(() => ({}));
+      const { response, payload } = await fetchAllFileInfoPayload({ debateId: id, meta });
       if (!response.ok) {
         showToast("error", payload.error?.message ?? "读取文件信息失败");
         setAllFileInfoOpen(false);
@@ -2065,13 +2642,6 @@ export default function DebateDetailPage() {
           Math.min(100, Math.round((allFilesDownloadProgress.loadedBytes / allFilesDownloadProgress.totalBytes) * 100))
         )
       : null;
-
-  const formatBytes = (value: number) => {
-    if (!Number.isFinite(value) || value <= 0) return "0 B";
-    if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-    if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
-    return `${Math.floor(value)} B`;
-  };
 
   const availableAgents = agents;
   const canAddAgent =
@@ -2447,120 +3017,16 @@ export default function DebateDetailPage() {
           </div>
         </div>
       ) : null}
-      {allFileInfoOpen ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          onClick={() => {
-            setAllFileInfoOpen(false);
-            setAllFileInfo(null);
-          }}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15, 23, 42, 0.45)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 24,
-            zIndex: 1001
-          }}
-        >
-          <div className="panel stack" onClick={(event) => event.stopPropagation()} style={{ width: "min(560px, 100%)" }}>
-            <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-              <strong>文件信息</strong>
-              <button
-                className="btn"
-                type="button"
-                onClick={() => {
-                  setAllFileInfoOpen(false);
-                  setAllFileInfo(null);
-                }}
-              >
-                关闭
-              </button>
-            </div>
-            {allFileInfoLoading ? (
-              <div className="muted">读取中...</div>
-            ) : allFileInfo ? (
-              <div className="stack" style={{ gap: 10 }}>
-                <div className="panel">
-                  <div className="muted" style={{ marginBottom: 6 }}>路径</div>
-                  <div style={{ wordBreak: "break-all" }}>{allFileInfo.displayPath}</div>
-                </div>
-                <div className="grid grid-2" style={{ gap: 10 }}>
-                  <div className="panel stack" style={{ gap: 6 }}>
-                    <span className="muted">字数</span>
-                    <strong>{allFileInfo.charCount.toLocaleString()}</strong>
-                  </div>
-                  <div className="panel stack" style={{ gap: 6 }}>
-                    <span className="muted">大小</span>
-                    <strong>{allFileInfo.byteSize.toLocaleString()} bytes</strong>
-                  </div>
-                  <div className="panel stack" style={{ gap: 6 }}>
-                    <span className="muted">创建时间</span>
-                    <strong>{allFileInfo.createdAt ? new Date(allFileInfo.createdAt).toLocaleString() : "-"}</strong>
-                  </div>
-                  <div className="panel stack" style={{ gap: 6 }}>
-                    <span className="muted">修改时间</span>
-                    <strong>{allFileInfo.updatedAt ? new Date(allFileInfo.updatedAt).toLocaleString() : "-"}</strong>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="muted">暂无可显示的信息</div>
-            )}
-          </div>
-        </div>
-      ) : null}
-      {allFilesDownloadProgress ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15, 23, 42, 0.45)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 24,
-            zIndex: 1001
-          }}
-        >
-          <div className="panel stack" style={{ width: "min(520px, 100%)", gap: 12 }}>
-            <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-              <strong style={{ fontSize: 14 }}>下载进度</strong>
-              <span className="muted">
-                {formatBytes(allFilesDownloadProgress.loadedBytes)}
-                {allFilesDownloadProgress.totalBytes ? ` / ${formatBytes(allFilesDownloadProgress.totalBytes)}` : ""}
-                {downloadProgressPct !== null ? ` · ${downloadProgressPct}%` : " · 准备中..."}
-              </span>
-            </div>
-            <div
-              style={{
-                width: "100%",
-                height: 12,
-                borderRadius: 999,
-                overflow: "hidden",
-                background: "rgba(148, 163, 184, 0.18)"
-              }}
-            >
-              <div
-                className={downloadProgressPct === null ? "downloadProgressBarIndeterminate" : ""}
-                style={{
-                  height: "100%",
-                  width: downloadProgressPct === null ? "35%" : `${downloadProgressPct}%`,
-                  borderRadius: 999,
-                  background:
-                    "linear-gradient(90deg, rgba(37, 99, 235, 0.85), rgba(59, 130, 246, 0.95), rgba(96, 165, 250, 0.9))"
-                }}
-              />
-            </div>
-            <div className="muted">文件准备完成后会自动开始浏览器下载。</div>
-          </div>
-        </div>
-      ) : null}
+      <FileInfoDialog
+        open={allFileInfoOpen}
+        loading={allFileInfoLoading}
+        info={allFileInfo}
+        onClose={() => {
+          setAllFileInfoOpen(false);
+          setAllFileInfo(null);
+        }}
+      />
+      <DownloadProgressDialog progress={allFilesDownloadProgress} progressPct={downloadProgressPct} />
       {memoryOpen ? (
         <div
           role="dialog"
@@ -2716,262 +3182,78 @@ export default function DebateDetailPage() {
             <div>
               <span className={`badge badge-${debate.status}`}>{debate.status}</span>
             </div>
-            <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
-              <strong>问题</strong>
-              <div className="row" style={{ gap: 8 }}>
-                <button className="btn" type="button" onClick={() => setQuestionZoomOpen(true)}>
-                  放大
-                </button>
-                {debate.isOwner ? (
-                  <button className="btn" type="button" onClick={() => void openQuestionHistory()}>
-                    {questionVersion ? `版本 v${questionVersion}` : "版本历史"}
-                  </button>
-                ) : null}
-                {debate.isOwner && ["pending", "paused"].includes(debate.status) ? (
-                  <button
-                    className="btn btn-primary"
-                    disabled={isSavingQuestion || !questionDirty}
-                    type="button"
-                    onClick={() => void saveQuestion()}
-                  >
-                    {isSavingQuestion ? "保存中..." : "保存"}
-                  </button>
-                ) : null}
-              </div>
-            </div>
-            {debate.isOwner && ["pending", "paused"].includes(debate.status) ? (
-              <LineNumberTextarea
-                value={questionDraft}
-                onChange={(next) => {
-                  setQuestionDraft(next);
-                  setQuestionDirty(true);
-                }}
-                maxLength={50_000}
-                height={160}
-                readOnly={!debate.isOwner}
-                baseline={debate.question}
-              />
-            ) : (
-              <div className="panel" style={{ whiteSpace: "pre-wrap", maxHeight: 200, overflowY: "auto" }}>
-                {debate.question}
-              </div>
-            )}
-            {debate.isOwner && ["pending", "paused"].includes(debate.status) ? (
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <span className="muted">{questionDraft.length.toLocaleString()}/50,000</span>
-                <span className="muted">
-                  {debate.status === "pending" ? "开始后需先暂停才能编辑" : "保存后会把 diff 全局通知所有 AI"}
-                </span>
-              </div>
-            ) : null}
-            {debate.status === "running" ? (
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <strong>
-                当前：{liveAgentName || "未知"}
-                {liveDisplayRound ? ` · 第 ${liveDisplayRound} 轮` : ""}
-                {liveDisplayMessage
-                  ? (() => {
-                      const turnInRound = agentCount > 0 ? ((liveDisplayMessage - 1) % agentCount) + 1 : null;
-                      return ` · #${liveDisplayMessage}${turnInRound ? `（第 ${turnInRound} 回）` : ""}`;
-                    })()
-                  : ""}
-              </strong>
-                <span className="muted">{liveStatus || "运行中"}</span>
-              </div>
-            ) : null}
-            <div className="muted">
-              轮次 {completedRounds}/{debate.maxTurns <= 0 ? "∞" : debate.maxTurns} · 参与者 {agentCount}
-            </div>
-            <div className="muted">token {debate.tokenUsed}</div>
-            <div className="muted">
-              共识: {debate.consensusReached ? "已达成" : "未达成"}
-              {debate.consensusSummary
-                ? ` · ${debate.consensusSummary.leadingSolution} · ${debate.consensusSummary.score}`
-                : ""}
-            </div>
+            <StatusQuestionPanel
+              debate={debate}
+              questionVersion={questionVersion}
+              questionDraft={questionDraft}
+              questionDirty={questionDirty}
+              isSavingQuestion={isSavingQuestion}
+              onOpenZoom={() => setQuestionZoomOpen(true)}
+              onOpenHistory={() => void openQuestionHistory()}
+              onSave={() => void saveQuestion()}
+              onChangeDraft={(next) => {
+                setQuestionDraft(next);
+                setQuestionDirty(true);
+              }}
+            />
+            <StatusSummaryPanel
+              debate={debate}
+              agentCount={agentCount}
+              completedRounds={completedRounds}
+              liveAgentName={liveAgentName}
+              liveDisplayRound={liveDisplayRound}
+              liveDisplayMessage={liveDisplayMessage}
+              liveStatus={liveStatus}
+            />
           </Fragment>
         ) : leftTab === "participants" ? (
-          <Fragment>
-            {canAddAgent ? (
-              <div className="panel">
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <strong>加入新的 AI（会排在最后）</strong>
-                  <span className="muted">当前 {debate.agents.length}</span>
-                </div>
-                <div className="row">
-                  <select value={newAgentId} onChange={(event) => setNewAgentId(event.target.value)} style={{ flex: 1 }}>
-                    <option value="">选择一个 AI 配置</option>
-                    {availableAgents.map((agent) => (
-                      <option key={agent.id} value={agent.id}>
-                        {agent.name} · {agent.provider} · {agent.model}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    className="btn btn-primary"
-                    disabled={!newAgentId || isAddingAgent}
-                    onClick={() => void addAgent()}
-                  >
-                    加入
-                  </button>
-                </div>
-                <div className="muted">仅支持进行中/暂停中的辩论加入。</div>
-              </div>
-            ) : null}
-            {debate.isOwner ? (
-              <div className="panel">
-                <strong>上下文累计</strong>
-                <div className="muted">本段累计：按“本段（新会话/新 segment）开始后”的 prompt tokens 增量计算，最多 100%。</div>
-              </div>
-            ) : null}
-            {debate.agents.map((agent) => (
-              <div className="panel" key={agent.debateAgentId}>
-                <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-                  <span>
-                    #{agent.turnOrder} {agent.displayName}
-                    <span className="muted">
-                      {" "}
-                      · {agent.name} · 发言 {agent.turnCount}
-                    </span>
-                  </span>
-                  {debate.isOwner ? (
-                    <div className="row" style={{ gap: 6 }}>
-                      <button
-                        className="btn"
-                        type="button"
-                        disabled={Boolean(resettingUsageByDebateAgentId[agent.debateAgentId])}
-                        onClick={() => void resetAgentUsageSession(agent.debateAgentId)}
-                      >
-                        新会话
-                      </button>
-                      {debate.isOwner && ["pending", "paused"].includes(debateStatus) ? (
-                        <>
-                          <button
-                            className="btn"
-                            type="button"
-                            disabled={!canReorderSeats || isReorderingSeats || agent.turnOrder <= 1}
-                            onClick={() => void moveSeat(agent.debateAgentId, -1)}
-                          >
-                            上移
-                          </button>
-                          <button
-                            className="btn"
-                            type="button"
-                            disabled={!canReorderSeats || isReorderingSeats || agent.turnOrder >= participantCount}
-                            onClick={() => void moveSeat(agent.debateAgentId, 1)}
-                          >
-                            下移
-                          </button>
-                        </>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-                {debate.isOwner ? (
-                  <div className="row" style={{ justifyContent: "space-between", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
-                    <span className="muted">本段累计</span>
-                    {(() => {
-                      const totals = contextTotalsByDebateAgentId[agent.debateAgentId] ?? null;
-                      const ratio = typeof totals?.ratio === "number" && Number.isFinite(totals.ratio) ? totals.ratio : null;
-                      return <UsageBar ratio={ratio} />;
-                    })()}
-                  </div>
-                ) : null}
-              </div>
-            ))}
-          </Fragment>
+          <ParticipantsPanel
+            canAddAgent={canAddAgent}
+            agentCount={debate.agents.length}
+            availableAgents={availableAgents}
+            newAgentId={newAgentId}
+            isAddingAgent={isAddingAgent}
+            isOwner={debate.isOwner}
+            debateStatus={debateStatus}
+            canReorderSeats={canReorderSeats}
+            isReorderingSeats={isReorderingSeats}
+            participantCount={participantCount}
+            agents={debate.agents}
+            resettingUsageByDebateAgentId={resettingUsageByDebateAgentId}
+            contextTotalsByDebateAgentId={contextTotalsByDebateAgentId}
+            onChangeNewAgentId={setNewAgentId}
+            onAddAgent={() => void addAgent()}
+            onResetUsageSession={(debateAgentId) => void resetAgentUsageSession(debateAgentId)}
+            onMoveSeat={(debateAgentId, direction) => void moveSeat(debateAgentId, direction)}
+          />
         ) : leftTab === "workflow" ? (
-          <div className="panel stack">
-            <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-              <strong style={{ fontSize: 14 }}>Workflow 规则</strong>
-              <button className="btn" type="button" disabled={workflowRulesLoading} onClick={() => void loadWorkflowRules()}>
-                刷新
-              </button>
-            </div>
-            <MarkdownView className="md-compact" value={workflowRulesMarkdown || "**Workflow 规则**\n\n- 读取中..."} />
-          </div>
+          <WorkflowRulesPanel
+            markdown={workflowRulesState.markdown}
+            loading={workflowRulesState.loading}
+            onRefresh={() => void loadWorkflowRules()}
+          />
         ) : debate.isOwner ? (
-          <div className="panel stack">
-            <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-              <strong>辩论文件</strong>
-              <div className="row" style={{ gap: 8 }}>
-                <button
-                  className="btn"
-                  type="button"
-                  disabled={selectedAllFileVirtualPaths.length === 0 || allFilesDownloading}
-                  onClick={() => void downloadSelectedAllFiles()}
-                >
-                  {allFilesDownloading ? "下载中..." : `下载选中${selectedAllFileVirtualPaths.length > 0 ? `（${selectedAllFileVirtualPaths.length}）` : ""}`}
-                </button>
-                <button className="btn" type="button" disabled={allFilesLoading} onClick={() => void loadAllFilesIndex(true)}>
-                  刷新
-                </button>
-              </div>
-            </div>
-            <div className="muted">包含辩论文件（debate/*）与每席位文件（agents/*）。</div>
-            {allFilesLoading ? (
-              <div className="muted">读取中...</div>
-            ) : Object.keys(allFilesMetaByVirtualPath).length === 0 ? (
-              <div className="muted">暂无文件（通常需要至少一轮发言后才会逐步生成）。</div>
-            ) : (
-              <div
-                className="treeRoot"
-                style={{ maxHeight: "calc(100vh - 260px)" }}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  setAllFilesContextMenu({
-                    x: event.clientX,
-                    y: event.clientY,
-                    target: { type: "root" }
-                  });
-                }}
-              >
-                <Tree<FsNode>
-                  data={allFilesTree}
-                  width="100%"
-                  height={560}
-                  indent={18}
-                  rowHeight={34}
-                  openByDefault={false}
-                >
-                  {renderAllFilesNode}
-                </Tree>
-              </div>
-            )}
-            {allFilesContextMenu ? (
-              <div className="contextOverlay" onClick={() => setAllFilesContextMenu(null)}>
-                <div
-                  className="contextMenu"
-                  style={{ left: allFilesContextMenu.x, top: allFilesContextMenu.y }}
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <button
-                    className="contextMenuItem"
-                    type="button"
-                    disabled={allFilesContextMenu.target.type !== "node" || allFilesContextMenu.target.nodeType !== "file"}
-                    onClick={() => {
-                      if (allFilesContextMenu.target.type !== "node" || allFilesContextMenu.target.nodeType !== "file") return;
-                      void openAllFileInfo(allFilesContextMenu.target.path);
-                    }}
-                  >
-                    获取文件信息
-                  </button>
-                  <button
-                    className="contextMenuItem"
-                    type="button"
-                    disabled={selectedAllFileVirtualPaths.length === 0 || allFilesDownloading}
-                    onClick={() => void downloadSelectedAllFiles()}
-                  >
-                    {allFilesDownloading
-                      ? "下载中..."
-                      : selectedAllFileVirtualPaths.length > 0
-                        ? `下载选中项（${selectedAllFileVirtualPaths.length}）`
-                        : "下载选中项"}
-                  </button>
-                </div>
-              </div>
-            ) : null}
-          </div>
+          <DebateFilesPanel
+            selectedCount={selectedAllFileVirtualPaths.length}
+            downloading={allFilesDownloading}
+            loading={allFilesLoading}
+            hasFiles={Object.keys(allFilesMetaByVirtualPath).length > 0}
+            tree={allFilesTree}
+            renderNode={renderAllFilesNode}
+            contextMenu={allFilesContextMenu}
+            onDownload={() => void downloadSelectedAllFiles()}
+            onRefresh={() => void loadAllFilesIndex(true)}
+            onRootContextMenu={(event) => {
+              event.preventDefault();
+              setAllFilesContextMenu({
+                x: event.clientX,
+                y: event.clientY,
+                target: { type: "root" }
+              });
+            }}
+            onCloseContextMenu={() => setAllFilesContextMenu(null)}
+            onOpenFileInfo={(virtualPath) => void openAllFileInfo(virtualPath)}
+          />
         ) : (
           <div className="muted">公开辩论不支持读取辩论文件。</div>
         )}

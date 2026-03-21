@@ -6,7 +6,7 @@ import { runDebate } from "@/lib/runtime";
 import { readSession } from "@/lib/session";
 import type { DebateRecord } from "@/lib/types";
 import { createDebateSchema, updateDebateQuestionSchema, updateDebateSharingSchema } from "@/lib/validation";
-import { normalizeDebateWorkflow } from "@/lib/workflow";
+import { formatRequiredDeliverableSummary, normalizeDebateWorkflow } from "@/lib/workflow";
 
 const DISPLAY_NAME_ADJECTIVES = ["青", "赤", "白", "玄", "金", "银", "苍", "墨", "紫", "绿", "蓝", "橙"];
 const DISPLAY_NAME_NOUNS = ["狐", "狼", "鹰", "鲸", "蛇", "虎", "鹿", "鸦", "猫", "犬", "熊", "龙", "雀"];
@@ -33,6 +33,45 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
   {
     workflowVersion: 1,
     enabled: true,
+    phaseMachine: {
+      phases: [
+        {
+          id: "phase-1",
+          title: "Phase 1 · 议员实战演练",
+          kind: "analysis",
+          description: "所有席位先独立分析、归类、指出风险，并给出主持人/监管者候选建议。"
+        },
+        {
+          id: "phase-2",
+          title: "Phase 2 · 民主选举",
+          kind: "election",
+          description: "基于前期表现投票选出主持人和监管者，形成明确任命结果。"
+        },
+        {
+          id: "phase-3",
+          title: "Phase 3 · 动态轮换讨论",
+          kind: "deliberation",
+          description: "主持人宣布统一模式，全员围绕创意发散/逻辑审核等模式循环推进。"
+        },
+        {
+          id: "phase-4",
+          title: "Phase 4 · 共识收敛与最终交付",
+          kind: "finalization",
+          description: "进入最终表决与最终产物输出，完成收敛与交付。"
+        }
+      ],
+      transitionRules: {
+        election: {
+          startRound: 3,
+          autoOpen: true
+        },
+        finalization: {
+          enterOnConsensus: true,
+          enterOnCustomVote: true,
+          requirePhaseForCompletion: true
+        }
+      }
+    },
     election: {
       startRound: 3,
       roles: ["Host", "Supervisor"],
@@ -44,9 +83,85 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
     ],
     voting: {
       custom: { minOptions: 2, maxOptions: null },
-      announcement: { announcer: { type: "role", role: "Host" } }
+      announcement: {
+        announcer: { type: "role", role: "Host" },
+        fallback: { type: "seat", seat: 1 }
+      },
+      governance: {
+        tieBreaker: "revote",
+        maxTieRounds: 2,
+        fallbackMode: "逻辑审核员"
+      }
     },
-    consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true }
+    consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true },
+    promptPolicies: {
+      round1Fairness: true,
+      responseFormat: {
+        requireMarkdown: true,
+        forbidRawJson: true
+      }
+    },
+    deliverables: {
+      allowedPaths: ["final/", "outputs/"],
+      requiredFiles: [
+        {
+          path: "final/01-story-core.md",
+          ownerRole: "Host",
+          description: "核心卖点、主题、核心冲突、故事承诺",
+          minChars: 1200,
+          minMarkdownHeadings: 4,
+          requiredSnippets: ["核心卖点", "主题", "核心冲突", "故事承诺"]
+        },
+        {
+          path: "final/02-characters.md",
+          ownerRole: "Host",
+          description: "主角、关键配角、反派的人物卡与成长弧",
+          minChars: 2200,
+          minMarkdownHeadings: 8,
+          requiredSnippets: ["主角", "关键配角", "反派", "成长弧"]
+        },
+        {
+          path: "final/03-world-and-rules.md",
+          ownerRole: "Host",
+          description: "世界观、关键设定、限制条件、代价与规则",
+          minChars: 1800,
+          minMarkdownHeadings: 5,
+          requiredSnippets: ["世界观", "规则", "限制条件", "代价"]
+        },
+        {
+          path: "final/04-plot-architecture.md",
+          ownerRole: "Host",
+          description: "三幕或多幕结构、关键反转、冲突升级与收束",
+          minChars: 2600,
+          minMarkdownHeadings: 7,
+          requiredSnippets: ["幕 1", "幕 2", "幕 3", "关键反转"]
+        },
+        {
+          path: "final/05-chapter-outline.md",
+          ownerRole: "Host",
+          description: "章节级细纲，每章包含目标、冲突、转折、结果、钩子",
+          minChars: 5000,
+          minMarkdownHeadings: 16,
+          requiredSnippets: ["章节目标", "冲突", "转折", "结果", "钩子"]
+        },
+        {
+          path: "final/06-foreshadowing-ledger.md",
+          ownerRole: "Host",
+          description: "伏笔与回收表，标明埋点、回收位置、作用",
+          minChars: 1800,
+          minMarkdownHeadings: 6,
+          requiredSnippets: ["伏笔", "回收", "埋点", "作用"]
+        },
+        {
+          path: "final/novel_outline_v2.md",
+          ownerRole: "Host",
+          description: "最终总细纲汇总稿，引用并整合上述文件",
+          minChars: 7000,
+          minMarkdownHeadings: 10,
+          requiredSnippets: ["核心卖点", "人物", "世界观", "章节", "伏笔", "逻辑自检"]
+        }
+      ]
+    }
   },
   null,
   2
@@ -73,6 +188,53 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
+}
+
+function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<ReturnType<typeof normalizeDebateWorkflow>>) {
+  lines.push(`- version: v${workflow.workflowVersion}`);
+  if (workflow.phaseMachine.phases.length > 0) {
+    lines.push("- phaseMachine:");
+    for (const phase of workflow.phaseMachine.phases) {
+      lines.push(`  - ${phase.title}${phase.description ? ` · ${phase.description}` : ""}`);
+    }
+  }
+  lines.push(
+    `- phase transitions: election@round ${workflow.phaseMachine.transitionRules.election.startRound}; election autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}`
+  );
+  lines.push(
+    `- phase finalization: onConsensus=${workflow.phaseMachine.transitionRules.finalization.enterOnConsensus ? "yes" : "no"}; onCustomVote=${workflow.phaseMachine.transitionRules.finalization.enterOnCustomVote ? "yes" : "no"}; requirePhaseForCompletion=${workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "yes" : "no"}`
+  );
+  lines.push(`- election startRound: ${workflow.election.startRound}`);
+  lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
+  lines.push(`- vote tieBreaker: ${workflow.voting.governance.tieBreaker}`);
+  lines.push(`- vote maxTieRounds: ${workflow.voting.governance.maxTieRounds}`);
+  lines.push(`- vote fallbackMode: ${workflow.voting.governance.fallbackMode ?? "(none)"}`);
+  const first = workflow.election.speakingOrder.firstRole;
+  const last = workflow.election.speakingOrder.lastRole;
+  lines.push(`- speakingOrder (after election, next-round boundary): first=${first ?? "(none)"}; last=${last ?? "(none)"}`);
+  lines.push(`- round1 fairness: ${workflow.promptPolicies.round1Fairness ? "enabled" : "disabled"}`);
+  lines.push(
+    `- response format: markdown=${workflow.promptPolicies.responseFormat.requireMarkdown ? "yes" : "no"}; rawJson=${workflow.promptPolicies.responseFormat.forbidRawJson ? "forbidden" : "allowed"}`
+  );
+  lines.push(
+    `- deliverable paths: ${workflow.deliverables.allowedPaths.length ? workflow.deliverables.allowedPaths.join(" / ") : "(none)"}`
+  );
+  if (workflow.deliverables.requiredFiles.length > 0) {
+    lines.push("- required deliverables:");
+    for (const file of workflow.deliverables.requiredFiles) {
+      lines.push(`  - ${formatRequiredDeliverableSummary(file, "plain")}`);
+    }
+  }
+  if (workflow.seatOrderRules.length === 0) {
+    lines.push("- seatOrderRules: (none)");
+    return;
+  }
+  lines.push("- seatOrderRules:");
+  for (const rule of workflow.seatOrderRules) {
+    lines.push(
+      `  - afterRound=${rule.afterRound}: ${rule.policy.type}${rule.policy.type === "rotate" ? ` offset=${rule.policy.offset}` : ""}`
+    );
+  }
 }
 
 function toListItem(debate: DebateRecord) {
@@ -1067,22 +1229,7 @@ export async function startDebateSegment(id: string, input: unknown) {
   if (!workflow?.enabled) {
     lines.push("- disabled (no workflow.json or enabled=false)");
   } else {
-    lines.push(`- version: v${workflow.workflowVersion}`);
-    lines.push(`- election startRound: ${workflow.election.startRound}`);
-    lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
-    const first = workflow.election.speakingOrder.firstRole;
-    const last = workflow.election.speakingOrder.lastRole;
-    lines.push(`- speakingOrder (after election, next-round boundary): first=${first ?? "(none)"}; last=${last ?? "(none)"}`);
-    if (workflow.seatOrderRules.length === 0) {
-      lines.push("- seatOrderRules: (none)");
-    } else {
-      lines.push("- seatOrderRules:");
-      for (const rule of workflow.seatOrderRules) {
-        lines.push(
-          `  - afterRound=${rule.afterRound}: ${rule.policy.type}${rule.policy.type === "rotate" ? ` offset=${rule.policy.offset}` : ""}`
-        );
-      }
-    }
+    appendWorkflowSummaryLines(lines, workflow);
   }
 
   if (directive.trim()) {
