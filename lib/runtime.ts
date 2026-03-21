@@ -1011,6 +1011,7 @@ async function readSseJsonLines(response: Response, onData: (data: string) => vo
 
 async function openAiChatStream(args: {
   debateId: string;
+  messageNumber: number;
   roundNumber: number;
   agentName: string;
   url: string;
@@ -1059,7 +1060,7 @@ async function openAiChatStream(args: {
       emitDebateLiveEvent(args.debateId, {
         type: "chunk",
         debateId: args.debateId,
-        turnNumber: args.roundNumber,
+        turnNumber: args.messageNumber,
         agentName: args.agentName,
         text,
         at: new Date().toISOString()
@@ -3224,6 +3225,7 @@ async function callProvider(
       try {
         streamed = await openAiChatStream({
           debateId: debate.id,
+          messageNumber,
           roundNumber,
           agentName: eventAgentName,
           url,
@@ -3423,6 +3425,7 @@ async function callProvider(
     // Fallback: no tools, rely on inline files context only.
     const fallback = await openAiChatStream({
       debateId: debate.id,
+      messageNumber,
       roundNumber,
       agentName: eventAgentName,
       url,

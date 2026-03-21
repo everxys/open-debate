@@ -1,5 +1,11 @@
 ## 2026-03-21
 
+- 小说神作模式继续补强“广泛跨学科 + 主场学科”规则：在 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 与 `docker/seed_democratic_centralism_strategy.sql` 中明确，核心天才不应是只会一门学科的窄专家，而应普遍具备广泛跨学科能力；同时每位核心天才仍需拥有 1-2 个压倒性的主场学科或主场方法论，用来形成真正鲜明的压制方式与角色辨识度
+- 小说神作模式补回交叉学科与前沿科学：在 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 与 `docker/seed_democratic_centralism_strategy.sql` 的开局提示词、Phase 1、Phase 3 中，重新明确要求主动吸收行为经济学、认知科学、计算社会科学、复杂系统、控制论、运筹学、人工智能安全、分布式系统、网络安全、量子信息、合成生物学、脑机接口、神经工程、材料科学、纳米技术、机器人学、计算复杂性理论、科技伦理、赛博法学等交叉学科与前沿科学
+- 小说神作模式学科武器库升级为“三层结构”：把刚才补充过的传统学科、交叉学科、前沿科学统一整理成“核心层 / 增强层 / 杀手锏层”，并同步写入 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 与 `docker/seed_democratic_centralism_strategy.sql`，要求后续智斗设计遵循“核心层打底、增强层互锁、杀手锏层少量精准引爆”
+- 小说提示词补强“多学科智斗”：在 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 以及 `docker/seed_democratic_centralism_strategy.sql` 的开局提示词、Phase 1、Phase 3 注入提示词中，明确要求积极调用心理学、社会工程学、逻辑学、博弈论、物理学、化学、经济学、政治学、信息论、工程学等学科，把知识真正落进规则、骗局、制度、证据链和胜负结构，而不是停留在空泛的“高智商对话”
+- 小说策略题材边界收紧：在 `docker/seed_democratic_centralism_strategy.sql` 的开局提示词、Phase 1、Phase 3 注入提示词，以及 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 中新增“智斗主导、科学体系可解释、禁止玄幻/修仙/魔法/超自然机制成为核心解题手段”的硬约束，避免讨论逐渐滑向玄幻设定
+- 辩论页实时状态修复：流式 `chunk` 事件之前错误地把 `roundNumber` 当成 `turnNumber` 发给前端，导致“当前：Seat-X · 第 N 轮 · #M”偶尔闪成离谱编号；现已改为发送真实 `messageNumber`，并在前端对 chunk 事件做保守兜底，不再随意改写当前发言序号
 - 辩论页参与者面板补充“会话计数”：基于 `context/usage_totals.json` 里的 `sessionId` 显示当前是第几段上下文；手动点击“新会话”或系统自动重置上下文后，这个计数会自动 +1
 - 运行时兼容性修复：当 OpenAI 兼容模型返回 `finishReason=tool_calls` 但实际没有任何工具调用时，系统会自动追加一次“禁用工具的纯文本重试”，避免像 `qwen3.5-plus` 这类模型在普通发言中被伪工具调用提前截断；诊断弹窗也会把这类情况单独标成“疑似伪工具调用”
 - 辩论页参与者面板增强：每个席位现在都会显示三项长度信息：总上下文长度（context）、单次最大输入、单次最大输出；辩论详情接口也同步透传 `max_input_tokens / max_output_tokens`

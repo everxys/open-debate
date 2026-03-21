@@ -2327,7 +2327,12 @@ export default function DebateDetailPage() {
           agentName?: string;
           turnNumber?: number;
         };
-        if (typeof payload.turnNumber === "number") setLiveMessageNumber(payload.turnNumber);
+        if (typeof payload.turnNumber === "number") {
+          setLiveMessageNumber((current) => {
+            if (typeof current === "number" && current > 0 && current !== payload.turnNumber) return current;
+            return payload.turnNumber;
+          });
+        }
         if (typeof payload.agentName === "string") setLiveAgentName(payload.agentName);
         if (typeof payload.text === "string") setLiveText((current) => current + payload.text);
       } catch {
