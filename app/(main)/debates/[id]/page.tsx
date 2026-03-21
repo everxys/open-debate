@@ -873,6 +873,10 @@ function ParticipantsPanel(props: {
       {props.agents.map((agent) => {
         const totals = props.contextTotalsByDebateAgentId[agent.debateAgentId] ?? null;
         const ratio = typeof totals?.ratio === "number" && Number.isFinite(totals.ratio) ? totals.ratio : null;
+        const sessionCount =
+          totals && typeof totals.sessionId === "number" && Number.isFinite(totals.sessionId) && totals.sessionId >= 1
+            ? Math.floor(totals.sessionId)
+            : 1;
 
         return (
           <div className="panel" key={agent.debateAgentId}>
@@ -898,6 +902,7 @@ function ParticipantsPanel(props: {
               ) : null}
             </div>
             <div className="stack muted" style={{ gap: 4, marginTop: 8 }}>
+              <div>会话计数：#{sessionCount}</div>
               <div>总上下文：{agent.contextLength ? agent.contextLength.toLocaleString() : "未配置"}</div>
               <div>单次最大输入：{agent.maxInputTokens ? agent.maxInputTokens.toLocaleString() : "未配置"}</div>
               <div>单次最大输出：{agent.maxOutputTokens ? agent.maxOutputTokens.toLocaleString() : "未配置"}</div>
@@ -1191,6 +1196,16 @@ function summarizeGenerationDiagnostic(entry: GenerationDiagnosticEntry): Genera
     finishReason === "tool_calls" ||
     finishReason === "function_call"
   ) {
+    if (finishReason === "tool_calls" && entry.toolCallsCount === 0) {
+      evidence.push("模型返回了 tool_calls 停止原因，但没有任何真实工具调用。");
+      evidence.push(`原始正文 ${rawChars} 字，最终落库 ${persistedChars} 字。`);
+      return {
+        title: "疑似伪工具调用",
+        tone: "warn",
+        conclusion: "这更像是 provider 的兼容返回问题，不是真正执行了工具；系统现在会自动尝试一次禁用工具的纯文本重试。",
+        evidence
+      };
+    }
     evidence.push(`本轮触发了 ${entry.toolCallsCount} 次工具调用。`);
     if (entry.finishReason) {
       evidence.push(`模型停止原因：${entry.finishReason}。`);

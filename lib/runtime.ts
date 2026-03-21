@@ -3258,6 +3258,41 @@ async function callProvider(
           }).catch(() => null)
         );
 
+      if (streamed.finishReason === "tool_calls" && (!toolCalls || toolCalls.length === 0)) {
+        emitDebateLiveEvent(debate.id, {
+          type: "status",
+          debateId: debate.id,
+          message: "检测到伪工具调用，改为纯文本重试...",
+          at: new Date().toISOString()
+        });
+        const noToolRetry = await openAiChatOnce({
+          url,
+          apiKey,
+          body: withOptionalMaxTokens(
+            {
+              model: agent.model,
+              messages
+            },
+            currentOutputMaxTokens
+          )
+        }).catch(() => null);
+        const retryText = String(noToolRetry?.content ?? "").trim();
+        if (retryText) {
+          return {
+            raw: retryText.length >= assistantContent.length ? retryText : assistantContent,
+            usage: normalizeUsage(noToolRetry?.usage) ?? usage,
+            estimatedPromptTokens,
+            diagnostics: {
+              provider: agent.provider,
+              model: agent.model,
+              requestedMaxTokens,
+              finishReason: noToolRetry?.finishReason ?? "tool_calls_retry_none",
+              toolCallsCount: 0
+            }
+          };
+        }
+      }
+
       if (!toolCalls || toolCalls.length === 0) {
         if (assistantContent) {
           return {

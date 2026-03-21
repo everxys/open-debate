@@ -1,5 +1,7 @@
 ## 2026-03-21
 
+- 辩论页参与者面板补充“会话计数”：基于 `context/usage_totals.json` 里的 `sessionId` 显示当前是第几段上下文；手动点击“新会话”或系统自动重置上下文后，这个计数会自动 +1
+- 运行时兼容性修复：当 OpenAI 兼容模型返回 `finishReason=tool_calls` 但实际没有任何工具调用时，系统会自动追加一次“禁用工具的纯文本重试”，避免像 `qwen3.5-plus` 这类模型在普通发言中被伪工具调用提前截断；诊断弹窗也会把这类情况单独标成“疑似伪工具调用”
 - 辩论页参与者面板增强：每个席位现在都会显示三项长度信息：总上下文长度（context）、单次最大输入、单次最大输出；辩论详情接口也同步透传 `max_input_tokens / max_output_tokens`
 - Docker 初始化 SQL 同步：`docker/init.sql` 中的 `ai_agents` 表结构新增 `context_length`、`max_input_tokens`、`max_output_tokens`，并补了 `alter table ... add column if not exists`，保证新库初始化和旧库升级都能拿到这三个字段
 - AI 配置字段语义修正：`contextLength` 恢复为“总上下文长度”，新增的 `maxInputTokens / maxOutputTokens` 明确表示“单次请求的输入/输出上限”；三者不再互相回填或混用，避免把上下文窗口误当成单次输入上限
