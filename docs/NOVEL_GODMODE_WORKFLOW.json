@@ -1,0 +1,247 @@
+{
+  "workflowVersion": 1,
+  "enabled": true,
+  "phaseMachine": {
+    "phases": [
+      {
+        "id": "phase-1",
+        "title": "Phase 1 · 议员实战演练",
+        "kind": "analysis",
+        "description": "前两轮只做世界规则、胜负结构、人物功能分工与高优先级风险分析，不允许急着收尾。",
+        "minRounds": 2
+      },
+      {
+        "id": "phase-2",
+        "title": "Phase 2 · 民主选举",
+        "kind": "election",
+        "description": "用一整轮完成主持人与监管者选举，不夹带额外发言，形成明确任命结果。",
+        "minRounds": 1
+      },
+      {
+        "id": "phase-3",
+        "title": "Phase 3 · 动态轮换讨论",
+        "kind": "deliberation",
+        "description": "用长轮次反复打磨核心诡计、五大事件、人物关系与分卷结构，优先提高点子密度与互锁强度。",
+        "minRounds": 24
+      },
+      {
+        "id": "phase-4",
+        "title": "Phase 4 · 共识收敛与最终交付",
+        "kind": "finalization",
+        "description": "进入章节级扩写、伏笔台账校验、关键场景与终局回收，不满足厚度与密度门槛不得结束。",
+        "minRounds": 12
+      }
+    ],
+    "transitionRules": {
+      "election": {
+        "startRound": 3,
+        "autoOpen": true
+      },
+      "finalization": {
+        "enterOnConsensus": false,
+        "enterOnCustomVote": true,
+        "requirePhaseForCompletion": true
+      }
+    }
+  },
+  "election": {
+    "startRound": 3,
+    "roles": ["Host", "Supervisor"],
+    "speakingOrder": {
+      "firstRole": "Host",
+      "lastRole": "Supervisor"
+    }
+  },
+  "seatOrderRules": [
+    {
+      "afterRound": 1,
+      "policy": {
+        "type": "reverse"
+      }
+    },
+    {
+      "afterRound": 2,
+      "policy": {
+        "type": "reverse"
+      }
+    }
+  ],
+  "voting": {
+    "custom": {
+      "minOptions": 2,
+      "maxOptions": null
+    },
+    "announcement": {
+      "announcer": {
+        "type": "role",
+        "role": "Host"
+      },
+      "fallback": {
+        "type": "seat",
+        "seat": 1
+      }
+    },
+    "governance": {
+      "tieBreaker": "revote",
+      "maxTieRounds": 2,
+      "fallbackMode": "逻辑审核员"
+    }
+  },
+  "consensus": {
+    "enabled": true,
+    "minAvgScore": 8,
+    "requireAllSeats": true
+  },
+  "promptPolicies": {
+    "round1Fairness": true,
+    "responseFormat": {
+      "requireMarkdown": true,
+      "forbidRawJson": true
+    },
+    "outputBudget": {
+      "discussionMaxTokens": 1800,
+      "writingMaxTokens": 3600
+    }
+  },
+  "deliverables": {
+    "allowedPaths": ["final/", "outputs/"],
+    "requiredFiles": [
+      {
+        "path": "final/01-core-premise.md",
+        "ownerRole": "Host",
+        "description": "核心命题、核心卖点、故事承诺、终局震撼来源",
+        "minChars": 6000,
+        "minMarkdownHeadings": 10,
+        "requiredSnippets": ["核心命题", "核心卖点", "故事承诺", "终局震撼"]
+      },
+      {
+        "path": "final/02-world-rules.md",
+        "ownerRole": "Host",
+        "description": "世界规则、胜负规则、代价系统、游戏边界、破局条件",
+        "minChars": 15000,
+        "minMarkdownHeadings": 18,
+        "requiredSnippets": ["世界规则", "胜负规则", "代价", "破局条件"]
+      },
+      {
+        "path": "final/03-era-history.md",
+        "ownerRole": "Host",
+        "description": "时代断层、历史隐秘、旧文明残响、关键灾变时间线",
+        "minChars": 12000,
+        "minMarkdownHeadings": 14,
+        "requiredSnippets": ["时代", "历史", "灾变", "时间线"]
+      },
+      {
+        "path": "final/04-factions-and-order.md",
+        "ownerRole": "Host",
+        "description": "主要阵营、权力结构、面具组织、利益链与制衡关系",
+        "minChars": 12000,
+        "minMarkdownHeadings": 14,
+        "requiredSnippets": ["阵营", "权力结构", "组织", "制衡"]
+      },
+      {
+        "path": "final/05-seven-summoned-geniuses.md",
+        "ownerRole": "Host",
+        "description": "7 位外来天才的能力、人设、软肋、执念、镜像关系、最终命运",
+        "minChars": 18000,
+        "minMarkdownHeadings": 22,
+        "requiredSnippets": ["能力标签", "情感软肋", "行动逻辑", "个人执念", "最终命运"]
+      },
+      {
+        "path": "final/06-eighteen-local-geniuses.md",
+        "ownerRole": "Host",
+        "description": "18 位本土天才的职能定位、压迫感层级、出场价值与事件挂靠",
+        "minChars": 22000,
+        "minMarkdownHeadings": 24,
+        "requiredSnippets": ["本土天才", "定位", "压迫感", "事件挂靠"]
+      },
+      {
+        "path": "final/07-main-plot-spine.md",
+        "ownerRole": "Host",
+        "description": "唯一主线骨架、真主角、假 boss、真 boss、终局布局者与关键阶段转折",
+        "minChars": 15000,
+        "minMarkdownHeadings": 16,
+        "requiredSnippets": ["主线", "真主角", "假 boss", "真 boss", "终局布局者"]
+      },
+      {
+        "path": "final/08-five-major-events.md",
+        "ownerRole": "Host",
+        "description": "五大核心事件设计，每个事件必须包含目标、误导、反制、代价、余波",
+        "minChars": 25000,
+        "minMarkdownHeadings": 30,
+        "requiredSnippets": ["事件目标", "信息差", "误导", "反制", "代价", "余波"]
+      },
+      {
+        "path": "final/09-core-schemes.md",
+        "ownerRole": "Host",
+        "description": "核心诡计设计库，要求高密度中小点子、互锁链条与可复盘性",
+        "minChars": 30000,
+        "minMarkdownHeadings": 32,
+        "requiredSnippets": ["大点子", "中点子", "小点子", "可复盘", "互锁"]
+      },
+      {
+        "path": "final/10-relationships-and-betrayals.md",
+        "ownerRole": "Host",
+        "description": "纯爱线、宿敌线、三人组/二人组、背叛线、镜像人物关系",
+        "minChars": 12000,
+        "minMarkdownHeadings": 16,
+        "requiredSnippets": ["纯爱", "宿敌", "背叛", "镜像", "关系变化"]
+      },
+      {
+        "path": "final/11-volume-architecture.md",
+        "ownerRole": "Host",
+        "description": "分卷结构、每卷主题、卷末悬念、卷级高潮与强度递增曲线",
+        "minChars": 18000,
+        "minMarkdownHeadings": 18,
+        "requiredSnippets": ["卷一", "卷二", "卷三", "卷主题", "卷末悬念"]
+      },
+      {
+        "path": "final/12-volume-1-outline.md",
+        "ownerRole": "Host",
+        "description": "第一大卷章节细纲与人物入场设计",
+        "minChars": 25000,
+        "minMarkdownHeadings": 28,
+        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "人物推进"]
+      },
+      {
+        "path": "final/13-volume-2-outline.md",
+        "ownerRole": "Host",
+        "description": "第二大卷章节细纲与局势升级设计",
+        "minChars": 25000,
+        "minMarkdownHeadings": 28,
+        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "伏笔"]
+      },
+      {
+        "path": "final/14-volume-3-outline.md",
+        "ownerRole": "Host",
+        "description": "第三大卷章节细纲与终局战前布局设计",
+        "minChars": 25000,
+        "minMarkdownHeadings": 28,
+        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "终局关联"]
+      },
+      {
+        "path": "final/15-foreshadowing-ledger.md",
+        "ownerRole": "Host",
+        "description": "伏笔总台账，标明埋点、回收位置、作用、二刷价值、错觉设计",
+        "minChars": 20000,
+        "minMarkdownHeadings": 20,
+        "requiredSnippets": ["伏笔", "埋点", "回收", "作用", "二刷价值"]
+      },
+      {
+        "path": "final/16-key-scenes-and-lines.md",
+        "ownerRole": "Host",
+        "description": "关键场景库、雨戏、大屠杀、恐怖桥段、名台词、哲理句、记忆点场景",
+        "minChars": 12000,
+        "minMarkdownHeadings": 16,
+        "requiredSnippets": ["雨戏", "大屠杀", "恐怖", "名台词", "哲理"]
+      },
+      {
+        "path": "final/novel_outline_v2.md",
+        "ownerRole": "Host",
+        "description": "最终总汇总稿，整合创作圣经并做全局逻辑自检",
+        "minChars": 40000,
+        "minMarkdownHeadings": 24,
+        "requiredSnippets": ["核心命题", "世界规则", "人物", "五大事件", "分卷结构", "逻辑自检"]
+      }
+    ]
+  }
+}

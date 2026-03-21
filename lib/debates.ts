@@ -39,25 +39,29 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
           id: "phase-1",
           title: "Phase 1 · 议员实战演练",
           kind: "analysis",
-          description: "所有席位先独立分析、归类、指出风险，并给出主持人/监管者候选建议。"
+          description: "前两轮先独立分析、归类、指出风险，并给出主持人/监管者候选建议。",
+          minRounds: 2
         },
         {
           id: "phase-2",
           title: "Phase 2 · 民主选举",
           kind: "election",
-          description: "基于前期表现投票选出主持人和监管者，形成明确任命结果。"
+          description: "用一整轮完成主持人与监管者选举，不夹带额外发言，形成明确任命结果。",
+          minRounds: 1
         },
         {
           id: "phase-3",
           title: "Phase 3 · 动态轮换讨论",
           kind: "deliberation",
-          description: "主持人宣布统一模式，全员围绕创意发散/逻辑审核等模式循环推进。"
+          description: "主持人宣布统一模式，全员围绕创意发散、逻辑审核与方案收敛循环推进。",
+          minRounds: 8
         },
         {
           id: "phase-4",
           title: "Phase 4 · 共识收敛与最终交付",
           kind: "finalization",
-          description: "进入最终表决与最终产物输出，完成收敛与交付。"
+          description: "进入最终表决与最终产物输出，完成收敛与交付。",
+          minRounds: 4
         }
       ],
       transitionRules: {
@@ -99,6 +103,10 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
       responseFormat: {
         requireMarkdown: true,
         forbidRawJson: true
+      },
+      outputBudget: {
+        discussionMaxTokens: 1200,
+        writingMaxTokens: 2400
       }
     },
     deliverables: {
@@ -191,13 +199,25 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
 }
 
 function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<ReturnType<typeof normalizeDebateWorkflow>>) {
+  const analysisMinRounds = Math.max(
+    workflow.election.startRound - 1,
+    workflow.phaseMachine.phases.find((phase) => phase.kind === "analysis")?.minRounds ?? 0
+  );
+  const electionMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "election")?.minRounds ?? 1;
+  const deliberationMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "deliberation")?.minRounds ?? 0;
+  const finalizationMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "finalization")?.minRounds ?? 0;
   lines.push(`- version: v${workflow.workflowVersion}`);
   if (workflow.phaseMachine.phases.length > 0) {
     lines.push("- phaseMachine:");
     for (const phase of workflow.phaseMachine.phases) {
-      lines.push(`  - ${phase.title}${phase.description ? ` · ${phase.description}` : ""}`);
+      lines.push(
+        `  - ${phase.title}${phase.description ? ` · ${phase.description}` : ""}${phase.minRounds ? ` · minRounds=${phase.minRounds}` : ""}${phase.injectedPrompt ? " · phasePrompt=configured" : ""}`
+      );
     }
   }
+  lines.push(
+    `- phase minRounds: analysis=${analysisMinRounds}; election=${electionMinRounds}; deliberation=${deliberationMinRounds}; finalization=${finalizationMinRounds}`
+  );
   lines.push(
     `- phase transitions: election@round ${workflow.phaseMachine.transitionRules.election.startRound}; election autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}`
   );
@@ -213,12 +233,30 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<Retur
   const last = workflow.election.speakingOrder.lastRole;
   lines.push(`- speakingOrder (after election, next-round boundary): first=${first ?? "(none)"}; last=${last ?? "(none)"}`);
   lines.push(`- round1 fairness: ${workflow.promptPolicies.round1Fairness ? "enabled" : "disabled"}`);
+  lines.push(`- opening prompt: ${workflow.promptPolicies.openingPrompt ? "configured" : "none"}`);
   lines.push(
     `- response format: markdown=${workflow.promptPolicies.responseFormat.requireMarkdown ? "yes" : "no"}; rawJson=${workflow.promptPolicies.responseFormat.forbidRawJson ? "forbidden" : "allowed"}`
   );
   lines.push(
+    `- output budget: discussion=${workflow.promptPolicies.outputBudget.discussionMaxTokens}; writing=${workflow.promptPolicies.outputBudget.writingMaxTokens}`
+  );
+  lines.push(
     `- deliverable paths: ${workflow.deliverables.allowedPaths.length ? workflow.deliverables.allowedPaths.join(" / ") : "(none)"}`
   );
+  if (workflow.ideaBank.rawIdeaBankPath || Object.values(workflow.ideaBank.derivedFiles).some(Boolean)) {
+    lines.push(`- idea bank raw: ${workflow.ideaBank.rawIdeaBankPath ?? "(none)"}`);
+    lines.push(
+      `- idea bank derived: ${[
+        workflow.ideaBank.derivedFiles.selectedSTierPath,
+        workflow.ideaBank.derivedFiles.selectedATierPath,
+        workflow.ideaBank.derivedFiles.rejectedOrMergedPath,
+        workflow.ideaBank.derivedFiles.eventMappingsPath,
+        workflow.ideaBank.derivedFiles.newlyInventedIdeasPath
+      ]
+        .filter((item): item is string => Boolean(item))
+        .join(" / ")}`
+    );
+  }
   if (workflow.deliverables.requiredFiles.length > 0) {
     lines.push("- required deliverables:");
     for (const file of workflow.deliverables.requiredFiles) {
@@ -499,6 +537,32 @@ export async function createDebate(input: unknown) {
       `,
       [debate.id, workflowContent || DEFAULT_WORKFLOW_JSON, now]
     );
+
+    const sharedDebateFiles = await query<{ path: string; content: string }>(
+      `
+        select distinct on (lower(path)) path, content
+          from strategy_role_files
+         where strategy_role_id = any($1::uuid[])
+           and lower(path) like 'debate/ideas/%'
+         order by lower(path), strategy_role_id asc
+      `,
+      [uniqueRoleIds]
+    );
+    for (const file of sharedDebateFiles.rows) {
+      const sourcePath = String(file.path ?? "");
+      const normalizedPath = sourcePath.replace(/\\/g, "/").replace(/^\/+/, "").trim();
+      const debatePath = normalizedPath.replace(/^debate\//i, "");
+      if (!debatePath) continue;
+      await query(
+        `
+          insert into debate_files (debate_id, path, content, created_at, updated_at)
+          values ($1, $2, $3, $4, $4)
+          on conflict (debate_id, path)
+          do update set content = excluded.content, updated_at = excluded.updated_at
+        `,
+        [debate.id, debatePath, String(file.content ?? ""), now]
+      );
+    }
 
     for (let index = 0; index < bindings.length; index += 1) {
       const binding = bindings[index];

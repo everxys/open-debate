@@ -26,9 +26,33 @@ type StrategyDetail = {
 };
 
 type RoleDraft = { clientId: string; id: string; name: string; systemPrompt: string };
+type WorkflowPhasePrompt = {
+  id: string;
+  title: string;
+  kind: "analysis" | "election" | "deliberation" | "finalization";
+  description: string | null;
+  minRounds: number | null;
+  injectedPrompt: string;
+};
+
+type WorkflowPromptDialogState =
+  | null
+  | {
+      type: "opening" | "phase";
+      title: string;
+      description: string;
+      value: string;
+      phaseIndex?: number;
+    };
 
 function createClientId() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+}
+
+function summarizePrompt(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return "未配置";
+  return normalized.length > 90 ? `${normalized.slice(0, 90)}...` : normalized;
 }
 
 async function readPayload(response: Response) {
@@ -71,6 +95,11 @@ export default function StrategyDetailPage() {
   const [isDuplicatingRole, setIsDuplicatingRole] = useState(false);
   const [isFavoriting, setIsFavoriting] = useState(false);
   const [isForking, setIsForking] = useState(false);
+  const [workflowOpeningPrompt, setWorkflowOpeningPrompt] = useState("");
+  const [workflowPhasePrompts, setWorkflowPhasePrompts] = useState<WorkflowPhasePrompt[]>([]);
+  const [workflowPhasePromptsLoading, setWorkflowPhasePromptsLoading] = useState(false);
+  const [workflowPhasePromptsSaving, setWorkflowPhasePromptsSaving] = useState(false);
+  const [workflowPromptDialog, setWorkflowPromptDialog] = useState<WorkflowPromptDialogState>(null);
 
   async function load() {
     if (!id) return;
@@ -96,6 +125,33 @@ export default function StrategyDetailPage() {
       return 0;
     });
     roleSelectionAnchorIndexRef.current = null;
+
+    setWorkflowPhasePromptsLoading(true);
+    try {
+      const workflowResponse = await fetch(`/api/strategies/${id}/workflow-phase-prompts`);
+      const workflowPayload = await readPayload(workflowResponse);
+      if (!workflowResponse.ok) {
+        showToast("error", workflowPayload.error?.message ?? "加载阶段注入提示词失败");
+      } else {
+        setWorkflowOpeningPrompt(typeof workflowPayload.data?.openingPrompt === "string" ? workflowPayload.data.openingPrompt : "");
+        const phases = Array.isArray(workflowPayload.data?.phases) ? workflowPayload.data.phases : [];
+        setWorkflowPhasePrompts(
+          phases.map((phase) => ({
+            id: String(phase.id ?? ""),
+            title: String(phase.title ?? ""),
+            kind:
+              phase.kind === "analysis" || phase.kind === "election" || phase.kind === "deliberation" || phase.kind === "finalization"
+                ? phase.kind
+                : "analysis",
+            description: typeof phase.description === "string" ? phase.description : null,
+            minRounds: typeof phase.minRounds === "number" ? phase.minRounds : null,
+            injectedPrompt: typeof phase.injectedPrompt === "string" ? phase.injectedPrompt : ""
+          }))
+        );
+      }
+    } finally {
+      setWorkflowPhasePromptsLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -393,6 +449,73 @@ export default function StrategyDetailPage() {
     }
   }
 
+  function updateWorkflowPhasePrompt(index: number, injectedPrompt: string) {
+    setWorkflowPhasePrompts((current) =>
+      current.map((phase, phaseIndex) => (phaseIndex === index ? { ...phase, injectedPrompt } : phase))
+    );
+  }
+
+  function openWorkflowPromptDialog(input: WorkflowPromptDialogState) {
+    setWorkflowPromptDialog(input);
+  }
+
+  function updateWorkflowPromptDialogValue(nextValue: string) {
+    setWorkflowPromptDialog((current) => (current ? { ...current, value: nextValue } : current));
+  }
+
+  function applyWorkflowPromptDialog() {
+    if (!workflowPromptDialog) return;
+    if (workflowPromptDialog.type === "opening") {
+      setWorkflowOpeningPrompt(workflowPromptDialog.value);
+      setWorkflowPromptDialog(null);
+      return;
+    }
+    if (typeof workflowPromptDialog.phaseIndex === "number") {
+      updateWorkflowPhasePrompt(workflowPromptDialog.phaseIndex, workflowPromptDialog.value);
+    }
+    setWorkflowPromptDialog(null);
+  }
+
+  async function saveWorkflowPhasePrompts() {
+    if (!id || !detail?.canEdit || workflowPhasePromptsSaving) return;
+    setWorkflowPhasePromptsSaving(true);
+    try {
+      const response = await fetch(`/api/strategies/${id}/workflow-phase-prompts`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          openingPrompt: workflowOpeningPrompt.trim() ? workflowOpeningPrompt : null,
+          phases: workflowPhasePrompts.map((phase) => ({
+            id: phase.id,
+            injectedPrompt: phase.injectedPrompt.trim() ? phase.injectedPrompt : null
+          }))
+        })
+      });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "保存阶段注入提示词失败");
+        return;
+      }
+      const phases = Array.isArray(payload.data?.phases) ? payload.data.phases : [];
+      setWorkflowPhasePrompts(
+        phases.map((phase) => ({
+          id: String(phase.id ?? ""),
+          title: String(phase.title ?? ""),
+          kind:
+            phase.kind === "analysis" || phase.kind === "election" || phase.kind === "deliberation" || phase.kind === "finalization"
+              ? phase.kind
+              : "analysis",
+          description: typeof phase.description === "string" ? phase.description : null,
+          minRounds: typeof phase.minRounds === "number" ? phase.minRounds : null,
+          injectedPrompt: typeof phase.injectedPrompt === "string" ? phase.injectedPrompt : ""
+        }))
+      );
+      showToast("success", "已保存阶段注入提示词");
+    } finally {
+      setWorkflowPhasePromptsSaving(false);
+    }
+  }
+
   if (!detail) {
     return <div className="panel">加载中...</div>;
   }
@@ -410,6 +533,60 @@ export default function StrategyDetailPage() {
           aria-live="polite"
         >
           {toast.text}
+        </div>
+      ) : null}
+      {workflowPromptDialog ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setWorkflowPromptDialog(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "center",
+            padding: 24,
+            zIndex: 1000
+          }}
+        >
+          <div
+            className="panel stack"
+            onClick={(event) => event.stopPropagation()}
+            style={{ width: "min(980px, 100%)" }}
+          >
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <div className="stack" style={{ gap: 4 }}>
+                <strong>{workflowPromptDialog.title}</strong>
+                <div className="muted">{workflowPromptDialog.description}</div>
+              </div>
+              <button className="btn" type="button" onClick={() => setWorkflowPromptDialog(null)}>
+                关闭
+              </button>
+            </div>
+            <textarea
+              className="strategyPrompt"
+              value={workflowPromptDialog.value}
+              disabled={!detail?.canEdit}
+              onChange={(event) => updateWorkflowPromptDialogValue(event.target.value)}
+              style={{ height: "60vh", resize: "none", overflowY: "auto" }}
+              autoFocus
+            />
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <span className="muted">{workflowPromptDialog.value.length.toLocaleString()} 字符</span>
+              <div className="row">
+                <button className="btn" type="button" onClick={() => setWorkflowPromptDialog(null)}>
+                  取消
+                </button>
+                {detail?.canEdit ? (
+                  <button className="btn btn-primary" type="button" onClick={applyWorkflowPromptDialog}>
+                    应用修改
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
         </div>
       ) : null}
 
@@ -471,6 +648,88 @@ export default function StrategyDetailPage() {
           <label>描述（可选）</label>
           <textarea value={description} disabled={!detail.canEdit} onChange={(event) => setDescription(event.target.value)} />
         </div>
+      </section>
+
+      <section className="panel stack">
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div>
+            <strong>阶段注入提示词</strong>
+            <div className="muted">开局提示词会在辩论一开始注入；阶段提示词会在系统进入对应阶段后自动注入到运行时 Prompt 中。</div>
+          </div>
+          {detail.canEdit ? (
+            <button className="btn btn-primary" disabled={workflowPhasePromptsLoading || workflowPhasePromptsSaving} onClick={() => void saveWorkflowPhasePrompts()}>
+              {workflowPhasePromptsSaving ? "保存中..." : "保存阶段提示词"}
+            </button>
+          ) : null}
+        </div>
+
+        {workflowPhasePromptsLoading ? (
+          <div className="muted">加载中...</div>
+        ) : (
+          <div className="grid" style={{ gap: 12 }}>
+            <div className="softBox stack">
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                <strong>开局注入提示词</strong>
+                <span className="muted">opening</span>
+              </div>
+              <div className="muted">在第 1 轮开始时统一注入，用来规定整场辩论开局必须先做什么、不能做什么。</div>
+              <div className="softBox" style={{ whiteSpace: "pre-wrap" }}>
+                {summarizePrompt(workflowOpeningPrompt)}
+              </div>
+              <div className="row" style={{ justifyContent: "flex-end" }}>
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() =>
+                    openWorkflowPromptDialog({
+                      type: "opening",
+                      title: "开局注入提示词",
+                      description: "在第 1 轮开始时统一注入，用来规定整场辩论开局必须先做什么、不能做什么。",
+                      value: workflowOpeningPrompt
+                    })
+                  }
+                >
+                  {detail.canEdit ? "查看 / 编辑" : "查看"}
+                </button>
+              </div>
+            </div>
+            {workflowPhasePrompts.length <= 0 ? (
+              <div className="muted">当前策略没有可编辑的阶段配置。</div>
+            ) : null}
+            {workflowPhasePrompts.map((phase, index) => (
+              <div key={phase.id} className="softBox stack">
+                <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                  <strong>{phase.title}</strong>
+                  <span className="muted">
+                    {phase.kind}
+                    {phase.minRounds ? ` · minRounds=${phase.minRounds}` : ""}
+                  </span>
+                </div>
+                {phase.description ? <div className="muted">{phase.description}</div> : null}
+                <div className="softBox" style={{ whiteSpace: "pre-wrap" }}>
+                  {summarizePrompt(phase.injectedPrompt)}
+                </div>
+                <div className="row" style={{ justifyContent: "flex-end" }}>
+                  <button
+                    className="btn"
+                    type="button"
+                    onClick={() =>
+                      openWorkflowPromptDialog({
+                        type: "phase",
+                        title: `${phase.title} · 阶段注入提示词`,
+                        description: phase.description ?? "系统进入该阶段后，会自动把这里的提示词注入到运行时 Prompt 中。",
+                        value: phase.injectedPrompt,
+                        phaseIndex: index
+                      })
+                    }
+                  >
+                    {detail.canEdit ? "查看 / 编辑" : "查看"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <div className="grid" style={{ gap: 16, alignItems: "start" }}>

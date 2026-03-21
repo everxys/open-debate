@@ -31,6 +31,26 @@ type StrategyDetail = {
   }>;
 };
 
+type WorkflowPhasePrompt = {
+  id: string;
+  title: string;
+  kind: string;
+  description: string | null;
+  minRounds: number | null;
+  injectedPrompt: string;
+};
+
+type WorkflowIdeaBank = {
+  rawIdeaBankPath: string | null;
+  derivedFiles: {
+    selectedSTierPath: string | null;
+    selectedATierPath: string | null;
+    rejectedOrMergedPath: string | null;
+    eventMappingsPath: string | null;
+    newlyInventedIdeasPath: string | null;
+  };
+};
+
 type BindingRow = {
   rowId: string;
   roleId: string;
@@ -57,6 +77,10 @@ export default function NewDebatePage() {
   const [strategies, setStrategies] = useState<StrategyListItem[]>([]);
   const [strategyId, setStrategyId] = useState<string>("");
   const [strategyDetail, setStrategyDetail] = useState<StrategyDetail | null>(null);
+  const [workflowOpeningPrompt, setWorkflowOpeningPrompt] = useState("");
+  const [workflowIdeaBank, setWorkflowIdeaBank] = useState<WorkflowIdeaBank | null>(null);
+  const [workflowPhasePrompts, setWorkflowPhasePrompts] = useState<WorkflowPhasePrompt[]>([]);
+  const [workflowPhasePromptsLoading, setWorkflowPhasePromptsLoading] = useState(false);
   const [bindingRows, setBindingRows] = useState<BindingRow[]>([]);
 
   function newRowId() {
@@ -86,33 +110,87 @@ export default function NewDebatePage() {
   async function loadStrategyDetail(id: string) {
     if (!id) {
       setStrategyDetail(null);
+      setWorkflowOpeningPrompt("");
+      setWorkflowIdeaBank(null);
+      setWorkflowPhasePrompts([]);
       setBindingRows([]);
       return;
     }
 
-    const response = await fetch(`/api/strategies/${id}`);
-    const payload = await response.json();
-    if (!response.ok) {
-      showToast("error", payload.error?.message ?? "加载策略失败");
-      setStrategyDetail(null);
-      return;
-    }
+    setWorkflowPhasePromptsLoading(true);
 
-    const detail = payload.data as StrategyDetail;
-    setStrategyDetail(detail);
-    setBindingRows((current) => {
-      const roleIdSet = new Set((detail.roles ?? []).map((r) => r.id));
-      const kept = current.filter((row) => roleIdSet.has(row.roleId));
-      const existingCounts = new Map<string, number>();
-      for (const row of kept) existingCounts.set(row.roleId, (existingCounts.get(row.roleId) ?? 0) + 1);
-
-      const next: BindingRow[] = [...kept];
-      for (const role of detail.roles ?? []) {
-        if ((existingCounts.get(role.id) ?? 0) > 0) continue;
-        next.push({ rowId: role.id, roleId: role.id, enabled: true, agentId: "" });
+    try {
+      const [strategyResponse, workflowResponse] = await Promise.all([
+        fetch(`/api/strategies/${id}`),
+        fetch(`/api/strategies/${id}/workflow-phase-prompts`)
+      ]);
+      const payload = await strategyResponse.json();
+      const workflowPayload = await workflowResponse.json();
+      if (!strategyResponse.ok) {
+        showToast("error", payload.error?.message ?? "加载策略失败");
+        setStrategyDetail(null);
+        setWorkflowPhasePrompts([]);
+        return;
       }
-      return next;
-    });
+      if (!workflowResponse.ok) {
+        showToast("error", workflowPayload.error?.message ?? "加载阶段注入提示词失败");
+        setWorkflowOpeningPrompt("");
+        setWorkflowIdeaBank(null);
+        setWorkflowPhasePrompts([]);
+      } else {
+        setWorkflowOpeningPrompt(typeof workflowPayload.data?.openingPrompt === "string" ? workflowPayload.data.openingPrompt : "");
+        const ideaBank = workflowPayload.data?.ideaBank;
+        setWorkflowIdeaBank(
+          ideaBank && typeof ideaBank === "object"
+            ? {
+                rawIdeaBankPath: typeof ideaBank.rawIdeaBankPath === "string" ? ideaBank.rawIdeaBankPath : null,
+                derivedFiles: {
+                  selectedSTierPath:
+                    typeof ideaBank.derivedFiles?.selectedSTierPath === "string" ? ideaBank.derivedFiles.selectedSTierPath : null,
+                  selectedATierPath:
+                    typeof ideaBank.derivedFiles?.selectedATierPath === "string" ? ideaBank.derivedFiles.selectedATierPath : null,
+                  rejectedOrMergedPath:
+                    typeof ideaBank.derivedFiles?.rejectedOrMergedPath === "string" ? ideaBank.derivedFiles.rejectedOrMergedPath : null,
+                  eventMappingsPath:
+                    typeof ideaBank.derivedFiles?.eventMappingsPath === "string" ? ideaBank.derivedFiles.eventMappingsPath : null,
+                  newlyInventedIdeasPath:
+                    typeof ideaBank.derivedFiles?.newlyInventedIdeasPath === "string" ? ideaBank.derivedFiles.newlyInventedIdeasPath : null
+                }
+              }
+            : null
+        );
+        setWorkflowPhasePrompts(
+          Array.isArray(workflowPayload.data?.phases)
+            ? workflowPayload.data.phases.map((phase: Record<string, unknown>) => ({
+                id: String(phase.id ?? ""),
+                title: String(phase.title ?? ""),
+                kind: String(phase.kind ?? ""),
+                description: typeof phase.description === "string" ? phase.description : null,
+                minRounds: typeof phase.minRounds === "number" ? phase.minRounds : null,
+                injectedPrompt: typeof phase.injectedPrompt === "string" ? phase.injectedPrompt : ""
+              }))
+            : []
+        );
+      }
+
+      const detail = payload.data as StrategyDetail;
+      setStrategyDetail(detail);
+      setBindingRows((current) => {
+        const roleIdSet = new Set((detail.roles ?? []).map((r) => r.id));
+        const kept = current.filter((row) => roleIdSet.has(row.roleId));
+        const existingCounts = new Map<string, number>();
+        for (const row of kept) existingCounts.set(row.roleId, (existingCounts.get(row.roleId) ?? 0) + 1);
+
+        const next: BindingRow[] = [...kept];
+        for (const role of detail.roles ?? []) {
+          if ((existingCounts.get(role.id) ?? 0) > 0) continue;
+          next.push({ rowId: role.id, roleId: role.id, enabled: true, agentId: "" });
+        }
+        return next;
+      });
+    } finally {
+      setWorkflowPhasePromptsLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -150,7 +228,7 @@ export default function NewDebatePage() {
   const canSubmit =
     form.question.trim().length >= 10 &&
     (form.unlimitedTurns ||
-      (Number.isFinite(form.maxTurns) && form.maxTurns >= 1 && form.maxTurns <= 50)) &&
+      (Number.isFinite(form.maxTurns) && form.maxTurns >= 1 && form.maxTurns <= 200)) &&
     (strategyId
       ? enabledRows.length >= 2 &&
         enabledBindings.length === enabledRows.length
@@ -235,7 +313,7 @@ export default function NewDebatePage() {
             <textarea
               value={form.question}
               onChange={(event) => setForm({ ...form, question: event.target.value })}
-              placeholder="请输入辩论问题（至少 10 个字）"
+              placeholder="请输入辩论问题（至少 10 个字）。如果策略启用了点子库，请只写作品目标、世界前提和最高原则，不要把 100+ 点子再塞进这里。"
               maxLength={50_000}
               style={{ height: "60vh", resize: "none", overflowY: "auto" }}
               autoFocus
@@ -298,10 +376,10 @@ export default function NewDebatePage() {
               放大
             </button>
           </div>
-          <textarea
+            <textarea
             value={form.question}
             onChange={(event) => setForm({ ...form, question: event.target.value })}
-            placeholder="请输入辩论问题（至少 10 个字）"
+            placeholder="请输入辩论问题（至少 10 个字）。如果策略启用了点子库，请只写作品目标、世界前提和最高原则，不要把 100+ 点子再塞进这里。"
             maxLength={50_000}
             rows={7}
             style={{ height: 180, maxHeight: 180, overflowY: "auto", resize: "none" }}
@@ -321,7 +399,7 @@ export default function NewDebatePage() {
               value={form.maxTurns}
               disabled={form.unlimitedTurns}
               min={0}
-              max={50}
+              max={200}
               onChange={(event) =>
                 setForm({ ...form, maxTurns: Number(event.target.value) })
               }
@@ -355,6 +433,88 @@ export default function NewDebatePage() {
 
         {strategyId && strategyDetail ? (
             <div className="stack">
+              <div className="panel stack">
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <div>
+                    <strong>阶段注入提示词</strong>
+                    <div className="muted">创建后，系统进入对应阶段时会自动注入这些提示词。</div>
+                  </div>
+                  <Link className="btn" href={`/strategies/${strategyDetail.id}`}>
+                    去策略页编辑
+                  </Link>
+                </div>
+                {workflowPhasePromptsLoading ? (
+                  <div className="muted">加载中...</div>
+                ) : (
+                  <div className="grid" style={{ gap: 12 }}>
+                    {workflowIdeaBank ? (
+                      <div className="softBox stack">
+                        <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                          <strong>点子库路由</strong>
+                          <span className="muted">idea bank</span>
+                        </div>
+                        <div className="muted">
+                          原始点子库会在 Phase 3 参与筛选；Phase 4 以后默认只读取筛选结果文件。
+                        </div>
+                        <div className="muted">原始点子库：{workflowIdeaBank.rawIdeaBankPath ?? "（未配置）"}</div>
+                        <div className="muted">
+                          派生结果文件：
+                          {[
+                            workflowIdeaBank.derivedFiles.selectedSTierPath,
+                            workflowIdeaBank.derivedFiles.selectedATierPath,
+                            workflowIdeaBank.derivedFiles.rejectedOrMergedPath,
+                            workflowIdeaBank.derivedFiles.eventMappingsPath,
+                            workflowIdeaBank.derivedFiles.newlyInventedIdeasPath
+                          ]
+                            .filter((item): item is string => Boolean(item))
+                            .join(" / ") || "（未配置）"}
+                        </div>
+                      </div>
+                    ) : null}
+                    <div className="softBox stack">
+                      <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                        <strong>开局注入提示词</strong>
+                        <span className="muted">opening</span>
+                      </div>
+                      <div
+                        className="strategyPrompt"
+                        style={{
+                          whiteSpace: "pre-wrap",
+                          minHeight: workflowOpeningPrompt ? undefined : 0,
+                          color: workflowOpeningPrompt ? undefined : "var(--muted)"
+                        }}
+                      >
+                        {workflowOpeningPrompt || "当前策略还没有配置开局自动注入提示词。"}
+                      </div>
+                    </div>
+                    {workflowPhasePrompts.length <= 0 ? (
+                      <div className="muted">当前策略没有配置阶段注入提示词。</div>
+                    ) : null}
+                    {workflowPhasePrompts.map((phase) => (
+                      <div key={phase.id} className="softBox stack">
+                        <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                          <strong>{phase.title}</strong>
+                          <span className="muted">
+                            {phase.kind}
+                            {phase.minRounds ? ` · minRounds=${phase.minRounds}` : ""}
+                          </span>
+                        </div>
+                        {phase.description ? <div className="muted">{phase.description}</div> : null}
+                        <div
+                          className="strategyPrompt"
+                          style={{
+                            whiteSpace: "pre-wrap",
+                            minHeight: phase.injectedPrompt ? undefined : 0,
+                            color: phase.injectedPrompt ? undefined : "var(--muted)"
+                          }}
+                        >
+                          {phase.injectedPrompt || "当前阶段还没有配置自动注入提示词。"}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               <div className="row" style={{ justifyContent: "space-between" }}>
                 <label style={{ fontWeight: 600 }}>
                   策略角色映射（已选 {enabledRows.length}）

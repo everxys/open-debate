@@ -19,7 +19,11 @@ import { Tree, type NodeApi } from "react-arborist";
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 import { MarkdownView } from "@/components/ui/markdown";
 import { createFsTreeModel, type FsNode, normalizeFsPath } from "@/lib/fs-tree";
-import { formatRequiredDeliverableSummary, normalizeDebateWorkflow } from "@/lib/workflow";
+import {
+  formatRequiredDeliverableSummary,
+  normalizeDebateWorkflow,
+  type NormalizedDebateWorkflow
+} from "@/lib/workflow";
 
 type Agent = {
   id: string;
@@ -85,6 +89,14 @@ type WorkflowRulesState = {
   loading: boolean;
 };
 
+type DebateDirectoryPhaseInfo = {
+  phaseId: string;
+  title: string;
+  kind: "analysis" | "election" | "deliberation" | "finalization";
+  description: string | null;
+  injectedPrompt: string | null;
+};
+
 type AllFilesMeta =
   | { scope: "debate"; path: string }
   | { scope: "agent"; debateAgentId: string; seat: string; agentName: string; path: string };
@@ -145,11 +157,14 @@ function formatWorkflowRulesMarkdown(raw: string) {
   rules.push("");
 
   rules.push("**阶段机**");
+  rules.push(`- 开局注入提示词：${parsed.promptPolicies.openingPrompt ? "已配置" : "未配置"}`);
   if (parsed.phaseMachine.phases.length === 0) {
     rules.push("- （未配置）");
   } else {
     for (const phase of parsed.phaseMachine.phases) {
-      rules.push(`- ${phase.title}${phase.description ? `：${phase.description}` : ""}`);
+      rules.push(
+        `- ${phase.title}${phase.description ? `：${phase.description}` : ""}${phase.minRounds ? `（至少 ${phase.minRounds} 轮）` : ""}${phase.injectedPrompt ? "［已配置阶段提示词］" : ""}`
+      );
     }
   }
   rules.push("");
@@ -181,10 +196,29 @@ function formatWorkflowRulesMarkdown(raw: string) {
   );
   rules.push(`- 输出格式：${parsed.promptPolicies.responseFormat.requireMarkdown ? "Markdown" : "不强制 Markdown"}`);
   rules.push(`- 禁止原始 JSON：${parsed.promptPolicies.responseFormat.forbidRawJson ? "是" : "否"}`);
+  rules.push(
+    `- 单轮输出预算：讨论=${parsed.promptPolicies.outputBudget.discussionMaxTokens} tokens；写作=${parsed.promptPolicies.outputBudget.writingMaxTokens} tokens`
+  );
   rules.push(`- Round 1 公平性提示：${parsed.promptPolicies.round1Fairness ? "开启" : "关闭"}`);
   rules.push(
     `- 允许写入路径：${parsed.deliverables.allowedPaths.length ? parsed.deliverables.allowedPaths.join(" / ") : "（无）"}`
   );
+  if (parsed.ideaBank.rawIdeaBankPath || Object.values(parsed.ideaBank.derivedFiles).some(Boolean)) {
+    rules.push(
+      `- 原始点子库：${parsed.ideaBank.rawIdeaBankPath ?? "（无）"}`
+    );
+    rules.push(
+      `- 点子筛选结果文件：${[
+        parsed.ideaBank.derivedFiles.selectedSTierPath,
+        parsed.ideaBank.derivedFiles.selectedATierPath,
+        parsed.ideaBank.derivedFiles.rejectedOrMergedPath,
+        parsed.ideaBank.derivedFiles.eventMappingsPath,
+        parsed.ideaBank.derivedFiles.newlyInventedIdeasPath
+      ]
+        .filter((item): item is string => Boolean(item))
+        .join(" / ") || "（无）"}`
+    );
+  }
   rules.push(
     `- 必交文件：${
       parsed.deliverables.requiredFiles.length
@@ -228,6 +262,76 @@ function formatBytes(value: number) {
   if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
   if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${Math.floor(value)} B`;
+}
+
+function parseWorkflowConfig(raw: string | null) {
+  if (!raw) return null;
+  try {
+    return normalizeDebateWorkflow(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function getWorkflowMinimumAnalysisRounds(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return 0;
+  const analysisPhase = workflow.phaseMachine.phases.find((phase) => phase.kind === "analysis");
+  const analysisMinRounds = analysisPhase?.minRounds ?? 0;
+  return Math.max(workflow.phaseMachine.transitionRules.election.startRound - 1, analysisMinRounds);
+}
+
+function getWorkflowPhaseMinRounds(
+  workflow: NormalizedDebateWorkflow | null,
+  kind: "analysis" | "election" | "deliberation" | "finalization",
+  fallback = 0
+) {
+  const minRounds = workflow?.phaseMachine.phases.find((phase) => phase.kind === kind)?.minRounds;
+  return typeof minRounds === "number" && Number.isFinite(minRounds) && minRounds >= 0 ? Math.floor(minRounds) : fallback;
+}
+
+function getWorkflowEarliestDeliberationRound(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return 1;
+  return getWorkflowMinimumAnalysisRounds(workflow) + getWorkflowPhaseMinRounds(workflow, "election", 1) + 1;
+}
+
+function getWorkflowEarliestFinalizationRound(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return 1;
+  return getWorkflowEarliestDeliberationRound(workflow) + getWorkflowPhaseMinRounds(workflow, "deliberation", 0);
+}
+
+function resolveDirectoryPhaseForRound(
+  workflow: NormalizedDebateWorkflow | null,
+  round: number,
+  allowFinalization = false,
+  openVote: OfficialVoteOpenState | null = null,
+  currentRound: number | null = null
+): DebateDirectoryPhaseInfo | null {
+  if (!workflow?.enabled) return null;
+  const phaseByKind = new Map(workflow.phaseMachine.phases.map((phase) => [phase.kind, phase] as const));
+  if (openVote && currentRound !== null && round === currentRound) {
+    if (openVote.kind === "election") {
+      return phaseByKind.get("election") ?? null;
+    }
+    return phaseByKind.get("finalization") ?? null;
+  }
+  if (allowFinalization && round >= getWorkflowEarliestFinalizationRound(workflow)) {
+    return phaseByKind.get("finalization") ?? null;
+  }
+  if (round >= getWorkflowEarliestDeliberationRound(workflow)) {
+    return phaseByKind.get("deliberation") ?? null;
+  }
+  if (round >= workflow.phaseMachine.transitionRules.election.startRound) {
+    return phaseByKind.get("election") ?? null;
+  }
+  return phaseByKind.get("analysis") ?? null;
+}
+
+function isPhaseEntryRound(workflow: NormalizedDebateWorkflow | null, round: number, kind: DebateDirectoryPhaseInfo["kind"]) {
+  if (!workflow?.enabled) return false;
+  if (kind === "analysis") return round === 1;
+  if (kind === "election") return round === workflow.phaseMachine.transitionRules.election.startRound;
+  if (kind === "deliberation") return round === getWorkflowEarliestDeliberationRound(workflow);
+  return round === getWorkflowEarliestFinalizationRound(workflow);
 }
 
 function parseDownloadFileName(header: string | null, fallbackDebateId: string) {
@@ -379,8 +483,8 @@ function UsageBar({ ratio }: { ratio: number | null }) {
           }}
         />
       </span>
-      <span className="muted" style={{ minWidth: 44, textAlign: "right" }}>
-        {pct === null ? "?" : `${pct}%`}
+      <span className="muted" style={{ minWidth: 64, textAlign: "right" }}>
+        {pct === null ? "未统计" : `${pct}%`}
       </span>
     </span>
   );
@@ -703,9 +807,6 @@ function ParticipantsPanel(props: {
   isAddingAgent: boolean;
   isOwner: boolean;
   debateStatus: string;
-  canReorderSeats: boolean;
-  isReorderingSeats: boolean;
-  participantCount: number;
   agents: DebateAgent[];
   resettingUsageByDebateAgentId: Record<string, boolean>;
   contextTotalsByDebateAgentId: Record<
@@ -720,7 +821,6 @@ function ParticipantsPanel(props: {
   onChangeNewAgentId: (value: string) => void;
   onAddAgent: () => void;
   onResetUsageSession: (debateAgentId: string) => void;
-  onMoveSeat: (debateAgentId: string, direction: -1 | 1) => void;
 }) {
   return (
     <Fragment>
@@ -730,16 +830,33 @@ function ParticipantsPanel(props: {
             <strong>加入新的 AI（会排在最后）</strong>
             <span className="muted">当前 {props.agentCount}</span>
           </div>
-          <div className="row">
-            <select value={props.newAgentId} onChange={(event) => props.onChangeNewAgentId(event.target.value)} style={{ flex: 1 }}>
-              <option value="">选择一个 AI 配置</option>
-              {props.availableAgents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name} · {agent.provider} · {agent.model}
-                </option>
-              ))}
-            </select>
-            <button className="btn btn-primary" disabled={!props.newAgentId || props.isAddingAgent} onClick={props.onAddAgent}>
+          <div className="stack" style={{ gap: 10 }}>
+            <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflow: "hidden" }}>
+              <select
+                value={props.newAgentId}
+                onChange={(event) => props.onChangeNewAgentId(event.target.value)}
+                style={{
+                  width: "100%",
+                  minWidth: 0,
+                  maxWidth: "100%",
+                  display: "block",
+                  boxSizing: "border-box"
+                }}
+              >
+                <option value="">选择一个 AI 配置</option>
+                {props.availableAgents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name} · {agent.provider} · {agent.model}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              className="btn btn-primary"
+              disabled={!props.newAgentId || props.isAddingAgent}
+              onClick={props.onAddAgent}
+              style={{ alignSelf: "flex-start" }}
+            >
               加入
             </button>
           </div>
@@ -758,8 +875,8 @@ function ParticipantsPanel(props: {
 
         return (
           <div className="panel" key={agent.debateAgentId}>
-            <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-              <span>
+            <div className="row" style={{ justifyContent: "space-between", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+              <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>
                 #{agent.turnOrder} {agent.displayName}
                 <span className="muted">
                   {" "}
@@ -776,32 +893,15 @@ function ParticipantsPanel(props: {
                   >
                     新会话
                   </button>
-                  {props.isOwner && ["pending", "paused"].includes(props.debateStatus) ? (
-                    <Fragment>
-                      <button
-                        className="btn"
-                        type="button"
-                        disabled={!props.canReorderSeats || props.isReorderingSeats || agent.turnOrder <= 1}
-                        onClick={() => props.onMoveSeat(agent.debateAgentId, -1)}
-                      >
-                        上移
-                      </button>
-                      <button
-                        className="btn"
-                        type="button"
-                        disabled={!props.canReorderSeats || props.isReorderingSeats || agent.turnOrder >= props.participantCount}
-                        onClick={() => props.onMoveSeat(agent.debateAgentId, 1)}
-                      >
-                        下移
-                      </button>
-                    </Fragment>
-                  ) : null}
                 </div>
               ) : null}
             </div>
             {props.isOwner ? (
-              <div className="row" style={{ justifyContent: "space-between", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
-                <span className="muted">本段累计</span>
+              <div className="row" style={{ justifyContent: "space-between", gap: 10, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <span className="muted">
+                  本段累计
+                  {ratio === null ? " · 等待首轮统计" : ""}
+                </span>
                 <UsageBar ratio={ratio} />
               </div>
             ) : null}
@@ -1004,6 +1104,14 @@ type OfficialVoteClosed =
       closedAt: string;
       createdAt: string;
     };
+
+type OfficialVoteOpenState = {
+  status: "open";
+  kind: "election" | "custom";
+  roundNumber: number;
+  title: string;
+  tieRound: number;
+};
 
 function LineNumberTextarea(props: {
   value: string;
@@ -1342,9 +1450,16 @@ export default function DebateDetailPage() {
   const [isReorderingSeats, setIsReorderingSeats] = useState(false);
   const [votePathsByRound, setVotePathsByRound] = useState<Record<number, string>>({});
   const [voteByRound, setVoteByRound] = useState<Record<number, OfficialVoteClosed>>({});
+  const [openVoteState, setOpenVoteState] = useState<OfficialVoteOpenState | null>(null);
   const [voteLoadingRound, setVoteLoadingRound] = useState<number | null>(null);
   const [openRoundsByNumber, setOpenRoundsByNumber] = useState<Record<number, boolean>>({});
   const [workflowRulesState, setWorkflowRulesState] = useState<WorkflowRulesState>({ markdown: "", loading: false });
+  const [workflowConfig, setWorkflowConfig] = useState<NormalizedDebateWorkflow | null>(null);
+  const [injectedPromptDialog, setInjectedPromptDialog] = useState<null | {
+    round: number;
+    phaseTitle: string;
+    prompt: string;
+  }>(null);
   const lastLoadErrorAtRef = useRef(0);
   const lastVoteIndexAtRef = useRef(0);
   const lastContextUsageAtRef = useRef(0);
@@ -1434,13 +1549,14 @@ export default function DebateDetailPage() {
 
       if (debateResponse.ok) {
         setDebate(debatePayload.data ?? null);
+        const now = Date.now();
+        if (now - lastVoteIndexAtRef.current > 5000) {
+          lastVoteIndexAtRef.current = now;
+          void loadVoteIndex();
+          void loadOpenVoteState();
+        }
         const isOwner = Boolean(debatePayload.data?.isOwner);
         if (isOwner) {
-          const now = Date.now();
-          if (now - lastVoteIndexAtRef.current > 5000) {
-            lastVoteIndexAtRef.current = now;
-            void loadVoteIndex();
-          }
           if (now - lastContextUsageAtRef.current > 1500) {
             lastContextUsageAtRef.current = now;
             void loadContextUsage();
@@ -1614,12 +1730,15 @@ export default function DebateDetailPage() {
     try {
       const content = await fetchWorkflowRulesMarkdown(id);
       if (!content) {
+        setWorkflowConfig(parseWorkflowConfig(null));
         setWorkflowRulesState({ markdown: formatWorkflowRulesMarkdown("{}"), loading: false });
         return null;
       }
+      setWorkflowConfig(parseWorkflowConfig(content));
       setWorkflowRulesState({ markdown: formatWorkflowRulesMarkdown(content), loading: false });
       return content;
     } catch {
+      setWorkflowConfig(null);
       setWorkflowRulesState({ markdown: WORKFLOW_RULES_ERROR_MARKDOWN, loading: false });
       return null;
     } finally {
@@ -1651,7 +1770,9 @@ export default function DebateDetailPage() {
     setActiveVoteRound(null);
     setVotePathsByRound({});
     setVoteByRound({});
+    setOpenVoteState(null);
     setVoteLoadingRound(null);
+    setInjectedPromptDialog(null);
     setContextUsageByDebateAgentId({});
     setContextTotalsByDebateAgentId({});
     setResettingUsageByDebateAgentId({});
@@ -1728,6 +1849,41 @@ export default function DebateDetailPage() {
       }
       setVotePathsByRound(next);
     } catch {
+    }
+  }
+
+  async function loadOpenVoteState() {
+    if (!id) return null;
+    try {
+      const response = await fetch(`/api/debates/${id}/files?path=${encodeURIComponent("votes/open.json")}`, {
+        cache: "no-store"
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setOpenVoteState(null);
+        return null;
+      }
+      const content = String(payload.data?.content ?? "");
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      if (parsed?.status !== "open") {
+        setOpenVoteState(null);
+        return null;
+      }
+      const roundNumber = Number(parsed.roundNumber);
+      const tieRoundRaw =
+        parsed.meta && typeof parsed.meta === "object" ? Number((parsed.meta as Record<string, unknown>).tieRound) : 0;
+      const next: OfficialVoteOpenState = {
+        status: "open",
+        kind: parsed.kind === "election" ? "election" : "custom",
+        roundNumber: Number.isFinite(roundNumber) && roundNumber > 0 ? Math.floor(roundNumber) : 1,
+        title: String(parsed.title ?? "投票"),
+        tieRound: Number.isFinite(tieRoundRaw) && tieRoundRaw > 0 ? Math.floor(tieRoundRaw) : 0
+      };
+      setOpenVoteState(next);
+      return next;
+    } catch {
+      setOpenVoteState(null);
+      return null;
     }
   }
 
@@ -1991,7 +2147,7 @@ export default function DebateDetailPage() {
   }, [debate, questionDirty]);
 
   useEffect(() => {
-    if (!id || !debate || debate.status !== "running") return;
+    if (!id || !debate || !["running", "paused"].includes(debate.status)) return;
 
     const source = new EventSource(`/api/debates/${id}/events`);
     source.addEventListener("turn_start", (event) => {
@@ -2000,12 +2156,19 @@ export default function DebateDetailPage() {
           progress?: { roundNumber: number; messageNumber: number; agentName: string };
         };
         if (!payload.progress) return;
-        setIsStreaming(true);
+        setIsStreaming(debate.status === "running");
         setLiveRoundNumber(payload.progress.roundNumber);
-        setLiveMessageNumber(payload.progress.messageNumber);
+        setLiveMessageNumber((current) => {
+          const next = payload.progress?.messageNumber;
+          return typeof next === "number" ? next : current;
+        });
         setLiveAgentName(payload.progress.agentName);
-        setLiveStatus("生成中...");
-        setLiveText("");
+        setLiveStatus(debate.status === "paused" ? "已暂停（当前发言完成前保留实时草稿）" : "生成中...");
+        setLiveText((current) => {
+          const nextMessageNumber = payload.progress?.messageNumber;
+          const sameTurn = typeof nextMessageNumber === "number" && nextMessageNumber === liveMessageNumber;
+          return sameTurn && current ? current : "";
+        });
       } catch {
       }
     });
@@ -2041,7 +2204,7 @@ export default function DebateDetailPage() {
     return () => {
       source.close();
     };
-  }, [id, debate?.status]);
+  }, [id, debate?.status, liveMessageNumber]);
 
   useEffect(() => {
     if (!questionHistoryOpen) return;
@@ -2076,7 +2239,7 @@ export default function DebateDetailPage() {
       }
       if (name === "pause") {
         showToast("success", "已请求暂停（本轮结束后生效）");
-        setIsStreaming(false);
+        setLiveStatus("已请求暂停（本轮结束后生效）");
       } else if (name === "stop") {
         showToast("success", "已终止");
         setIsStreaming(false);
@@ -2311,17 +2474,25 @@ export default function DebateDetailPage() {
     ["pending", "paused"].includes(debateStatus) &&
     (debateStatus !== "paused" || isRoundBoundary);
 
+  const latestTurn = turns.length ? turns[turns.length - 1] : null;
+
+  const hasUnpersistedLiveDraft = useMemo(() => {
+    if (!liveMessageNumber || !liveAgentName) return false;
+    if (!liveText.trim()) return false;
+    const latestTurnNumber = latestTurn?.turnNumber ?? 0;
+    return latestTurnNumber < liveMessageNumber;
+  }, [liveAgentName, liveMessageNumber, liveText, latestTurn?.turnNumber]);
+
   const liveAvailable = useMemo(() => {
-    if (debateStatus !== "running") return false;
-    return isStreaming;
-  }, [debateStatus, isStreaming]);
+    if (debateStatus === "running") return isStreaming || hasUnpersistedLiveDraft;
+    if (debateStatus === "paused") return hasUnpersistedLiveDraft;
+    return false;
+  }, [debateStatus, hasUnpersistedLiveDraft, isStreaming]);
 
   const activeTurn = useMemo(() => {
     if (!activeTurnId) return null;
     return turns.find((turn) => turn.id === activeTurnId) ?? null;
   }, [turns, activeTurnId]);
-
-  const latestTurn = turns.length ? turns[turns.length - 1] : null;
 
   function buildVoteMarkdown(vote: OfficialVoteClosed) {
     const lines: string[] = [];
@@ -2448,6 +2619,23 @@ export default function DebateDetailPage() {
     }
     return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
   }, [turns, agentCount]);
+
+  const latestCompletedRound = turnsByRound.length > 0 ? turnsByRound[turnsByRound.length - 1]?.[0] ?? null : null;
+  const currentDirectoryRound =
+    (typeof liveDisplayRound === "number" && liveDisplayRound > 0 ? liveDisplayRound : null) ??
+    latestCompletedRound ??
+    (debate && debate.currentTurn > 0 ? Math.floor((debate.currentTurn - 1) / agentCount) + 1 : null);
+  const currentDirectoryPhase = useMemo(() => {
+    if (!currentDirectoryRound) return null;
+    const mayBeFinalization = Boolean(debate?.consensusReached || debate?.status === "completed");
+    return resolveDirectoryPhaseForRound(
+      workflowConfig,
+      currentDirectoryRound,
+      mayBeFinalization,
+      openVoteState,
+      currentDirectoryRound
+    );
+  }, [currentDirectoryRound, debate?.consensusReached, debate?.status, workflowConfig, openVoteState]);
 
   useEffect(() => {
     if (turnsByRound.length < 1) return;
@@ -2694,6 +2882,42 @@ export default function DebateDetailPage() {
           aria-live="polite"
         >
           {toast.text}
+        </div>
+      ) : null}
+      {injectedPromptDialog ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setInjectedPromptDialog(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "center",
+            padding: 24,
+            zIndex: 1000
+          }}
+        >
+          <div
+            className="panel stack"
+            onClick={(event) => event.stopPropagation()}
+            style={{ width: "min(980px, 100%)" }}
+          >
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <div className="stack" style={{ gap: 4 }}>
+                <strong>{injectedPromptDialog.phaseTitle} · 注入提示词</strong>
+                <div className="muted">第 {injectedPromptDialog.round} 轮进入该阶段时自动注入到运行时 Prompt。</div>
+              </div>
+              <button className="btn" type="button" onClick={() => setInjectedPromptDialog(null)}>
+                关闭
+              </button>
+            </div>
+            <div className="panel" style={{ whiteSpace: "pre-wrap", maxHeight: "65vh", overflowY: "auto" }}>
+              {injectedPromptDialog.prompt}
+            </div>
+          </div>
         </div>
       ) : null}
       {saveSuccessOpen ? (
@@ -3215,16 +3439,12 @@ export default function DebateDetailPage() {
             isAddingAgent={isAddingAgent}
             isOwner={debate.isOwner}
             debateStatus={debateStatus}
-            canReorderSeats={canReorderSeats}
-            isReorderingSeats={isReorderingSeats}
-            participantCount={participantCount}
             agents={debate.agents}
             resettingUsageByDebateAgentId={resettingUsageByDebateAgentId}
             contextTotalsByDebateAgentId={contextTotalsByDebateAgentId}
             onChangeNewAgentId={setNewAgentId}
             onAddAgent={() => void addAgent()}
             onResetUsageSession={(debateAgentId) => void resetAgentUsageSession(debateAgentId)}
-            onMoveSeat={(debateAgentId, direction) => void moveSeat(debateAgentId, direction)}
           />
         ) : leftTab === "workflow" ? (
           <WorkflowRulesPanel
@@ -3360,6 +3580,17 @@ export default function DebateDetailPage() {
           ) : null}
         </div>
         <h2 style={{ margin: 0 }}>发言目录</h2>
+        {currentDirectoryPhase ? (
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <span className="softBox" style={{ padding: "4px 8px", fontSize: 12 }}>
+              当前阶段：{currentDirectoryPhase.title}
+            </span>
+            <span className="muted">
+              {currentDirectoryRound ? `第 ${currentDirectoryRound} 轮` : ""}
+              {currentDirectoryPhase.description ? ` · ${currentDirectoryPhase.description}` : ""}
+            </span>
+          </div>
+        ) : null}
         {turnsByRound.length === 0 && !liveAvailable ? <div className="muted">还没有发言记录</div> : null}
 
         {liveAvailable ? (
@@ -3382,6 +3613,17 @@ export default function DebateDetailPage() {
 
         {turnsByRound.map(([round, roundTurns]) => {
           const isOpen = Boolean(openRoundsByNumber[round]);
+          const phase = resolveDirectoryPhaseForRound(
+            workflowConfig,
+            round,
+            Boolean(currentDirectoryPhase?.kind === "finalization"),
+            openVoteState,
+            currentDirectoryRound
+          );
+          const phaseEntryRound = phase ? isPhaseEntryRound(workflowConfig, round, phase.kind) : false;
+          const hasInjectedPrompt = Boolean(phase?.injectedPrompt && phaseEntryRound);
+          const isCurrentPhaseRound = Boolean(currentDirectoryRound === round);
+          const hasVoteResult = Boolean(votePathsByRound[round]);
           return (
           <details
             key={round}
@@ -3392,13 +3634,69 @@ export default function DebateDetailPage() {
             }}
           >
             <summary style={{ cursor: "pointer" }}>
-              <strong>
-                第 {round} 轮
-              </strong>
+              <strong>第 {round} 轮</strong>
               <span className="muted"> · {roundTurns.length}/{agentCount}</span>
+              {phase ? (
+                <span
+                  className="softBox"
+                  style={{
+                    marginLeft: 8,
+                    padding: "2px 8px",
+                    fontSize: 12,
+                    borderColor: isCurrentPhaseRound ? "rgba(38, 99, 235, 0.35)" : undefined,
+                    background: isCurrentPhaseRound ? "rgba(38, 99, 235, 0.1)" : undefined
+                  }}
+                >
+                  {phase.title}
+                  {isCurrentPhaseRound ? " · 当前" : ""}
+                </span>
+              ) : null}
+              {hasInjectedPrompt ? (
+                <span
+                  className="softBox"
+                  title="这一轮开始进入了带有自动注入提示词的新阶段，展开后可查看注入文本。"
+                  style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}
+                >
+                  已注入提示词
+                </span>
+              ) : null}
+              {hasVoteResult ? (
+                <span
+                  className="softBox"
+                  title="这一轮已有可查看的官方投票结果。"
+                  style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}
+                >
+                  有投票结果
+                </span>
+              ) : null}
             </summary>
             {isOpen ? (
               <div className="stack" style={{ marginTop: 10 }}>
+                {phase ? (
+                  <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span className="muted">阶段：{phase.title}</span>
+                    {phase.description ? <span className="muted">· {phase.description}</span> : null}
+                    {hasInjectedPrompt ? (
+                      <button
+                        type="button"
+                        className="btn"
+                        title="查看这一阶段自动注入到运行时 Prompt 的文本"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          if (!phase?.injectedPrompt) return;
+                          setInjectedPromptDialog({
+                            round,
+                            phaseTitle: phase.title,
+                            prompt: phase.injectedPrompt
+                          });
+                        }}
+                      >
+                        查看注入提示词
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
                 {votePathsByRound[round] ? (
                   <button
                     type="button"

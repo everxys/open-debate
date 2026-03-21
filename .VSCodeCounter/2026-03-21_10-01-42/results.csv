@@ -1,0 +1,131 @@
+"filename", "language", "Markdown", "JSON", "JSON with Comments", "Docker", "TypeScript", "YAML", "JavaScript", "MS SQL", "TypeScript JSX", "PostCSS", "comment", "blank", "total"
+"c:\Users\Administrator\dev\open-debate\.eslintrc.json", "JSON with Comments", 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 2, 5
+"c:\Users\Administrator\dev\open-debate\AGENTS.md", "Markdown", 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 9
+"c:\Users\Administrator\dev\open-debate\Dockerfile", "Docker", 0, 0, 0, 24, 0, 0, 0, 0, 0, 0, 0, 3, 27
+"c:\Users\Administrator\dev\open-debate\README.md", "Markdown", 34, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 19, 53
+"c:\Users\Administrator\dev\open-debate\SOUL.md", "Markdown", 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6
+"c:\Users\Administrator\dev\open-debate\UPDATE.md", "Markdown", 229, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20, 249
+"c:\Users\Administrator\dev\open-debate\USER.md", "Markdown", 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4
+"c:\Users\Administrator\dev\open-debate\app\(auth)\layout.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 3, 11
+"c:\Users\Administrator\dev\open-debate\app\(auth)\login\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 83, 0, 0, 12, 95
+"c:\Users\Administrator\dev\open-debate\app\(auth)\signup\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 161, 0, 0, 20, 181
+"c:\Users\Administrator\dev\open-debate\app\(main)\admin\observability\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 160, 0, 0, 13, 173
+"c:\Users\Administrator\dev\open-debate\app\(main)\agents\[id]\files\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 728, 0, 0, 63, 791
+"c:\Users\Administrator\dev\open-debate\app\(main)\agents\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 897, 0, 2, 64, 963
+"c:\Users\Administrator\dev\open-debate\app\(main)\debates\[id]\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 3409, 0, 10, 206, 3625
+"c:\Users\Administrator\dev\open-debate\app\(main)\debates\new\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 551, 0, 1, 36, 588
+"c:\Users\Administrator\dev\open-debate\app\(main)\debates\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 303, 0, 3, 17, 323
+"c:\Users\Administrator\dev\open-debate\app\(main)\docs\[slug]\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 42, 0, 0, 6, 48
+"c:\Users\Administrator\dev\open-debate\app\(main)\docs\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 48, 0, 0, 7, 55
+"c:\Users\Administrator\dev\open-debate\app\(main)\layout.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 4, 44
+"c:\Users\Administrator\dev\open-debate\app\(main)\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 2, 6
+"c:\Users\Administrator\dev\open-debate\app\(main)\settings\security\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 91, 0, 0, 11, 102
+"c:\Users\Administrator\dev\open-debate\app\(main)\strategies\[id]\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 796, 0, 0, 63, 859
+"c:\Users\Administrator\dev\open-debate\app\(main)\strategies\new\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 290, 0, 0, 27, 317
+"c:\Users\Administrator\dev\open-debate\app\(main)\strategies\page.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 254, 0, 0, 23, 277
+"c:\Users\Administrator\dev\open-debate\app\api\agents\[id]\duplicate\route.ts", "TypeScript", 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 4, 19
+"c:\Users\Administrator\dev\open-debate\app\api\agents\[id]\export\route.ts", "TypeScript", 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 3, 18
+"c:\Users\Administrator\dev\open-debate\app\api\agents\[id]\files\route.ts", "TypeScript", 0, 0, 0, 0, 65, 0, 0, 0, 0, 0, 0, 6, 71
+"c:\Users\Administrator\dev\open-debate\app\api\agents\[id]\route.ts", "TypeScript", 0, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 5, 45
+"c:\Users\Administrator\dev\open-debate\app\api\agents\[id]\test\route.ts", "TypeScript", 0, 0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 3, 20
+"c:\Users\Administrator\dev\open-debate\app\api\agents\export\route.ts", "TypeScript", 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 4, 16
+"c:\Users\Administrator\dev\open-debate\app\api\agents\import\route.ts", "TypeScript", 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 3, 15
+"c:\Users\Administrator\dev\open-debate\app\api\agents\route.ts", "TypeScript", 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 4, 24
+"c:\Users\Administrator\dev\open-debate\app\api\agents\test-config\route.ts", "TypeScript", 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 3, 15
+"c:\Users\Administrator\dev\open-debate\app\api\auth\login\route.ts", "TypeScript", 0, 0, 0, 0, 99, 0, 0, 0, 0, 0, 1, 18, 118
+"c:\Users\Administrator\dev\open-debate\app\api\auth\logout\route.ts", "TypeScript", 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 3, 9
+"c:\Users\Administrator\dev\open-debate\app\api\auth\password\route.ts", "TypeScript", 0, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 11, 71
+"c:\Users\Administrator\dev\open-debate\app\api\auth\signup\route.ts", "TypeScript", 0, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 11, 71
+"c:\Users\Administrator\dev\open-debate\app\api\auth\verification\send\route.ts", "TypeScript", 0, 0, 0, 0, 73, 0, 0, 0, 0, 0, 1, 11, 85
+"c:\Users\Administrator\dev\open-debate\app\api\auth\verification\verify\route.ts", "TypeScript", 0, 0, 0, 0, 28, 0, 0, 0, 0, 0, 0, 6, 34
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\agents\[debateAgentId]\files\route.ts", "TypeScript", 0, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 7, 56
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\agents\reorder\route.ts", "TypeScript", 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 4, 17
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\agents\route.ts", "TypeScript", 0, 0, 0, 0, 19, 0, 0, 0, 0, 0, 0, 4, 23
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\all-files\route.ts", "TypeScript", 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 4, 16
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\context\usage\session\reset\route.ts", "TypeScript", 0, 0, 0, 0, 126, 0, 0, 0, 0, 0, 1, 15, 142
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\download\route.ts", "TypeScript", 0, 0, 0, 0, 254, 0, 0, 0, 0, 0, 0, 32, 286
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\events\route.ts", "TypeScript", 0, 0, 0, 0, 62, 0, 0, 0, 0, 0, 0, 11, 73
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\file-info\route.ts", "TypeScript", 0, 0, 0, 0, 88, 0, 0, 0, 0, 0, 0, 9, 97
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\files\route.ts", "TypeScript", 0, 0, 0, 0, 46, 0, 0, 0, 0, 0, 0, 7, 53
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\pause\route.ts", "TypeScript", 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 3, 18
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\progress\route.ts", "TypeScript", 0, 0, 0, 0, 42, 0, 0, 0, 0, 0, 0, 5, 47
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\resume\route.ts", "TypeScript", 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 3, 18
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\route.ts", "TypeScript", 0, 0, 0, 0, 43, 0, 0, 0, 0, 0, 0, 5, 48
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\segment\route.ts", "TypeScript", 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 4, 17
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\start\route.ts", "TypeScript", 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 3, 18
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\stop\route.ts", "TypeScript", 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 3, 18
+"c:\Users\Administrator\dev\open-debate\app\api\debates\[id]\turns\route.ts", "TypeScript", 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 5, 39
+"c:\Users\Administrator\dev\open-debate\app\api\debates\route.ts", "TypeScript", 0, 0, 0, 0, 22, 0, 0, 0, 0, 0, 0, 4, 26
+"c:\Users\Administrator\dev\open-debate\app\api\health\route.ts", "TypeScript", 0, 0, 0, 0, 24, 0, 0, 0, 0, 0, 0, 7, 31
+"c:\Users\Administrator\dev\open-debate\app\api\model-catalog\models\route.ts", "TypeScript", 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 4, 20
+"c:\Users\Administrator\dev\open-debate\app\api\strategies\[id]\favorite\route.ts", "TypeScript", 0, 0, 0, 0, 21, 0, 0, 0, 0, 0, 0, 5, 26
+"c:\Users\Administrator\dev\open-debate\app\api\strategies\[id]\fork\route.ts", "TypeScript", 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 4, 16
+"c:\Users\Administrator\dev\open-debate\app\api\strategies\[id]\roles\[roleId]\duplicate\route.ts", "TypeScript", 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 4, 19
+"c:\Users\Administrator\dev\open-debate\app\api\strategies\[id]\roles\[roleId]\files\route.ts", "TypeScript", 0, 0, 0, 0, 72, 0, 0, 0, 0, 0, 0, 6, 78
+"c:\Users\Administrator\dev\open-debate\app\api\strategies\[id]\route.ts", "TypeScript", 0, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 6, 46
+"c:\Users\Administrator\dev\open-debate\app\api\strategies\[id]\workflow-phase-prompts\route.ts", "TypeScript", 0, 0, 0, 0, 28, 0, 0, 0, 0, 0, 0, 4, 32
+"c:\Users\Administrator\dev\open-debate\app\api\strategies\route.ts", "TypeScript", 0, 0, 0, 0, 23, 0, 0, 0, 0, 0, 0, 5, 28
+"c:\Users\Administrator\dev\open-debate\app\globals.css", "PostCSS", 0, 0, 0, 0, 0, 0, 0, 0, 0, 647, 0, 117, 764
+"c:\Users\Administrator\dev\open-debate\app\layout.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 13, 0, 0, 3, 16
+"c:\Users\Administrator\dev\open-debate\components\auth\user-menu.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 78, 0, 0, 14, 92
+"c:\Users\Administrator\dev\open-debate\components\nav\main-nav.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 26, 0, 0, 6, 32
+"c:\Users\Administrator\dev\open-debate\components\strategies\draft-role-files-manager.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 663, 0, 0, 50, 713
+"c:\Users\Administrator\dev\open-debate\components\strategies\role-files-manager.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 781, 0, 1, 61, 843
+"c:\Users\Administrator\dev\open-debate\components\ui\markdown.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 240, 0, 12, 32, 284
+"c:\Users\Administrator\dev\open-debate\components\ui\portal.tsx", "TypeScript JSX", 0, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0, 6, 17
+"c:\Users\Administrator\dev\open-debate\components\ui\use-toast.ts", "TypeScript", 0, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 10, 40
+"c:\Users\Administrator\dev\open-debate\docker-compose.yml", "YAML", 0, 0, 0, 0, 0, 35, 0, 0, 0, 0, 0, 3, 38
+"c:\Users\Administrator\dev\open-debate\docker\init.sql", "MS SQL", 0, 0, 0, 0, 0, 0, 0, 209, 0, 0, 1, 29, 239
+"c:\Users\Administrator\dev\open-debate\docker\seed_democratic_centralism_strategy.sql", "MS SQL", 0, 0, 0, 0, 0, 0, 0, 42, 0, 0, 530, 4, 576
+"c:\Users\Administrator\dev\open-debate\docs\API_DESIGN.md", "Markdown", 72, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 25, 97
+"c:\Users\Administrator\dev\open-debate\docs\DATABASE_DESIGN.md", "Markdown", 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 17, 53
+"c:\Users\Administrator\dev\open-debate\docs\DEPLOYMENT.md", "Markdown", 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 37, 117
+"c:\Users\Administrator\dev\open-debate\docs\FEATURES_CURRENT.md", "Markdown", 46, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 18, 64
+"c:\Users\Administrator\dev\open-debate\docs\IMPLEMENTATION.md", "Markdown", 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 62
+"c:\Users\Administrator\dev\open-debate\docs\NOVEL_GODMODE_INJECTION_ORDER.md", "Markdown", 285, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 90, 375
+"c:\Users\Administrator\dev\open-debate\docs\NOVEL_GODMODE_MASTER_PROMPT.md", "Markdown", 369, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 418
+"c:\Users\Administrator\dev\open-debate\docs\NOVEL_GODMODE_PHASE_SUBTASKS.md", "Markdown", 423, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 191, 614
+"c:\Users\Administrator\dev\open-debate\docs\NOVEL_GODMODE_QUALITY_GATES.md", "Markdown", 305, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 163, 468
+"c:\Users\Administrator\dev\open-debate\docs\NOVEL_GODMODE_ROLE_WRITING_ASSIGNMENTS.md", "Markdown", 283, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 133, 416
+"c:\Users\Administrator\dev\open-debate\docs\NOVEL_GODMODE_RUNTIME_PROMPT.md", "Markdown", 265, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 393
+"c:\Users\Administrator\dev\open-debate\docs\NOVEL_GODMODE_SNIPPET_ROUTING.md", "Markdown", 293, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 145, 438
+"c:\Users\Administrator\dev\open-debate\docs\NOVEL_GODMODE_SOLUTION.md", "Markdown", 359, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 146, 505
+"c:\Users\Administrator\dev\open-debate\docs\NOVEL_GODMODE_WORKFLOW.json", "JSON", 0, 247, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 248
+"c:\Users\Administrator\dev\open-debate\docs\OBSERVABILITY.md", "Markdown", 318, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 82, 400
+"c:\Users\Administrator\dev\open-debate\docs\PROMPTS.md", "Markdown", 31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14, 45
+"c:\Users\Administrator\dev\open-debate\docs\WORKFLOW_TUTORIAL.md", "Markdown", 293, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 159, 452
+"c:\Users\Administrator\dev\open-debate\lib\agents.ts", "TypeScript", 0, 0, 0, 0, 730, 0, 0, 0, 0, 0, 5, 77, 812
+"c:\Users\Administrator\dev\open-debate\lib\auth.ts", "TypeScript", 0, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 11, 55
+"c:\Users\Administrator\dev\open-debate\lib\crypto.ts", "TypeScript", 0, 0, 0, 0, 37, 0, 0, 0, 0, 0, 0, 5, 42
+"c:\Users\Administrator\dev\open-debate\lib\db.ts", "TypeScript", 0, 0, 0, 0, 121, 0, 0, 0, 0, 0, 5, 13, 139
+"c:\Users\Administrator\dev\open-debate\lib\debate-live.ts", "TypeScript", 0, 0, 0, 0, 65, 0, 0, 0, 0, 0, 0, 11, 76
+"c:\Users\Administrator\dev\open-debate\lib\debates.ts", "TypeScript", 0, 0, 0, 0, 1392, 0, 0, 0, 0, 0, 11, 116, 1519
+"c:\Users\Administrator\dev\open-debate\lib\docs-registry.ts", "TypeScript", 0, 0, 0, 0, 68, 0, 0, 0, 0, 0, 0, 4, 72
+"c:\Users\Administrator\dev\open-debate\lib\docs.ts", "TypeScript", 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 3, 9
+"c:\Users\Administrator\dev\open-debate\lib\email.ts", "TypeScript", 0, 0, 0, 0, 79, 0, 0, 0, 0, 0, 1, 13, 93
+"c:\Users\Administrator\dev\open-debate\lib\fs-tree.ts", "TypeScript", 0, 0, 0, 0, 186, 0, 0, 0, 0, 0, 4, 32, 222
+"c:\Users\Administrator\dev\open-debate\lib\http.ts", "TypeScript", 0, 0, 0, 0, 53, 0, 0, 0, 0, 0, 0, 6, 59
+"c:\Users\Administrator\dev\open-debate\lib\model-catalog.ts", "TypeScript", 0, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 5, 16
+"c:\Users\Administrator\dev\open-debate\lib\openrouter.ts", "TypeScript", 0, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 13, 73
+"c:\Users\Administrator\dev\open-debate\lib\password-policy.ts", "TypeScript", 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 2, 8
+"c:\Users\Administrator\dev\open-debate\lib\password.ts", "TypeScript", 0, 0, 0, 0, 104, 0, 0, 0, 0, 0, 3, 10, 117
+"c:\Users\Administrator\dev\open-debate\lib\rate-limit.ts", "TypeScript", 0, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 6, 50
+"c:\Users\Administrator\dev\open-debate\lib\request.ts", "TypeScript", 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 3, 16
+"c:\Users\Administrator\dev\open-debate\lib\roles.ts", "TypeScript", 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 5, 21
+"c:\Users\Administrator\dev\open-debate\lib\runtime.ts", "TypeScript", 0, 0, 0, 0, 4447, 0, 0, 0, 0, 0, 20, 361, 4828
+"c:\Users\Administrator\dev\open-debate\lib\session-core.ts", "TypeScript", 0, 0, 0, 0, 33, 0, 0, 0, 0, 0, 0, 8, 41
+"c:\Users\Administrator\dev\open-debate\lib\session.ts", "TypeScript", 0, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 7, 37
+"c:\Users\Administrator\dev\open-debate\lib\strategies.ts", "TypeScript", 0, 0, 0, 0, 1005, 0, 0, 0, 0, 0, 0, 84, 1089
+"c:\Users\Administrator\dev\open-debate\lib\types.ts", "TypeScript", 0, 0, 0, 0, 86, 0, 0, 0, 0, 0, 0, 9, 95
+"c:\Users\Administrator\dev\open-debate\lib\use-fs-tree.ts", "TypeScript", 0, 0, 0, 0, 53, 0, 0, 0, 0, 0, 0, 12, 65
+"c:\Users\Administrator\dev\open-debate\lib\validation.ts", "TypeScript", 0, 0, 0, 0, 112, 0, 0, 0, 0, 0, 0, 21, 133
+"c:\Users\Administrator\dev\open-debate\lib\verification.ts", "TypeScript", 0, 0, 0, 0, 163, 0, 0, 0, 0, 0, 0, 23, 186
+"c:\Users\Administrator\dev\open-debate\lib\workflow.ts", "TypeScript", 0, 0, 0, 0, 791, 0, 0, 0, 0, 0, 4, 46, 841
+"c:\Users\Administrator\dev\open-debate\middleware.ts", "TypeScript", 0, 0, 0, 0, 26, 0, 0, 0, 0, 0, 0, 7, 33
+"c:\Users\Administrator\dev\open-debate\next-env.d.ts", "TypeScript", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 2, 6
+"c:\Users\Administrator\dev\open-debate\next.config.mjs", "JavaScript", 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 2, 15
+"c:\Users\Administrator\dev\open-debate\package-lock.json", "JSON", 0, 5943, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 5944
+"c:\Users\Administrator\dev\open-debate\package.json", "JSON", 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 33
+"c:\Users\Administrator\dev\open-debate\skills\refactor.md", "Markdown", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+"c:\Users\Administrator\dev\open-debate\tsconfig.json", "JSON with Comments", 0, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 1, 25
+"Total", "-", 3789, 6222, 27, 24, 11479, 35, 12, 251, 9677, 647, 621, 3556, 36340

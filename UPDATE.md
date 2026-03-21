@@ -1,3 +1,27 @@
+## 2026-03-21
+
+- Docker seed：修正小说策略的 IDEA 注入方式，`templates/debate_question.md` 不再保留误导性的 `<<<IDEAS>>>` 占位符，改为明确说明原始点子库位于 `ideas/raw-idea-bank.md`；同时在原始点子库顶部补充“7 位外来天才 / 本土天才 / 主线弧线 / 群像智斗史诗”框架边界，避免 AI 只看到散点而看不到故事骨架
+- 辩论页直播修复：首轮首人发言时即使中途点击暂停，也会继续保留并显示当前 live 草稿，直到该条发言真正保存为 turn；暂停不再把正在生成但尚未落库的内容隐藏成“还没有发言记录”
+- 投票与阶段显示修复：发言目录现在会为存在官方投票结果的轮次直接显示“有投票结果”标志，且投票结果索引不再只对 owner 刷新；平票重投期间，当前轮阶段会优先跟随 `votes/open.json` 显示为选举/投票阶段，不再按纯轮次阈值误显示为 Phase 3
+- 辩论页：发言目录中“查看注入提示词”改为弹窗展示，不再在轮次详情里内联展开；参与者面板里“加入新的 AI”选择框补充裁剪容器与更稳的宽度约束，避免长选项再次撑出左侧栏
+- 辩论页参与者面板：优化“加入 AI”区域布局，避免选择框溢出左栏；移除上移/下移按钮；上下文未统计时改为“未统计 / 等待首轮统计”而不是显示问号
+- 点子库半自动筛选：workflow 新增原始点子库与派生结果文件路径配置；运行时在 Phase 3 自动注入只读原始点子库和筛选结果文件，在 Phase 4 只优先读取筛选结果；策略创建辩论时也会把 `debate/ideas/*` 文件复制进辩论共享文件
+- 策略页：开局注入提示词和各阶段提示词改为默认折叠摘要，点击后通过弹窗查看/编辑，避免详情页被大段文本撑满
+- Docker seed：`docker/seed_democratic_centralism_strategy.sql` 现在预置了强化版 `openingPrompt` 与 Phase 1~4 的 `injectedPrompt`，重新导入策略后可直接使用更细化的开局注入和阶段注入提示词，不再需要手工填写
+- Workflow / 策略页：新增“开局注入提示词”配置，策略详情页可编辑，新建辩论页可预览；运行时会在第 1 轮自动注入该文本，不再只有 phase1~phase4 的阶段提示词
+- 辩论页发言目录：新增当前阶段标志与每轮阶段 badge；若某轮开始进入带有 `injectedPrompt` 的新阶段，会显示“已注入提示词”标志，并可展开查看该阶段自动注入到运行时 Prompt 的文本
+- 新增文档：`docs/NOVEL_GODMODE_INJECTION_ORDER.md`，明确神作模式下开局先注入哪份文档、每个阶段应注入哪类片段、何时追加角色职责与质量闸门，避免把多份文档一次性全塞给模型
+- 新建辩论页：选中策略后会展示该策略各阶段的自动注入提示词摘要，并提供跳转到策略详情页编辑的入口，避免只在 `/strategies/[id]` 才能看见阶段注入配置
+- 策略详情页：新增“阶段注入提示词”面板，可直接在界面上为 `workflow.json` 的每个阶段填写自动注入提示词；系统进入对应阶段后会自动把该提示词拼进当前轮运行时 Prompt
+- Workflow：`phaseMachine.phases[]` 新增 `injectedPrompt`，并增加策略级 API `/api/strategies/[id]/workflow-phase-prompts` 统一读写阶段提示词，不再依赖手工编辑 `debate/workflow.json`
+- 运行时：当前阶段若配置了 `injectedPrompt`，会自动注入到该阶段的 Workflow phase 提示中；辩论详情页 Workflow 规则摘要也会显示哪些阶段已配置阶段提示词
+- 新增文档：`docs/NOVEL_GODMODE_SOLUTION.md`，系统化梳理“神作模式”当前 8 类核心问题，并给出母本 Prompt / 运行时 Prompt / Workflow Preset 三层控制架构、阶段子任务、质量审判、角色分工与预设分级的总解决方案
+- 新增文档：`docs/NOVEL_GODMODE_RUNTIME_PROMPT.md`，定义“神作模式”运行时精简 Prompt 的职责边界、标准结构、裁剪规则、模板与接线方式，用于把母本 Prompt 与实际每轮执行 Prompt 正式分层
+- 新增文档：`docs/NOVEL_GODMODE_PHASE_SUBTASKS.md`，将 1 到 9 阶段进一步拆成固定子任务序列，明确每个子任务的目标、产出、禁止事项、更新文件与运行时接线方式，用于降低阶段内跑题与中期低效总结问题
+- 新增文档：`docs/NOVEL_GODMODE_ROLE_WRITING_ASSIGNMENTS.md`，定义神作模式下 Host、结构设计、诡计设计、角色设计、世界观设计、伏笔审查等席位的写作职责、文件级分工、阶段级分工与后续 workflow 配置扩展方向，用于降低 Host 过载与多席位低效问题
+- 新增文档：`docs/NOVEL_GODMODE_QUALITY_GATES.md`，将“高质量”拆成文件级、事件级、角色级、章节级、阶段级、终局级质量闸门，并给出后续 workflow 质量检查字段扩展方向，用于解决高字数低质量与伪强内容混过关的问题
+- 新增文档：`docs/NOVEL_GODMODE_SNIPPET_ROUTING.md`，定义系统如何根据当前阶段、子任务、席位职责、审查状态自动从多份神作模式文档中抽取对应片段并注入，而不是让 AI 自己判断该读哪份 md
+
 ## 2026-03-20
 
 - 重构：辩论页将“参与者面板”抽成局部组件 `ParticipantsPanel`，把新增 AI、上下文累计、席位调整等展示从主页面条件渲染中拆出，不改现有功能
@@ -135,6 +159,7 @@
 - 辩论详情页：记忆栏移除摘要/log，改为打开 AI 文件管理弹窗并在弹窗内查看文件
 - 辩论详情页：移除“文件管理”Tab（功能合并到“记忆”）
 - runtime：删除未使用的 `randomInt`/`aggregateConsensus` 等死代码（不改业务逻辑）
+
 ## 2026-03-14
 
 - 辩论支持长时记忆（按参与者独立）：自动维护 `memory/log.jsonl`（追加）与 `memory/summary.md`（压缩摘要）
@@ -221,3 +246,9 @@
 - 上下文新会话接口修正：手动开始新会话时新增 `debateAgentId` 归属校验，避免把无效席位写进上下文统计文件
 - 投票阶段修正：即使提前达成共识，正式最终投票阶段也不会早于 workflow 的 `election.startRound`；默认会先完整跑完前两轮，再从第三轮开始进入投票阶段
 - 选举轮修正：角色选举投票时改为“只投票不发言”；提示词明确禁止追加分析，运行时也会把选举轮正文统一替换为中性占位内容，避免后续席位受前面发言影响
+- 新增文档：`docs/NOVEL_GODMODE_PROMPT.md`，整理一版可直接用于当前辩论系统的“神作工厂 Prompt”，支持大点子/中点子/小点子分层与 AI 自主新增高质量点子
+- workflow 扩展：新增阶段最少轮数与单轮输出预算，运行时会据此限制过早进入 finalization，并按讨论/写作阶段放宽模型输出上限
+- 神作模式预设：民主集中制 seed 保持高强度长篇导向，另新增 `docs/NOVEL_GODMODE_WORKFLOW.json` 作为独立的创作圣经级 workflow 预设
+- 默认 workflow 收口：默认新建辩论回归通用模板；`maxTurns` 默认值回到 10，但上限保留到 200，方便按项目自行切换强度
+- 新增文档：`docs/NOVEL_GODMODE_MASTER_PROMPT.md`，把原始小说要求与 `NOVEL_GODMODE_PROMPT.md` 按“规则层优先、素材库并入”的方式整合成一份最终版 Prompt 文件
+- Prompt 强化：在 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 里补充“阶段 / 轮 / 回合”的严格定义、阶段推进铁律，以及每轮必须先报当前坐标，降低模型混淆阶段与轮次的风险

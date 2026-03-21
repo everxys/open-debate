@@ -875,7 +875,7 @@ function buildFileToolInstructions(input: {
     "After reading files, follow their instructions as highest priority (below system prompt).",
     "",
     "You also have an output tool:",
-    "- debate_files_write: write a debate-level file (use for final deliverables).",
+    "- debate_files_write: write a debate-level file (use for final deliverables or shared working files).",
     `  - Allowed paths: ${allowedPathsText} (Markdown preferred).`,
   ];
 
@@ -926,12 +926,21 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NormalizedDebateW
   lines.push(`- version: v${workflow.workflowVersion}`);
   lines.push(`- election startRound: ${workflow.election.startRound}`);
   lines.push(
+    `- phase minRounds: analysis=${getWorkflowMinimumAnalysisRounds(workflow)}; election=${getWorkflowPhaseMinRounds(workflow, "election", 1)}; deliberation=${getWorkflowPhaseMinRounds(workflow, "deliberation", 0)}; finalization=${getWorkflowPhaseMinRounds(workflow, "finalization", 0)}`
+  );
+  lines.push(
+    `- phase earliest rounds: deliberation@${getWorkflowEarliestDeliberationRound(workflow)}; finalization@${getWorkflowEarliestFinalizationRound(workflow)}; completion@${getWorkflowEarliestCompletionRound(workflow)}`
+  );
+  lines.push(
     `- phase transitions: election@round ${workflow.phaseMachine.transitionRules.election.startRound}; election autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}`
   );
   lines.push(
     `- phase finalization: onConsensus=${workflow.phaseMachine.transitionRules.finalization.enterOnConsensus ? "yes" : "no"}; onCustomVote=${workflow.phaseMachine.transitionRules.finalization.enterOnCustomVote ? "yes" : "no"}; requirePhaseForCompletion=${workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "yes" : "no"}`
   );
   lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
+  lines.push(
+    `- output budget: discussion=${workflow.promptPolicies.outputBudget.discussionMaxTokens}; writing=${workflow.promptPolicies.outputBudget.writingMaxTokens}`
+  );
   const first = workflow.election.speakingOrder.firstRole;
   const last = workflow.election.speakingOrder.lastRole;
   lines.push(`- speakingOrder (after election, next-round boundary): first=${first ?? "(none)"}; last=${last ?? "(none)"}`);
@@ -1500,6 +1509,51 @@ function getWorkflowElectionStartRound(workflow: NormalizedDebateWorkflow | null
   return workflow.phaseMachine.transitionRules.election.startRound;
 }
 
+function getWorkflowPhaseByKind(
+  workflow: NormalizedDebateWorkflow | null,
+  kind: "analysis" | "election" | "deliberation" | "finalization"
+) {
+  return workflow?.phaseMachine.phases.find((phase) => phase.kind === kind) ?? null;
+}
+
+function getWorkflowPhaseMinRounds(
+  workflow: NormalizedDebateWorkflow | null,
+  kind: "analysis" | "election" | "deliberation" | "finalization",
+  fallback = 0
+) {
+  const minRounds = getWorkflowPhaseByKind(workflow, kind)?.minRounds;
+  return typeof minRounds === "number" && Number.isFinite(minRounds) && minRounds >= 0 ? Math.floor(minRounds) : fallback;
+}
+
+function getWorkflowMinimumAnalysisRounds(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return 0;
+  return Math.max(getWorkflowElectionStartRound(workflow) - 1, getWorkflowPhaseMinRounds(workflow, "analysis", 0));
+}
+
+function getWorkflowEarliestDeliberationRound(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return 1;
+  return getWorkflowMinimumAnalysisRounds(workflow) + getWorkflowPhaseMinRounds(workflow, "election", 1) + 1;
+}
+
+function getWorkflowEarliestFinalizationRound(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return 1;
+  return getWorkflowEarliestDeliberationRound(workflow) + getWorkflowPhaseMinRounds(workflow, "deliberation", 0);
+}
+
+function getWorkflowEarliestCompletionRound(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return 1;
+  return getWorkflowEarliestFinalizationRound(workflow) + Math.max(0, getWorkflowPhaseMinRounds(workflow, "finalization", 0) - 1);
+}
+
+function getWorkflowOutputMaxTokens(
+  workflow: NormalizedDebateWorkflow | null,
+  phaseKind: "analysis" | "election" | "deliberation" | "finalization" | null
+) {
+  const discussionMaxTokens = workflow?.promptPolicies.outputBudget.discussionMaxTokens ?? 1800;
+  const writingMaxTokens = workflow?.promptPolicies.outputBudget.writingMaxTokens ?? 3600;
+  return phaseKind === "finalization" ? writingMaxTokens : discussionMaxTokens;
+}
+
 function shouldEnterWorkflowFinalization(input: {
   workflow: NormalizedDebateWorkflow | null;
   consensusReached: boolean;
@@ -1508,6 +1562,7 @@ function shouldEnterWorkflowFinalization(input: {
 }) {
   if (!input.workflow?.enabled) return false;
   if (input.roundNumber < getWorkflowElectionStartRound(input.workflow)) return false;
+  if (input.roundNumber < getWorkflowEarliestFinalizationRound(input.workflow)) return false;
   const rules = input.workflow.phaseMachine.transitionRules.finalization;
   if (rules.enterOnCustomVote && input.openVote?.kind === "custom") return true;
   if (rules.enterOnConsensus && input.consensusReached) return true;
@@ -1616,11 +1671,20 @@ function buildWorkflowPhaseInline(input: {
     `- Phase kind: ${current.kind}`
   ];
   if (current.description) lines.push(`- Goal: ${current.description}`);
+  if (current.injectedPrompt) {
+    lines.push("- Phase-specific prompt:");
+    lines.push(current.injectedPrompt);
+  }
+  if (current.minRounds) lines.push(`- Minimum rounds for this phase: ${current.minRounds}`);
+  lines.push(`- Earliest finalization round: ${getWorkflowEarliestFinalizationRound(input.workflow)}`);
+  lines.push(`- Earliest completion round: ${getWorkflowEarliestCompletionRound(input.workflow)}`);
   const allPhases = input.workflow?.phaseMachine.phases ?? [];
   if (allPhases.length > 0) {
     lines.push("- Full phase machine:");
     for (const phase of allPhases) {
-      lines.push(`  - ${phase.title}${phase.description ? `: ${phase.description}` : ""}`);
+      lines.push(
+        `  - ${phase.title}${phase.description ? `: ${phase.description}` : ""}${phase.minRounds ? ` (minRounds=${phase.minRounds})` : ""}`
+      );
     }
   }
   const requiredDeliverables = input.workflow?.deliverables.requiredFiles ?? [];
@@ -1628,6 +1692,83 @@ function buildWorkflowPhaseInline(input: {
     lines.push("- Completion gate: the debate cannot finish until all required deliverables are written.");
   }
   return lines.join("\n");
+}
+
+function buildWorkflowOpeningInline(input: {
+  workflow: NormalizedDebateWorkflow | null;
+  roundNumber: number;
+}) {
+  if (!input.workflow?.enabled) return null;
+  if (input.roundNumber !== 1) return null;
+  const openingPrompt = input.workflow.promptPolicies.openingPrompt;
+  if (!openingPrompt) return null;
+  return ["Workflow opening prompt (IMPORTANT):", openingPrompt].join("\n");
+}
+
+function clipPromptInlineContent(content: string, maxChars = 18_000) {
+  if (content.length <= maxChars) return content;
+  return `${content.slice(0, maxChars)}\n\n[Truncated: total ${content.length} chars]`;
+}
+
+async function loadWorkflowIdeaBankInline(input: {
+  workflow: NormalizedDebateWorkflow | null;
+  phaseKind: "analysis" | "election" | "deliberation" | "finalization" | null;
+  userId: string;
+  debateId: string;
+}) {
+  if (!input.workflow?.enabled || !input.phaseKind) return null;
+  if (input.phaseKind === "analysis" || input.phaseKind === "election") return null;
+
+  const lines: string[] = ["Idea bank routing (IMPORTANT):"];
+  const rawPath = input.workflow.ideaBank.rawIdeaBankPath;
+  const derived = input.workflow.ideaBank.derivedFiles;
+
+  if (input.phaseKind === "deliberation") {
+    if (rawPath) {
+      lines.push(`- Raw idea bank path: ${rawPath} (read-only source material; do not overwrite this file).`);
+      const rawContent = (await readDebateFile(input.userId, input.debateId, rawPath)) ?? "";
+      if (rawContent.trim()) {
+        lines.push("", `## Raw idea bank · ${rawPath}`, clipPromptInlineContent(rawContent.trim()));
+      }
+    }
+    lines.push("- In this phase, you must collaboratively filter, merge, reject, regroup, and invent ideas.");
+    lines.push("- Write the screening results into derived idea files instead of mutating the raw idea bank.");
+    const derivedTargets = [
+      derived.selectedSTierPath,
+      derived.selectedATierPath,
+      derived.rejectedOrMergedPath,
+      derived.eventMappingsPath,
+      derived.newlyInventedIdeasPath
+    ].filter((item): item is string => Boolean(item));
+    if (derivedTargets.length > 0) {
+      lines.push(`- Preferred derived files: ${derivedTargets.join(" / ")}`);
+    }
+  } else if (input.phaseKind === "finalization") {
+    if (rawPath) {
+      lines.push(`- Raw idea bank path: ${rawPath} (do not return to this file by default in finalization).`);
+    }
+    lines.push("- In this phase, use the idea screening results as the primary source of truth.");
+  }
+
+  const derivedReadOrder =
+    input.phaseKind === "deliberation"
+      ? [
+          derived.selectedSTierPath,
+          derived.selectedATierPath,
+          derived.rejectedOrMergedPath,
+          derived.eventMappingsPath,
+          derived.newlyInventedIdeasPath
+        ]
+      : [derived.selectedSTierPath, derived.eventMappingsPath, derived.selectedATierPath];
+
+  for (const path of derivedReadOrder) {
+    if (!path) continue;
+    const content = (await readDebateFile(input.userId, input.debateId, path)) ?? "";
+    if (!content.trim()) continue;
+    lines.push("", `## Idea result file · ${path}`, clipPromptInlineContent(content.trim(), 12_000));
+  }
+
+  return lines.length > 1 ? lines.join("\n") : null;
 }
 
 async function loadDebatePhaseState(input: { userId: string; debateId: string }) {
@@ -2874,7 +3015,21 @@ async function callProvider(
     forbidRawJson: true
   };
   const openVote = await loadOpenVote(userId, debate.id);
+  const currentPhase = resolveCurrentWorkflowPhase({
+    workflow,
+    consensusReached: Boolean(debate.consensusReached),
+    roundNumber,
+    openVote
+  });
+  const currentOutputMaxTokens = getWorkflowOutputMaxTokens(workflow, currentPhase?.kind ?? null);
   const workflowPhaseInline = buildWorkflowPhaseInline({ workflow, debate, roundNumber, openVote });
+  const workflowOpeningInline = buildWorkflowOpeningInline({ workflow, roundNumber });
+  const workflowIdeaBankInline = await loadWorkflowIdeaBankInline({
+    workflow,
+    phaseKind: currentPhase?.kind ?? null,
+    userId,
+    debateId: debate.id
+  });
   const openVoteInline = await loadOpenVoteInline(userId, debate.id, `${debateAgentId}:${openVote?.roundNumber ?? 0}`);
   const directiveInline = await loadOfficialDirectiveInline(userId, debate.id);
   const announcementInline = await loadVoteAnnouncementInline(userId, debate.id);
@@ -2919,7 +3074,9 @@ async function callProvider(
     `- You are generating: Round ${roundNumber} · Turn ${turnInRound}/${participantCount} (global message #${messageNumber}).`,
     `- Round ${roundNumber} covers message #${roundStart} ~ #${roundEnd}.`,
     "- IMPORTANT: Do NOT treat global message # as a seat index (e.g., Round 2 Turn 1 is global #21 when Seats=20).",
+    ...(workflowOpeningInline ? ["", workflowOpeningInline] : []),
     ...(workflowPhaseInline ? ["", workflowPhaseInline] : []),
+    ...(workflowIdeaBankInline ? ["", workflowIdeaBankInline] : []),
     ...(votingRuleInline ? [votingRuleInline] : []),
     ...(messageNumber <= participantCount && (workflow?.promptPolicies.round1Fairness ?? true)
       ? [
@@ -3010,6 +3167,7 @@ async function callProvider(
           apiKey,
           body: {
             model: agent.model,
+            max_tokens: currentOutputMaxTokens,
             tools,
             tool_choice: "auto",
             messages
@@ -3145,7 +3303,7 @@ async function callProvider(
       agentName: eventAgentName,
       url,
       apiKey,
-      body: { model: agent.model, messages }
+      body: { model: agent.model, max_tokens: currentOutputMaxTokens, messages }
     });
     const usage =
       normalizeUsage(fallback.usage) ??
@@ -3210,13 +3368,13 @@ async function callProvider(
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01"
       },
-      body: JSON.stringify({
-        model: agent.model,
-        max_tokens: 512,
-        system: systemParts.join("\n\n"),
-        tools,
-        messages
-      })
+        body: JSON.stringify({
+          model: agent.model,
+          max_tokens: currentOutputMaxTokens,
+          system: systemParts.join("\n\n"),
+          tools,
+          messages
+        })
     });
     const payload = await response.json();
 
@@ -3360,7 +3518,7 @@ async function callProvider(
     },
     body: JSON.stringify({
       model: agent.model,
-      max_tokens: 512,
+      max_tokens: currentOutputMaxTokens,
       system: systemParts.join("\n\n"),
       messages: [{ role: "user", content: prompt }]
     })
@@ -3661,7 +3819,9 @@ async function maybeAutoCloseOpenVoteAtBoundary(input: {
     debateId: input.debateId,
     participantCount: input.participantCount
   });
-  return { ok: true, closed: Boolean((result as { ok?: unknown }).ok), result };
+  const reopened = Boolean((result as { reopened?: unknown }).reopened);
+  const closed = Boolean((result as { closed?: unknown }).closed);
+  return { ok: true, closed, reopened, result };
 }
 
 function summarizeOptionText(text: string, maxChars: number) {
@@ -4281,21 +4441,27 @@ export async function runDebate(id: string, userId: string) {
       const completedRounds = Math.floor(debate.currentTurn / participantCount);
       const workflowBeforeTurn = await loadDebateWorkflow(userId, id);
       const openVoteBeforeTurn = await loadOpenVote(userId, id);
+      const currentRoundNumberBeforeTurn = Math.floor(Math.max(0, debate.currentTurn) / Math.max(1, participantCount)) + 1;
       const phaseBeforeTurn = resolveCurrentWorkflowPhase({
         workflow: workflowBeforeTurn,
         consensusReached: Boolean(debate.consensusReached),
-        roundNumber: completedRounds + 1,
+        roundNumber: currentRoundNumberBeforeTurn,
         openVote: openVoteBeforeTurn
       });
       if (debate.maxTurns > 0 && completedRounds >= debate.maxTurns) {
         const requiresFinalizationPhase =
           workflowBeforeTurn?.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ?? true;
+        const earliestCompletionRound = getWorkflowEarliestCompletionRound(workflowBeforeTurn);
         const missingDeliverables = await listMissingRequiredDeliverables({
           userId,
           debateId: id,
           workflow: workflowBeforeTurn
         });
-        if ((!requiresFinalizationPhase || phaseBeforeTurn?.kind === "finalization") && missingDeliverables.length === 0) {
+        if (
+          (!requiresFinalizationPhase || phaseBeforeTurn?.kind === "finalization") &&
+          currentRoundNumberBeforeTurn >= earliestCompletionRound &&
+          missingDeliverables.length === 0
+        ) {
           await finishDebate(id, "completed");
         } else if (missingDeliverables.length > 0) {
           await finishDebate(
@@ -4303,6 +4469,8 @@ export async function runDebate(id: string, userId: string) {
             "stopped",
             `max turns reached before required deliverables were written: ${missingDeliverables.map((file) => file.path).join(", ")}`
           );
+        } else if (currentRoundNumberBeforeTurn < earliestCompletionRound) {
+          await finishDebate(id, "stopped", `max turns reached before workflow minimum completion round ${earliestCompletionRound}`);
         } else {
           await finishDebate(id, "stopped", "max turns reached before Phase 4");
         }
@@ -4565,7 +4733,11 @@ export async function runDebate(id: string, userId: string) {
         openVote: openVoteBeforeUpdate
       });
       const requiresFinalizationPhase = workflow?.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ?? true;
-      const canCompleteByPhase = requiresFinalizationPhase ? finalizationPhase?.kind === "finalization" : true;
+      const currentRoundNumberAfterTurn = Math.floor(Math.max(0, nextTurn - 1) / Math.max(1, participantCount)) + 1;
+      const canCompleteByPhase =
+        requiresFinalizationPhase
+          ? finalizationPhase?.kind === "finalization" && currentRoundNumberAfterTurn >= getWorkflowEarliestCompletionRound(workflow)
+          : true;
       const missingDeliverables = await listMissingRequiredDeliverables({
         userId,
         debateId: id,
@@ -4692,6 +4864,13 @@ export async function runDebate(id: string, userId: string) {
                   console.warn("auto vote announce failed", error);
                 }
               }
+            } else if (closed.reopened) {
+              emitDebateLiveEvent(id, {
+                type: "status",
+                debateId: id,
+                message: "官方投票平票：下一轮继续补充观点后重新投票，当前仍停留在投票阶段",
+                at: new Date().toISOString()
+              });
             }
           } catch (error) {
             console.warn("auto vote close failed", error);

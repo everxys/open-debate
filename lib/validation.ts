@@ -66,7 +66,7 @@ export const importAgentsPackSchema = agentsExportPackSchema;
 
 const debateCommonSchema = z.object({
   question: z.string().min(10).max(50_000),
-  maxTurns: z.number().int().min(0).max(50),
+  maxTurns: z.number().int().min(0).max(200),
   enableSharedFacts: z.boolean().optional().default(true)
 });
 
@@ -117,3 +117,16 @@ export const createStrategySchema = z.object({
 });
 
 export const updateStrategySchema = createStrategySchema;
+
+export const updateStrategyWorkflowPhasePromptsSchema = z.object({
+  openingPrompt: z.string().max(20_000).nullable().optional(),
+  phases: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(80),
+        injectedPrompt: z.string().max(20_000).nullable().optional()
+      })
+    )
+    .min(1)
+    .max(16)
+});

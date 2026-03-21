@@ -7,6 +7,8 @@ export type DebateWorkflowConfig = {
       title?: string;
       kind?: "analysis" | "election" | "deliberation" | "finalization";
       description?: string | null;
+      minRounds?: number | null;
+      injectedPrompt?: string | null;
     }>;
     transitionRules?: {
       election?: {
@@ -72,10 +74,15 @@ export type DebateWorkflowConfig = {
   };
 
   promptPolicies?: {
+    openingPrompt?: string | null;
     round1Fairness?: boolean;
     responseFormat?: {
       requireMarkdown?: boolean;
       forbidRawJson?: boolean;
+    };
+    outputBudget?: {
+      discussionMaxTokens?: number | null;
+      writingMaxTokens?: number | null;
     };
   };
 
@@ -90,6 +97,17 @@ export type DebateWorkflowConfig = {
       requiredSnippets?: string[];
     }>;
   };
+
+  ideaBank?: {
+    rawIdeaBankPath?: string | null;
+    derivedFiles?: {
+      selectedSTierPath?: string | null;
+      selectedATierPath?: string | null;
+      rejectedOrMergedPath?: string | null;
+      eventMappingsPath?: string | null;
+      newlyInventedIdeasPath?: string | null;
+    };
+  };
 };
 
 export type NormalizedDebateWorkflow = {
@@ -101,6 +119,8 @@ export type NormalizedDebateWorkflow = {
       title: string;
       kind: "analysis" | "election" | "deliberation" | "finalization";
       description: string | null;
+      minRounds: number | null;
+      injectedPrompt: string | null;
     }>;
     transitionRules: {
       election: {
@@ -151,10 +171,15 @@ export type NormalizedDebateWorkflow = {
     requireAllSeats: boolean;
   };
   promptPolicies: {
+    openingPrompt: string | null;
     round1Fairness: boolean;
     responseFormat: {
       requireMarkdown: boolean;
       forbidRawJson: boolean;
+    };
+    outputBudget: {
+      discussionMaxTokens: number;
+      writingMaxTokens: number;
     };
   };
   deliverables: {
@@ -168,9 +193,178 @@ export type NormalizedDebateWorkflow = {
       requiredSnippets: string[];
     }>;
   };
+  ideaBank: {
+    rawIdeaBankPath: string | null;
+    derivedFiles: {
+      selectedSTierPath: string | null;
+      selectedATierPath: string | null;
+      rejectedOrMergedPath: string | null;
+      eventMappingsPath: string | null;
+      newlyInventedIdeasPath: string | null;
+    };
+  };
 };
 
 export type NormalizedWorkflowRequiredFile = NormalizedDebateWorkflow["deliverables"]["requiredFiles"][number];
+
+export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
+  return {
+    workflowVersion: 1,
+    enabled: true,
+    phaseMachine: {
+      phases: [
+        {
+          id: "phase-1",
+          title: "Phase 1 · 议员实战演练",
+          kind: "analysis",
+          description: "前两轮先独立分析、归类、指出风险，并给出主持人/监管者候选建议。",
+          minRounds: 2,
+          injectedPrompt: null
+        },
+        {
+          id: "phase-2",
+          title: "Phase 2 · 民主选举",
+          kind: "election",
+          description: "用一整轮完成主持人与监管者选举，不夹带额外发言，形成明确任命结果。",
+          minRounds: 1,
+          injectedPrompt: null
+        },
+        {
+          id: "phase-3",
+          title: "Phase 3 · 动态轮换讨论",
+          kind: "deliberation",
+          description: "主持人宣布统一模式，全员围绕创意发散、逻辑审核与方案收敛循环推进。",
+          minRounds: 8,
+          injectedPrompt: null
+        },
+        {
+          id: "phase-4",
+          title: "Phase 4 · 共识收敛与最终交付",
+          kind: "finalization",
+          description: "进入最终表决与最终产物输出，完成收敛与交付。",
+          minRounds: 4,
+          injectedPrompt: null
+        }
+      ],
+      transitionRules: {
+        election: {
+          startRound: 3,
+          autoOpen: true
+        },
+        finalization: {
+          enterOnConsensus: true,
+          enterOnCustomVote: true,
+          requirePhaseForCompletion: true
+        }
+      }
+    },
+    election: {
+      startRound: 3,
+      roles: ["Host", "Supervisor"],
+      speakingOrder: { firstRole: "Host", lastRole: "Supervisor" }
+    },
+    seatOrderRules: [
+      { afterRound: 1, policy: { type: "reverse" } },
+      { afterRound: 2, policy: { type: "reverse" } }
+    ],
+    voting: {
+      custom: { minOptions: 2, maxOptions: null },
+      announcement: {
+        announcer: { type: "role", role: "Host" },
+        fallback: { type: "seat", seat: 1 }
+      },
+      governance: {
+        tieBreaker: "revote",
+        maxTieRounds: 2,
+        fallbackMode: "逻辑审核员"
+      }
+    },
+    consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true },
+    promptPolicies: {
+      openingPrompt: null,
+      round1Fairness: true,
+      responseFormat: {
+        requireMarkdown: true,
+        forbidRawJson: true
+      },
+      outputBudget: {
+        discussionMaxTokens: 1200,
+        writingMaxTokens: 2400
+      }
+    },
+    deliverables: {
+      allowedPaths: ["final/", "outputs/"],
+      requiredFiles: [
+        {
+          path: "final/01-story-core.md",
+          ownerRole: "Host",
+          description: "核心卖点、主题、核心冲突、故事承诺",
+          minChars: 1200,
+          minMarkdownHeadings: 4,
+          requiredSnippets: ["核心卖点", "主题", "核心冲突", "故事承诺"]
+        },
+        {
+          path: "final/02-characters.md",
+          ownerRole: "Host",
+          description: "主角、关键配角、反派的人物卡与成长弧",
+          minChars: 2200,
+          minMarkdownHeadings: 8,
+          requiredSnippets: ["主角", "关键配角", "反派", "成长弧"]
+        },
+        {
+          path: "final/03-world-and-rules.md",
+          ownerRole: "Host",
+          description: "世界观、关键设定、限制条件、代价与规则",
+          minChars: 1800,
+          minMarkdownHeadings: 5,
+          requiredSnippets: ["世界观", "规则", "限制条件", "代价"]
+        },
+        {
+          path: "final/04-plot-architecture.md",
+          ownerRole: "Host",
+          description: "三幕结构、关键事件、高潮设计、结局方向",
+          minChars: 2600,
+          minMarkdownHeadings: 7,
+          requiredSnippets: ["三幕结构", "关键事件", "高潮", "结局"]
+        },
+        {
+          path: "final/05-chapter-outline.md",
+          ownerRole: "Host",
+          description: "章节级细纲，每章包含目标、冲突、转折、结果与钩子",
+          minChars: 5000,
+          minMarkdownHeadings: 16,
+          requiredSnippets: ["章节目标", "冲突", "转折", "结果", "钩子"]
+        },
+        {
+          path: "final/06-foreshadowing-ledger.md",
+          ownerRole: "Host",
+          description: "伏笔、埋点、回收位置和作用",
+          minChars: 1800,
+          minMarkdownHeadings: 6,
+          requiredSnippets: ["伏笔", "埋点", "回收", "作用"]
+        },
+        {
+          path: "final/novel_outline_v2.md",
+          ownerRole: "Host",
+          description: "总汇总稿，整合人物、设定、结构与章节细纲",
+          minChars: 7000,
+          minMarkdownHeadings: 10,
+          requiredSnippets: ["人物", "设定", "结构", "章节细纲", "逻辑自检"]
+        }
+      ]
+    },
+    ideaBank: {
+      rawIdeaBankPath: null,
+      derivedFiles: {
+        selectedSTierPath: "ideas/selected-s-tier.md",
+        selectedATierPath: "ideas/selected-a-tier.md",
+        rejectedOrMergedPath: "ideas/rejected-or-merged.md",
+        eventMappingsPath: "ideas/event-mappings.md",
+        newlyInventedIdeasPath: "ideas/newly-invented-ideas.md"
+      }
+    }
+  };
+}
 
 export function formatRequiredDeliverableSummary(
   file: NormalizedWorkflowRequiredFile,
@@ -335,7 +529,9 @@ function normalizePhaseMachine(value: unknown) {
         id,
         title,
         kind,
-        description: phaseObj?.description === null ? null : toTrimmedString(phaseObj?.description)
+        description: phaseObj?.description === null ? null : toTrimmedString(phaseObj?.description),
+        minRounds: toPositiveIntOrNull(phaseObj?.minRounds),
+        injectedPrompt: phaseObj?.injectedPrompt === null ? null : toTrimmedString(phaseObj?.injectedPrompt)
       };
     })
     .filter(
@@ -346,6 +542,8 @@ function normalizePhaseMachine(value: unknown) {
         title: string;
         kind: "analysis" | "election" | "deliberation" | "finalization";
         description: string | null;
+        minRounds: number | null;
+        injectedPrompt: string | null;
       } => Boolean(item)
     );
 
@@ -371,25 +569,33 @@ function normalizePhaseMachine(value: unknown) {
               id: "phase-1",
               title: "Phase 1 · 议员实战演练",
               kind: "analysis" as const,
-              description: "所有席位先独立分析、归类、指出风险，并给出主持人/监管者候选建议。"
+              description: "所有席位先独立分析、归类、指出风险，并给出主持人/监管者候选建议。",
+              minRounds: 2,
+              injectedPrompt: null
             },
             {
               id: "phase-2",
               title: "Phase 2 · 民主选举",
               kind: "election" as const,
-              description: "基于前期表现投票选出主持人和监管者，形成明确任命结果。"
+              description: "基于前期表现投票选出主持人和监管者，形成明确任命结果。",
+              minRounds: 1,
+              injectedPrompt: null
             },
             {
               id: "phase-3",
               title: "Phase 3 · 动态轮换讨论",
               kind: "deliberation" as const,
-              description: "主持人宣布统一模式，全员围绕创意发散/逻辑审核等模式循环推进。"
+              description: "主持人宣布统一模式，全员围绕创意发散/逻辑审核等模式循环推进。",
+              minRounds: 24,
+              injectedPrompt: null
             },
             {
               id: "phase-4",
               title: "Phase 4 · 共识收敛与最终交付",
               kind: "finalization" as const,
-              description: "进入最终表决与最终产物输出，完成收敛与交付。"
+              description: "进入最终表决与最终产物输出，完成收敛与交付。",
+              minRounds: 12,
+              injectedPrompt: null
             }
           ],
     transitionRules: {
@@ -430,14 +636,27 @@ function normalizePromptPolicies(value: unknown) {
     typeof responseFormatRaw === "object" && responseFormatRaw !== null
       ? (responseFormatRaw as Record<string, unknown>)
       : null;
+  const outputBudgetRaw = obj?.outputBudget;
+  const outputBudgetObj =
+    typeof outputBudgetRaw === "object" && outputBudgetRaw !== null
+      ? (outputBudgetRaw as Record<string, unknown>)
+      : null;
   const round1FairnessRaw = obj?.round1Fairness;
+  const openingPromptRaw = obj?.openingPrompt;
   const requireMarkdownRaw = responseFormatObj?.requireMarkdown;
   const forbidRawJsonRaw = responseFormatObj?.forbidRawJson;
+  const discussionMaxTokensRaw = outputBudgetObj?.discussionMaxTokens;
+  const writingMaxTokensRaw = outputBudgetObj?.writingMaxTokens;
   return {
+    openingPrompt: openingPromptRaw === null ? null : toTrimmedString(openingPromptRaw),
     round1Fairness: round1FairnessRaw === undefined ? true : Boolean(round1FairnessRaw),
     responseFormat: {
       requireMarkdown: requireMarkdownRaw === undefined ? true : Boolean(requireMarkdownRaw),
       forbidRawJson: forbidRawJsonRaw === undefined ? true : Boolean(forbidRawJsonRaw)
+    },
+    outputBudget: {
+      discussionMaxTokens: toPositiveInt(discussionMaxTokensRaw) ?? 1800,
+      writingMaxTokens: toPositiveInt(writingMaxTokensRaw) ?? 3600
     }
   };
 }
@@ -488,6 +707,22 @@ function normalizeDeliverables(value: unknown) {
   return {
     allowedPaths: allowedPaths.length > 0 ? allowedPaths : ["final/", "outputs/"],
     requiredFiles
+  };
+}
+
+function normalizeIdeaBank(value: unknown) {
+  const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+  const derivedRaw = typeof obj?.derivedFiles === "object" && obj.derivedFiles !== null ? (obj.derivedFiles as Record<string, unknown>) : null;
+  return {
+    rawIdeaBankPath: obj?.rawIdeaBankPath === null ? null : normalizeWorkflowFilePath(obj?.rawIdeaBankPath),
+    derivedFiles: {
+      selectedSTierPath: derivedRaw?.selectedSTierPath === null ? null : normalizeWorkflowFilePath(derivedRaw?.selectedSTierPath),
+      selectedATierPath: derivedRaw?.selectedATierPath === null ? null : normalizeWorkflowFilePath(derivedRaw?.selectedATierPath),
+      rejectedOrMergedPath: derivedRaw?.rejectedOrMergedPath === null ? null : normalizeWorkflowFilePath(derivedRaw?.rejectedOrMergedPath),
+      eventMappingsPath: derivedRaw?.eventMappingsPath === null ? null : normalizeWorkflowFilePath(derivedRaw?.eventMappingsPath),
+      newlyInventedIdeasPath:
+        derivedRaw?.newlyInventedIdeasPath === null ? null : normalizeWorkflowFilePath(derivedRaw?.newlyInventedIdeasPath)
+    }
   };
 }
 
@@ -566,6 +801,7 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
   const consensus = normalizeConsensus((anyInput as { consensus?: unknown }).consensus);
   const promptPolicies = normalizePromptPolicies((anyInput as { promptPolicies?: unknown }).promptPolicies);
   const deliverables = normalizeDeliverables((anyInput as { deliverables?: unknown }).deliverables);
+  const ideaBank = normalizeIdeaBank((anyInput as { ideaBank?: unknown }).ideaBank);
 
   return {
     workflowVersion: 1,
@@ -589,7 +825,8 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
     voting,
     consensus,
     promptPolicies,
-    deliverables
+    deliverables,
+    ideaBank
   };
 }
 

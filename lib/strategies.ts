@@ -8,8 +8,10 @@ import {
   agentFileMoveSchema,
   agentFileUpsertSchema,
   createStrategySchema,
-  updateStrategySchema
+  updateStrategySchema,
+  updateStrategyWorkflowPhasePromptsSchema
 } from "@/lib/validation";
+import { createDefaultDebateWorkflowConfig, normalizeDebateWorkflow, type DebateWorkflowConfig } from "@/lib/workflow";
 
 type StrategyRow = {
   id: string;
@@ -720,6 +722,161 @@ async function safeRollback(client: { query: (sql: string) => Promise<unknown> }
     await client.query("rollback");
   } catch {
   }
+}
+
+const STRATEGY_WORKFLOW_PATH = "debate/workflow.json";
+
+type StrategyWorkflowRoleRecord = {
+  id: string;
+  name: string;
+  role_order: number;
+  workflow_content: string | null;
+};
+
+function buildStrategyWorkflowPhasePromptResponse(
+  workflowConfig: DebateWorkflowConfig,
+  ownerRoleId: string,
+  canEdit: boolean,
+  hasExistingWorkflow: boolean
+) {
+  const normalized = normalizeDebateWorkflow(workflowConfig) ?? normalizeDebateWorkflow(createDefaultDebateWorkflowConfig());
+  if (!normalized) {
+    throw new AppError("INTERNAL_ERROR", 500, "Failed to normalize workflow");
+  }
+  return {
+    ownerRoleId,
+    canEdit,
+    hasExistingWorkflow,
+    openingPrompt: normalized.promptPolicies.openingPrompt ?? "",
+    ideaBank: normalized.ideaBank,
+    phases: normalized.phaseMachine.phases.map((phase) => ({
+      id: phase.id,
+      title: phase.title,
+      kind: phase.kind,
+      description: phase.description,
+      minRounds: phase.minRounds,
+      injectedPrompt: phase.injectedPrompt ?? ""
+    }))
+  };
+}
+
+async function loadStrategyWorkflowPhasePromptState(strategyId: string) {
+  const { strategy, canEdit } = await getStrategyRowById(strategyId);
+  try {
+    const roleRows = await query<StrategyWorkflowRoleRecord>(
+      `
+        select r.id, r.name, r.role_order, f.content as workflow_content
+          from strategy_roles r
+          left join strategy_role_files f
+            on f.strategy_role_id = r.id
+           and f.path = $2
+         where r.strategy_id = $1
+         order by r.role_order asc
+      `,
+      [strategy.id, STRATEGY_WORKFLOW_PATH]
+    );
+    if ((roleRows.rowCount ?? 0) <= 0) {
+      throw new AppError("VALIDATION_ERROR", 400, "Strategy has no roles");
+    }
+
+    const rows = roleRows.rows;
+    const owner = rows.find((row) => String(row.workflow_content ?? "").trim()) ?? rows[0];
+    const rawWorkflow = String(owner.workflow_content ?? "").trim();
+    const workflowConfig = (() => {
+      if (!rawWorkflow) return createDefaultDebateWorkflowConfig();
+      try {
+        const parsed = JSON.parse(rawWorkflow) as DebateWorkflowConfig;
+        return normalizeDebateWorkflow(parsed) ? parsed : createDefaultDebateWorkflowConfig();
+      } catch {
+        return createDefaultDebateWorkflowConfig();
+      }
+    })();
+
+    return {
+      canEdit,
+      ownerRoleId: String(owner.id),
+      roleIds: rows.map((row) => String(row.id)),
+      workflowConfig,
+      hasExistingWorkflow: Boolean(rawWorkflow)
+    };
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_roles") || isMissingTableError(error, "strategy_role_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+export async function getStrategyWorkflowPhasePrompts(strategyId: string) {
+  const state = await loadStrategyWorkflowPhasePromptState(strategyId);
+  return buildStrategyWorkflowPhasePromptResponse(
+    state.workflowConfig,
+    state.ownerRoleId,
+    state.canEdit,
+    state.hasExistingWorkflow
+  );
+}
+
+export async function updateStrategyWorkflowPhasePrompts(strategyId: string, input: unknown) {
+  const data = updateStrategyWorkflowPhasePromptsSchema.parse(input);
+  const state = await loadStrategyWorkflowPhasePromptState(strategyId);
+  if (!state.canEdit) {
+    throw new AppError("FORBIDDEN", 403, "Permission denied");
+  }
+
+  const nextWorkflow = JSON.parse(JSON.stringify(state.workflowConfig)) as DebateWorkflowConfig;
+  nextWorkflow.promptPolicies = {
+    ...(nextWorkflow.promptPolicies ?? {}),
+    openingPrompt: typeof data.openingPrompt === "string" ? data.openingPrompt.trim() || null : nextWorkflow.promptPolicies?.openingPrompt ?? null
+  };
+  const phasePromptById = new Map(
+    data.phases.map((phase) => [phase.id, typeof phase.injectedPrompt === "string" ? phase.injectedPrompt.trim() : ""] as const)
+  );
+  const defaultPhases = createDefaultDebateWorkflowConfig().phaseMachine?.phases ?? [];
+  const currentPhases = nextWorkflow.phaseMachine?.phases ?? defaultPhases;
+  nextWorkflow.phaseMachine = {
+    ...(nextWorkflow.phaseMachine ?? {}),
+    phases: currentPhases.map((phase) => ({
+      ...phase,
+      injectedPrompt: phasePromptById.has(String(phase.id)) ? phasePromptById.get(String(phase.id)) || null : phase.injectedPrompt ?? null
+    }))
+  };
+
+  const now = new Date().toISOString();
+  const content = JSON.stringify(nextWorkflow, null, 2);
+  const client = await getTransactionClient();
+  try {
+    await client.query("begin");
+    await client.query(
+      `
+        insert into strategy_role_files (strategy_role_id, path, content, created_at, updated_at)
+        values ($1, $2, $3, $4, $4)
+        on conflict (strategy_role_id, path)
+        do update set content = excluded.content, updated_at = excluded.updated_at
+      `,
+      [state.ownerRoleId, STRATEGY_WORKFLOW_PATH, content, now]
+    );
+    await client.query(
+      `
+        delete from strategy_role_files
+         where path = $2
+           and strategy_role_id = any($3::uuid[])
+           and strategy_role_id <> $1
+      `,
+      [state.ownerRoleId, STRATEGY_WORKFLOW_PATH, state.roleIds]
+    );
+    await client.query("commit");
+  } catch (error) {
+    await safeRollback(client);
+    if (isMissingTableError(error, "strategy_role_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  return buildStrategyWorkflowPhasePromptResponse(nextWorkflow, state.ownerRoleId, true, true);
 }
 
 async function requireVisibleStrategyRole(strategyId: string, roleId: string) {
