@@ -245,7 +245,8 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
           kind: "deliberation",
           description: "主持人宣布统一模式，全员围绕创意发散、逻辑审核与方案收敛循环推进。",
           minRounds: null,
-          injectedPrompt: null
+          injectedPrompt:
+            "【Phase 2】本阶段每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子。禁止一口气平铺十几个点子名然后每个只讲一句。你必须主动做取舍，只挑当前最值得推进、最能说服对手的少数点子展开深打。对每个点子，都要尽量讲清：它具体是什么，你为什么优先选它，它如何运作，它比前案强在哪里，可能会被怎样反驳，你准备怎么回应。你的目标不是“多报几个灵感”，而是拿少数几个点子讲出足够完整的思考过程和说服力，让别的席位真的有可能被你说服。"
         },
         {
           id: "phase-2-5",
@@ -304,7 +305,7 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
     consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true },
     promptPolicies: {
       openingPrompt:
-        "整场讨论都必须讲人话，禁止只丢简短结论、标签或速记句。更重要的是，后发言者的首要任务不是顺着前一个人做轻量补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应当直接提出新方案，必要时可以整体推翻前案并重建。只要提出一个方案、反驳或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响，让其他人一眼看懂你的判断依据。另外，在 Phase 1 和 Phase 1 之前严禁提前投票、严禁写“我投谁”、严禁提前宣布主持人或监管者；那只能在正式进入 Phase 1.5 后发生。",
+        "整场讨论都必须讲人话，禁止只丢简短结论、标签或速记句。更重要的是，后发言者的首要任务不是顺着前一个人做轻量补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应当直接提出新方案，必要时可以整体推翻前案并重建。每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子；禁止一口气铺开很多点子却每个只讲一句。只要提出一个方案、反驳或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响、你是怎么想到这一步的，让其他人一眼看懂你的判断依据。另外，在 Phase 1 和 Phase 1 之前严禁提前投票、严禁写“我投谁”、严禁提前宣布主持人或监管者；那只能在正式进入 Phase 1.5 后发生。",
       round1Fairness: true,
       responseFormat: {
         requireMarkdown: true,
