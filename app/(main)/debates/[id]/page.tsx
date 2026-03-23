@@ -497,6 +497,16 @@ function resolveStoredDirectoryPhase(
   };
 }
 
+function formatLiveStage(stage: string | null | undefined, paused: boolean) {
+  if (paused) return "已暂停（当前发言完成前保留实时草稿）";
+  if (stage === "running_tools") return "执行工具中...";
+  if (stage === "parsing") return "解析结果中...";
+  if (stage === "saving") return "保存发言中...";
+  if (stage === "sleeping") return "等待下一步...";
+  if (stage === "calling_model") return "准备上下文 / 请求模型中...";
+  return "生成中...";
+}
+
 function isPhaseEntryRound(workflow: NormalizedDebateWorkflow | null, round: number, kind: DebateDirectoryPhaseInfo["kind"]) {
   if (!workflow?.enabled) return false;
   if (kind === "analysis") return round === 1;
@@ -3368,7 +3378,7 @@ export default function DebateDetailPage() {
       try {
         lastSseEventAtRef.current = Date.now();
         const payload = JSON.parse((event as MessageEvent).data) as {
-          progress?: { roundNumber: number; messageNumber: number; agentName: string };
+          progress?: { roundNumber: number; messageNumber: number; agentName: string; stage?: string };
         };
         if (!payload.progress) return;
         setIsStreaming(debateStatus === "running");
@@ -3378,7 +3388,7 @@ export default function DebateDetailPage() {
           return typeof next === "number" ? next : current;
         });
         setLiveAgentName(payload.progress.agentName);
-        setLiveStatus(debateStatus === "paused" ? "已暂停（当前发言完成前保留实时草稿）" : "生成中...");
+        setLiveStatus(formatLiveStage(payload.progress.stage, debateStatus === "paused"));
         setLiveText((current) => {
           const nextMessageNumber = payload.progress?.messageNumber;
           const sameTurn =

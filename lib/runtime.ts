@@ -3095,12 +3095,28 @@ async function callProvider(
   debateAgentId: string,
   eventAgentName: string
 ) {
-  emitDebateLiveEvent(debate.id, {
-    type: "status",
-    debateId: debate.id,
-    message: `请求模型中：${eventAgentName}`,
-    at: new Date().toISOString()
-  });
+  const updateLiveStage = (
+    stage: "calling_model" | "running_tools" | "parsing" | "saving",
+    message: string
+  ) => {
+    setDebateLiveProgress({
+      debateId: debate.id,
+      roundNumber,
+      messageNumber,
+      debateAgentId,
+      aiAgentId: agent.id,
+      agentName: eventAgentName,
+      stage
+    });
+    emitDebateLiveEvent(debate.id, {
+      type: "status",
+      debateId: debate.id,
+      message,
+      at: new Date().toISOString()
+    });
+  };
+
+  updateLiveStage("calling_model", `整理上下文：${eventAgentName}`);
   const apiKey = decryptSecret(agent.apiKeyEncrypted);
   const recentTurnsInline = await loadRecentTurnsInline(
     userId,
@@ -3118,6 +3134,7 @@ async function callProvider(
     requireMarkdown: true,
     forbidRawJson: true
   };
+  updateLiveStage("calling_model", `读取规则与记忆：${eventAgentName}`);
   const openVote = await loadOpenVote(userId, debate.id);
   const currentPhase = resolveCurrentWorkflowPhase({
     workflow,
@@ -3172,6 +3189,7 @@ async function callProvider(
           ].join("\n")
       : null;
 
+  updateLiveStage("calling_model", `组装提示词：${eventAgentName}`);
   const prompt = [
     `Question:\n${debate.question}`,
     "",
@@ -3266,12 +3284,10 @@ async function callProvider(
     };
 
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
-      emitDebateLiveEvent(debate.id, {
-        type: "status",
-        debateId: debate.id,
-        message: round === 0 ? "生成中..." : `继续生成（工具轮次 ${round}）...`,
-        at: new Date().toISOString()
-      });
+      updateLiveStage(
+        round === 0 ? "calling_model" : "running_tools",
+        round === 0 ? `请求模型：${eventAgentName}` : `继续生成（工具轮次 ${round}）：${eventAgentName}`
+      );
 
       let streamed: {
         content: string;
@@ -3280,6 +3296,7 @@ async function callProvider(
         finishReason?: string | null;
       } | null = null;
       try {
+        updateLiveStage("calling_model", `等待模型返回：${eventAgentName}`);
         streamed = await openAiChatStream({
           debateId: debate.id,
           messageNumber,
@@ -3318,12 +3335,7 @@ async function callProvider(
         );
 
       if (streamed.finishReason === "tool_calls" && (!toolCalls || toolCalls.length === 0)) {
-        emitDebateLiveEvent(debate.id, {
-          type: "status",
-          debateId: debate.id,
-          message: "检测到伪工具调用，改为纯文本重试...",
-          at: new Date().toISOString()
-        });
+        updateLiveStage("parsing", `检测到伪工具调用，转纯文本重试：${eventAgentName}`);
         const noToolRetry = await openAiChatOnce({
           url,
           apiKey,
@@ -3384,12 +3396,7 @@ async function callProvider(
       messages.push({ role: "assistant", tool_calls: toolCalls, content: assistantContent });
 
       for (const call of toolCalls) {
-        emitDebateLiveEvent(debate.id, {
-          type: "status",
-          debateId: debate.id,
-          message: `工具：${call.function.name}`,
-          at: new Date().toISOString()
-        });
+        updateLiveStage("running_tools", `执行工具：${call.function.name}`);
         let args: unknown = {};
         try {
           args = JSON.parse(call.function.arguments || "{}");
@@ -3480,6 +3487,7 @@ async function callProvider(
     }
 
     // Fallback: no tools, rely on inline files context only.
+    updateLiveStage("calling_model", `模型重试（无工具模式）：${eventAgentName}`);
     const fallback = await openAiChatStream({
       debateId: debate.id,
       messageNumber,
@@ -3563,12 +3571,11 @@ async function callProvider(
   };
 
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
-    emitDebateLiveEvent(debate.id, {
-      type: "status",
-      debateId: debate.id,
-      message: round === 0 ? "生成中..." : `继续生成（工具轮次 ${round}）...`,
-      at: new Date().toISOString()
-    });
+    updateLiveStage(
+      round === 0 ? "calling_model" : "running_tools",
+      round === 0 ? `请求模型：${eventAgentName}` : `继续生成（工具轮次 ${round}）：${eventAgentName}`
+    );
+    updateLiveStage("calling_model", `等待模型返回：${eventAgentName}`);
     const response = await fetch(url, {
       method: "POST",
       headers: {
@@ -3629,12 +3636,7 @@ async function callProvider(
 
     const toolResults: Array<Record<string, unknown>> = [];
     for (const use of toolUses) {
-      emitDebateLiveEvent(debate.id, {
-        type: "status",
-        debateId: debate.id,
-        message: `工具：${use.name}`,
-        at: new Date().toISOString()
-      });
+      updateLiveStage("running_tools", `执行工具：${use.name}`);
       let result: unknown;
       if (use.name === "agent_files_list") {
         const prefix =
@@ -4871,6 +4873,15 @@ export async function runDebate(id: string, userId: string) {
         }
       }
 
+      setDebateLiveProgress({
+        debateId: id,
+        roundNumber,
+        messageNumber,
+        debateAgentId: String(currentParticipant.id),
+        aiAgentId: String(currentParticipant.ai_agent_id),
+        agentName: eventAgentName,
+        stage: "parsing"
+      });
       const parsed = parseResponse(raw);
       const persistedResponse =
         openVoteBeforeTurn?.status === "open" && openVoteBeforeTurn.kind === "election"
@@ -4886,6 +4897,16 @@ export async function runDebate(id: string, userId: string) {
       const responseTimeMs = Date.now() - startedAt;
       const createdAt = new Date().toISOString();
 
+      setDebateLiveProgress({
+        debateId: id,
+        roundNumber,
+        messageNumber,
+        debateAgentId: String(currentParticipant.id),
+        aiAgentId: String(currentParticipant.ai_agent_id),
+        agentName: eventAgentName,
+        stage: "saving",
+        updatedAt: createdAt
+      });
       await query(
         `insert into debate_turns (
           id, debate_id, ai_agent_id, debate_agent_id, seat_number, turn_number, content, structured_output,
