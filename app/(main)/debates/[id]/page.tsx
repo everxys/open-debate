@@ -3816,11 +3816,13 @@ export default function DebateDetailPage() {
       if (activeVote) return { kind: "vote" as const, vote: activeVote };
       return { kind: "vote_loading" as const, round: activeVoteRound };
     }
+    const shouldPreferLive = !activeTurnId && followLatest && liveAvailable;
+    if (shouldPreferLive) return { kind: "live" as const };
     if (selectedTurn) return { kind: "turn" as const, turn: selectedTurn };
     if (selectedTurnSummary) return { kind: "turn_loading" as const, turn: selectedTurnSummary };
     if (liveAvailable) return { kind: "live" as const };
     return null;
-  }, [activeVoteRound, activeVote, selectedTurn, selectedTurnSummary, liveAvailable]);
+  }, [activeVoteRound, activeVote, activeTurnId, followLatest, selectedTurn, selectedTurnSummary, liveAvailable]);
 
   useEffect(() => {
     if (!followLatest) return;
