@@ -90,6 +90,9 @@ create table if not exists debates (
   workflow_phase_kind text null,
   workflow_phase_title text null,
   workflow_phase_round integer null,
+  runtime_notice_kind text null,
+  runtime_notice_message text null,
+  runtime_notice_at timestamptz null,
   last_error_code text null,
   last_error_message text null,
   started_at timestamptz null,
@@ -102,6 +105,9 @@ create table if not exists debates (
 alter table debates add column if not exists workflow_phase_kind text null;
 alter table debates add column if not exists workflow_phase_title text null;
 alter table debates add column if not exists workflow_phase_round integer null;
+alter table debates add column if not exists runtime_notice_kind text null;
+alter table debates add column if not exists runtime_notice_message text null;
+alter table debates add column if not exists runtime_notice_at timestamptz null;
 
 create table if not exists debate_agents (
   id uuid primary key default gen_random_uuid(),

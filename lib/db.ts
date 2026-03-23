@@ -3,7 +3,29 @@ import { Pool, type QueryResultRow } from "pg";
 const globalPool = globalThis as typeof globalThis & {
   openDebatePool?: Pool;
   openDebateSchemaReady?: Promise<void>;
+  openDebateRuntimeRecoveryScheduled?: boolean;
 };
+
+function scheduleDebateRuntimeRecovery(reason = "db_ready") {
+  if (typeof window !== "undefined") {
+    return;
+  }
+  if (globalPool.openDebateRuntimeRecoveryScheduled) {
+    return;
+  }
+  globalPool.openDebateRuntimeRecoveryScheduled = true;
+
+  queueMicrotask(() => {
+    void import("@/lib/debate-runtime-recovery")
+      .then(({ ensureDebateRuntimeRecoveryStarted }) =>
+        ensureDebateRuntimeRecoveryStarted(reason)
+      )
+      .catch((error) => {
+        globalPool.openDebateRuntimeRecoveryScheduled = false;
+        console.error("debate runtime recovery bootstrap failed", error);
+      });
+  });
+}
 
 function getDbDiagnostics() {
   const raw = process.env.DATABASE_URL;
@@ -82,6 +104,9 @@ async function ensureSchema(pool: Pool) {
   await pool.query("alter table debates add column if not exists workflow_phase_kind text null");
   await pool.query("alter table debates add column if not exists workflow_phase_title text null");
   await pool.query("alter table debates add column if not exists workflow_phase_round int null");
+  await pool.query("alter table debates add column if not exists runtime_notice_kind text null");
+  await pool.query("alter table debates add column if not exists runtime_notice_message text null");
+  await pool.query("alter table debates add column if not exists runtime_notice_at timestamptz null");
   // Per-seat identity (cannot rely on ai_agents.name because same config can be reused).
   await pool.query("alter table debate_agents add column if not exists display_name text null");
   await pool.query(`
@@ -125,6 +150,7 @@ export async function query<T extends QueryResultRow>(sql: string, params: unkno
     globalPool.openDebateSchemaReady = ensureSchema(pool);
   }
   await globalPool.openDebateSchemaReady;
+  scheduleDebateRuntimeRecovery();
 
   try {
     return await pool.query<T>(sql, params);

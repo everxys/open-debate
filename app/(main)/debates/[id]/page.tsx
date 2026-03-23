@@ -59,9 +59,12 @@ type Debate = {
     leadingSolution: string;
     score: number;
   } | null;
-  workflowPhaseKind: "analysis" | "election" | "deliberation" | "finalization" | null;
+  workflowPhaseKind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization" | null;
   workflowPhaseTitle: string | null;
   workflowPhaseRound: number | null;
+  runtimeNoticeKind: "recovering" | "recovered" | null;
+  runtimeNoticeMessage: string | null;
+  runtimeNoticeAt: string | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
   stoppedReason: string | null;
@@ -157,7 +160,7 @@ type DebateViewerState =
 type DebateDirectoryPhaseInfo = {
   phaseId: string;
   title: string;
-  kind: "analysis" | "election" | "deliberation" | "finalization";
+  kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization";
   description: string | null;
   injectedPrompt: string | null;
 };
@@ -316,11 +319,14 @@ function formatWorkflowRulesMarkdown(raw: string) {
   rules.push("**官方投票（选举）**");
   rules.push(`- 允许投票起始轮次：第 ${parsed.election.startRound} 轮起`);
   rules.push(
-    `- 阶段切换：Phase 2 从第 ${parsed.phaseMachine.transitionRules.election.startRound} 轮开始；自动开选举票=${parsed.phaseMachine.transitionRules.election.autoOpen ? "是" : "否"}`
+    `- 阶段切换：Phase 1.5 从第 ${parsed.phaseMachine.transitionRules.election.startRound} 轮开始；自动开选举票=${parsed.phaseMachine.transitionRules.election.autoOpen ? "是" : "否"}`
   );
   rules.push(`- 选举角色：${parsed.election.roles.length ? parsed.election.roles.join(" / ") : "（无，禁止 election）"}`);
-  rules.push(`- 平票处理：${parsed.voting.governance.tieBreaker === "seat_order" ? "按席位顺序决胜" : "重新投票"}`);
+  rules.push(`- 平票处理：${parsed.voting.governance.tieBreaker === "seat_order" ? "按席位顺序决胜" : "未通过后回到 Phase 1，再进入下一次 Phase 1.5"}`);
   rules.push(`- 最大平票重投次数：${parsed.voting.governance.maxTieRounds}`);
+  rules.push(
+    `- Phase 1.5 未通过后：继续讨论直到通过=${parsed.phaseMachine.transitionRules.election.reopenUntilPassed ? "是" : "否"}；两次选举之间至少讨论轮数=${parsed.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes}`
+  );
   rules.push(`- 平票后建议模式：${parsed.voting.governance.fallbackMode ?? "（无）"}`);
   rules.push(
     `- 选举后顺序约束（下一轮边界生效）：${
@@ -333,7 +339,10 @@ function formatWorkflowRulesMarkdown(raw: string) {
 
   rules.push("**输出与交付**");
   rules.push(
-    `- Phase 4 进入条件：共识达成=${parsed.phaseMachine.transitionRules.finalization.enterOnConsensus ? "是" : "否"}；打开最终票=${parsed.phaseMachine.transitionRules.finalization.enterOnCustomVote ? "是" : "否"}`
+    `- Phase 4 进入条件：先进入 Phase 3.5 入场表决；自动发起入场表决=${parsed.phaseMachine.transitionRules.finalization.autoOpenVote ? "是" : "否"}；要求全员同意=${parsed.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "是" : "否"}`
+  );
+  rules.push(
+    `- 入场表决失败后：继续讨论直到通过=${parsed.phaseMachine.transitionRules.finalization.reopenUntilPassed ? "是" : "否"}；两次投票之间至少讨论轮数=${parsed.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes}`
   );
   rules.push(
     `- 完成限制：必须先进入 Phase 4 才能完成=${parsed.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "是" : "否"}`
@@ -426,7 +435,7 @@ function getWorkflowMinimumAnalysisRounds(workflow: NormalizedDebateWorkflow | n
 
 function getWorkflowPhaseMinRounds(
   workflow: NormalizedDebateWorkflow | null,
-  kind: "analysis" | "election" | "deliberation" | "finalization",
+  kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization",
   fallback = 0
 ) {
   const minRounds = workflow?.phaseMachine.phases.find((phase) => phase.kind === kind)?.minRounds;
@@ -439,6 +448,11 @@ function getWorkflowEarliestDeliberationRound(workflow: NormalizedDebateWorkflow
 }
 
 function getWorkflowEarliestFinalizationRound(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return 1;
+  return getWorkflowEarliestFinalizationVoteRound(workflow) + Math.max(0, getWorkflowPhaseMinRounds(workflow, "finalization_vote", 1));
+}
+
+function getWorkflowEarliestFinalizationVoteRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
   return getWorkflowEarliestDeliberationRound(workflow) + getWorkflowPhaseMinRounds(workflow, "deliberation", 0);
 }
@@ -456,6 +470,9 @@ function resolveDirectoryPhaseForRound(
     if (openVote.kind === "election") {
       return phaseByKind.get("election") ?? null;
     }
+    if (openVote.kind === "finalization") {
+      return phaseByKind.get("finalization_vote") ?? null;
+    }
     return phaseByKind.get("finalization") ?? null;
   }
   if (allowFinalization && round >= getWorkflowEarliestFinalizationRound(workflow)) {
@@ -463,9 +480,6 @@ function resolveDirectoryPhaseForRound(
   }
   if (round >= getWorkflowEarliestDeliberationRound(workflow)) {
     return phaseByKind.get("deliberation") ?? null;
-  }
-  if (round >= workflow.phaseMachine.transitionRules.election.startRound) {
-    return phaseByKind.get("election") ?? null;
   }
   return phaseByKind.get("analysis") ?? null;
 }
@@ -512,6 +526,7 @@ function isPhaseEntryRound(workflow: NormalizedDebateWorkflow | null, round: num
   if (kind === "analysis") return round === 1;
   if (kind === "election") return round === workflow.phaseMachine.transitionRules.election.startRound;
   if (kind === "deliberation") return round === getWorkflowEarliestDeliberationRound(workflow);
+  if (kind === "finalization_vote") return round === getWorkflowEarliestFinalizationVoteRound(workflow);
   return round === getWorkflowEarliestFinalizationRound(workflow);
 }
 
@@ -1305,6 +1320,11 @@ function StatusSummaryPanel(props: {
   liveDisplayMessage: number | null;
   liveStatus: string;
 }) {
+  const runtimeNoticeBadgeClass =
+    props.debate.runtimeNoticeKind === "recovering" ? "badge-recovering" : "badge-recovered";
+  const runtimeNoticeCardClass =
+    props.debate.runtimeNoticeKind === "recovering" ? "runtimeNoticeCardRecovering" : "runtimeNoticeCardRecovered";
+  const runtimeNoticeTitle = props.debate.runtimeNoticeKind === "recovering" ? "恢复中" : "已自动恢复";
   return (
     <Fragment>
       {props.debate.status === "running" ? (
@@ -1337,6 +1357,17 @@ function StatusSummaryPanel(props: {
         <div className="muted">
           阶段快照: {props.debate.workflowPhaseTitle}
           {props.debate.workflowPhaseRound ? ` · 第 ${props.debate.workflowPhaseRound} 轮` : ""}
+        </div>
+      ) : null}
+      {props.debate.runtimeNoticeMessage ? (
+        <div className={`runtimeNoticeCard ${runtimeNoticeCardClass}`}>
+          <div className="runtimeNoticeTitle">
+            <span className={`badge ${runtimeNoticeBadgeClass}`}>{runtimeNoticeTitle}</span>
+            {props.debate.runtimeNoticeAt ? (
+              <span className="muted">{new Date(props.debate.runtimeNoticeAt).toLocaleString()}</span>
+            ) : null}
+          </div>
+          <div className="runtimeNoticeText">{props.debate.runtimeNoticeMessage}</div>
         </div>
       ) : null}
       {props.debate.stoppedReason ? <div className="muted">停止原因: {props.debate.stoppedReason}</div> : null}
@@ -1539,9 +1570,40 @@ type OfficialVoteClosed =
           reason?: string;
           at: string;
         }>;
+        passed?: boolean;
+        attempt?: number;
+        failureReason?: string | null;
+        missingRoles?: string[];
+        roleTies?: Record<string, string[]>;
         roles: string[];
         roleCounts: Record<string, Record<string, number>>;
         winners: Record<string, string | null>;
+      };
+      closedAt: string;
+      createdAt: string;
+    }
+  | {
+      status: "closed";
+      kind: "finalization";
+      roundNumber: number;
+      title: string;
+      prompt: string;
+      result: {
+        ballots: Array<{
+          debateAgentId: string;
+          voter: string;
+          voterSeat?: string;
+          choice: string;
+          reason?: string;
+          at: string;
+        }>;
+        counts: Record<string, number>;
+        attempt?: number;
+        passed: boolean;
+        agreeCount: number;
+        disagreeCount: number;
+        missingVotes: number;
+        requiredSeats: number;
       };
       closedAt: string;
       createdAt: string;
@@ -1570,7 +1632,7 @@ type OfficialVoteClosed =
 
 type OfficialVoteOpenState = {
   status: "open";
-  kind: "election" | "custom";
+  kind: "election" | "finalization" | "custom";
   roundNumber: number;
   title: string;
   tieRound: number;
@@ -1714,8 +1776,23 @@ function buildVoteMarkdown(vote: OfficialVoteClosed) {
     const roleCounts = (vote.result.roleCounts ?? {}) as Record<string, Record<string, number>>;
 
     lines.push("## 结果");
+    if (typeof vote.result.passed === "boolean") {
+      lines.push(`- 结果：${vote.result.passed ? "通过，下一轮进入后续正式讨论阶段" : "未通过，下一轮回到 Phase 1 补充发言"}`);
+    }
+    if (typeof vote.result.attempt === "number") {
+      lines.push(`- 尝试次数：第 ${vote.result.attempt} 次`);
+    }
     if (roles.length === 0) lines.push("- （未声明角色）");
     for (const role of roles) lines.push(`- ${role}：${winners?.[role] ?? "未能选出"}`);
+    if (Array.isArray(vote.result.missingRoles) && vote.result.missingRoles.length > 0) {
+      lines.push(`- 未能确认的角色：${vote.result.missingRoles.join(" / ")}`);
+    }
+    if (vote.result.roleTies && Object.keys(vote.result.roleTies).length > 0) {
+      lines.push("- 平票角色：");
+      for (const [role, seats] of Object.entries(vote.result.roleTies)) {
+        lines.push(`- ${role}: ${seats.join(" / ")}`);
+      }
+    }
     lines.push("");
 
     lines.push("## 票数");
@@ -1735,6 +1812,40 @@ function buildVoteMarkdown(vote: OfficialVoteClosed) {
       const pairs = roles.map((role) => `${role}=${ballot.selections?.[role] ?? "?"}`).join(" · ");
       const who = ballot.voterSeat ? `${ballot.voterSeat} · ${ballot.voter}` : ballot.voter;
       lines.push(`- ${who}: ${pairs}${reason}`);
+    }
+
+    return lines.join("\n");
+  }
+
+  if (vote.kind === "finalization") {
+    const tally = Object.entries(vote.result.counts ?? {})
+      .map(([choice, count]) => ({ choice, count }))
+      .sort((a, b) => b.count - a.count || a.choice.localeCompare(b.choice));
+    const attempt =
+      typeof vote.result.attempt === "number" && Number.isFinite(vote.result.attempt) && vote.result.attempt >= 1
+        ? Math.floor(vote.result.attempt)
+        : 1;
+
+    lines.push(`- 结果：${vote.result.passed ? "通过，下一轮进入 Phase 4" : "未通过，继续留在 Phase 3.5"}`);
+    lines.push(`- 尝试次数：第 ${attempt} 次`);
+    lines.push(`- 需要席位数：${vote.result.requiredSeats}`);
+    lines.push(`- 同意：${vote.result.agreeCount}`);
+    lines.push(`- 不同意：${vote.result.disagreeCount}`);
+    lines.push(`- 未投票：${vote.result.missingVotes}`);
+    lines.push("");
+    lines.push(`- Prompt：${vote.prompt}`);
+    lines.push("");
+
+    lines.push("## 票数");
+    if (tally.length === 0) lines.push("- （无人投票）");
+    for (const item of tally) lines.push(`- ${item.choice}: ${item.count}`);
+    lines.push("");
+
+    lines.push("## 逐票明细");
+    for (const ballot of vote.result.ballots ?? []) {
+      const reason = ballot.reason ? ` · ${ballot.reason}` : "";
+      const who = ballot.voterSeat ? `${ballot.voterSeat} · ${ballot.voter}` : ballot.voter;
+      lines.push(`- ${who}: ${ballot.choice}${reason}`);
     }
 
     return lines.join("\n");
@@ -2974,7 +3085,8 @@ export default function DebateDetailPage() {
         parsed.meta && typeof parsed.meta === "object" ? Number((parsed.meta as Record<string, unknown>).tieRound) : 0;
       const next: OfficialVoteOpenState = {
         status: "open",
-        kind: parsed.kind === "election" ? "election" : "custom",
+        kind:
+          parsed.kind === "election" ? "election" : parsed.kind === "finalization" ? "finalization" : "custom",
         roundNumber: Number.isFinite(roundNumber) && roundNumber > 0 ? Math.floor(roundNumber) : 1,
         title: String(parsed.title ?? "投票"),
         tieRound: Number.isFinite(tieRoundRaw) && tieRoundRaw > 0 ? Math.floor(tieRoundRaw) : 0
@@ -3414,6 +3526,7 @@ export default function DebateDetailPage() {
           agentName?: string;
           turnNumber?: number;
         };
+        setIsStreaming(debateStatus === "running");
         if (typeof payload.turnNumber === "number") {
           setLiveMessageNumber((current) => {
             if (typeof current === "number" && current > 0 && current !== payload.turnNumber) return current;
@@ -3421,7 +3534,10 @@ export default function DebateDetailPage() {
           });
         }
         if (typeof payload.agentName === "string") setLiveAgentName(payload.agentName);
-        if (typeof payload.text === "string") setLiveText((current) => current + payload.text);
+        if (typeof payload.text === "string") {
+          setLiveStatus("正在生成...");
+          setLiveText((current) => current + payload.text);
+        }
       } catch {
       }
     });
@@ -3826,9 +3942,10 @@ export default function DebateDetailPage() {
 
   useEffect(() => {
     if (!followLatest) return;
+    if (!activeTurnId && activeVoteRound === null) return;
     setActiveTurnId("");
     setActiveVoteRound(null);
-  }, [followLatest]);
+  }, [followLatest, activeTurnId, activeVoteRound]);
 
   useEffect(() => {
     if (!followLatest) return;
@@ -3880,12 +3997,14 @@ export default function DebateDetailPage() {
   }, []);
 
   function handleOpenVoteRound(round: number) {
+    setFollowLatest(false);
     setActiveTurnId("");
     setActiveVoteRound(round);
     void loadVoteRound(round);
   }
 
   const handleSelectDirectoryTurn = useCallback((turnId: string) => {
+    setFollowLatest(false);
     setActiveVoteRound(null);
     setActiveTurnId(turnId);
   }, []);
@@ -3907,7 +4026,7 @@ export default function DebateDetailPage() {
     if (!currentDirectoryRound) return null;
     const storedPhase = resolveStoredDirectoryPhase(workflowConfig, debate, currentDirectoryRound);
     if (storedPhase) return storedPhase;
-    const mayBeFinalization = Boolean(debate?.consensusReached || debate?.status === "completed");
+    const mayBeFinalization = Boolean(debate?.workflowPhaseKind === "finalization");
     return resolveDirectoryPhaseForRound(
       workflowConfig,
       currentDirectoryRound,
@@ -4451,6 +4570,7 @@ export default function DebateDetailPage() {
         viewerScrollRef={viewerScrollRef}
         onToggleFollowLatest={() => setFollowLatest((current) => !current)}
         onReturnToCurrent={() => {
+          setFollowLatest(true);
           setActiveTurnId("");
           setActiveVoteRound(null);
         }}
@@ -4493,7 +4613,11 @@ export default function DebateDetailPage() {
           <button
             type="button"
             className="btn"
-            onClick={() => setActiveTurnId("")}
+            onClick={() => {
+              setFollowLatest(true);
+              setActiveVoteRound(null);
+              setActiveTurnId("");
+            }}
             style={{
               textAlign: "left",
               borderColor: selectedViewerKey === "__live__" ? "rgba(38, 99, 235, 0.55)" : undefined,

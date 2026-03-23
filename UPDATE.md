@@ -1,5 +1,18 @@
 ## 2026-03-23
 
+- 辩论攻击性与阶段自由度升级：默认 workflow、默认新建辩论配置、示例 workflow 和民主集中制 seed 策略统一改成 `minRounds = null`，不再用阶段最少轮数硬卡流程；同时把“后发言者优先提出更强替代案、必要时可以直接推翻前案”写进开局提示词、Phase 3 强化提示词和主母本提示词，避免后续 AI 只会围着第一个方案做温和补充
+- 新增一次性迁移脚本：`npm run migrate:workflow-phase-1-5` 会批量扫描数据库里的 `debate_files.workflow.json` 与 `strategy_role_files.debate/workflow.json`，把旧的 `Phase 2 · 民主选举` 选举阶段改写成 canonical 的 `Phase 1.5` 配置，并补齐 `transitionRules.election.reopenUntilPassed / discussionRoundsBetweenVotes`
+- 旧 workflow 数据自动升级：读取旧 `Phase 2 · 民主选举` 配置时会自动按 `Phase 1.5` 解释；策略 workflow 保存、以及用策略创建辩论复制 `workflow.json` 时，也会自动写回 canonical 新格式，旧策略会随着正常使用逐步完成升级
+- Phase 1.5 选举阶段上线：原先“主持人与监管者选举”改为正式的 `Phase 1.5`；若本轮未选出结果，系统不再同轮硬重开，而是先回到 `Phase 1` 补充一轮全员发言，再按 workflow 配置自动发起下一次 `Phase 1.5` 选举。相关配置新增到 `transitionRules.election.reopenUntilPassed / discussionRoundsBetweenVotes`，默认值为 `true / 1`
+- 辩论列表页同步显示恢复状态：`/debates` 的卡片头部新增“恢复中 / 已自动恢复” badge，并在卡片摘要里展示恢复说明与时间，不用进入详情页也能看出哪些辩论是进程中断后自动续跑的
+- 自动恢复提示样式升级：辩论详情页状态面板里的恢复提示不再只是灰字，而是改成独立提示卡和显眼 badge，能一眼区分“恢复中”与“已自动恢复”
+- 自动恢复状态可见化：`debates` 新增运行时恢复注记字段；进程重启后被自动接管的辩论会先显示“恢复中”，运行时真正接手后切换为“已自动恢复并继续运行”；详情页状态面板会直接展示这条提示，手动开始/恢复时会清掉旧恢复标记，避免残留脏状态
+- 进程恢复机制上线：新增 Node 启动期恢复器，服务进程被杀或重启后会自动扫描数据库里仍处于 `running` 的辩论，并重新拉起运行时继续推进；恢复过程会写入 `log/node-runtime-YYYY-MM-DD.log`，且恢复启动失败后不会把进程永久锁死，后续仍可再次重试
+- Phase 3.5 复投 bug 修复：修正自动开票函数中过早返回导致 `finalization_vote` 首次开票/失败后复投都无法触发的问题；同时把等待复投期间的阶段判定从错误的常驻 `Phase 3.5` 改回正常讨论态，避免目录和提示词在“中间讨论轮”里持续误判为投票轮
+- Phase 3.5 复投链路改成 workflow 可配置：`transitionRules.finalization` 新增 `reopenUntilPassed` 和 `discussionRoundsBetweenVotes`；默认行为是“入场表决不通过后，先进行 1 轮全员补充发言，再自动发起下一轮 Phase 4 入场复投”，直到全员同意为止
+- Phase 4 前新增正式阶段 `Phase 3.5 · Phase 4 入场表决`：它是独立的提示词注入阶段，专门用于判断“是否已经具备进入 Phase 4 的条件”并完成入场投票；目录、运行时阶段机、默认 workflow、seed 策略和示例 workflow 都已同步支持 `finalization_vote`
+- “跟随最新”状态打架修复：手动点旧发言或旧投票时会自动退出跟随；点击“回到当前”或 live 卡片时会重新进入跟随；同时补了一层状态自愈，避免出现按钮亮着但实际停在旧内容、并且还同时显示“回到当前”的矛盾状态
+- Phase 4 进入机制重做：删除基于“共识达成 / 打开 custom 票”推断进入 finalization 的旧逻辑，改为正式的 `finalization` 入场表决；默认在最早可进入轮次自动开票，且要求全员同意，表决通过后下一轮才正式进入 Phase 4，不再出现阶段来回回退
 - 辩论详情页参与者面板滚动修复：`participants` 分支改为自身接管纵向滚动，左侧固定高度容器下不再把超长参与者列表直接裁掉，也不再出现“内容被截断但没有滚动条”的问题
 - AI 表达守则升级为硬约束：在小说策略开局提示、Phase 2、Phase 4，以及 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 中明确加入“必须讲人话、禁止只给简短结论/标签/速记句、提出方案时必须把机制与后果展开讲清楚”的硬规则；默认 workflow 也补上同类 opening prompt，并提高默认输出预算，减少 AI 发言像看不懂的速记提纲
 - 系统文件缺失改为空返回：`/api/debates/[id]/files` 针对 `votes/open.json`、`context/usage.json`、`context/usage_totals.json`、`question/history.json` 这类运行早期可能尚未生成的系统文件，缺失时不再返回 404，而是返回空默认内容，避免详情页初始化请求刷出一串无意义 404

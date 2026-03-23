@@ -11,7 +11,12 @@ import {
   updateStrategySchema,
   updateStrategyWorkflowPhasePromptsSchema
 } from "@/lib/validation";
-import { createDefaultDebateWorkflowConfig, normalizeDebateWorkflow, type DebateWorkflowConfig } from "@/lib/workflow";
+import {
+  createDefaultDebateWorkflowConfig,
+  normalizeDebateWorkflow,
+  toCanonicalWorkflowConfig,
+  type DebateWorkflowConfig
+} from "@/lib/workflow";
 
 type StrategyRow = {
   id: string;
@@ -786,7 +791,7 @@ async function loadStrategyWorkflowPhasePromptState(strategyId: string) {
       if (!rawWorkflow) return createDefaultDebateWorkflowConfig();
       try {
         const parsed = JSON.parse(rawWorkflow) as DebateWorkflowConfig;
-        return normalizeDebateWorkflow(parsed) ? parsed : createDefaultDebateWorkflowConfig();
+        return toCanonicalWorkflowConfig(parsed) ?? createDefaultDebateWorkflowConfig();
       } catch {
         return createDefaultDebateWorkflowConfig();
       }
@@ -843,7 +848,8 @@ export async function updateStrategyWorkflowPhasePrompts(strategyId: string, inp
   };
 
   const now = new Date().toISOString();
-  const content = JSON.stringify(nextWorkflow, null, 2);
+  const canonicalWorkflow = toCanonicalWorkflowConfig(nextWorkflow) ?? nextWorkflow;
+  const content = JSON.stringify(canonicalWorkflow, null, 2);
   const client = await getTransactionClient();
   try {
     await client.query("begin");
@@ -876,7 +882,7 @@ export async function updateStrategyWorkflowPhasePrompts(strategyId: string, inp
     client.release();
   }
 
-  return buildStrategyWorkflowPhasePromptResponse(nextWorkflow, state.ownerRoleId, true, true);
+  return buildStrategyWorkflowPhasePromptResponse(canonicalWorkflow, state.ownerRoleId, true, true);
 }
 
 async function requireVisibleStrategyRole(strategyId: string, roleId: string) {

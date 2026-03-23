@@ -5,7 +5,7 @@ export type DebateWorkflowConfig = {
     phases?: Array<{
       id?: string;
       title?: string;
-      kind?: "analysis" | "election" | "deliberation" | "finalization";
+      kind?: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization";
       description?: string | null;
       minRounds?: number | null;
       injectedPrompt?: string | null;
@@ -14,10 +14,14 @@ export type DebateWorkflowConfig = {
       election?: {
         startRound?: number;
         autoOpen?: boolean;
+        reopenUntilPassed?: boolean;
+        discussionRoundsBetweenVotes?: number;
       };
       finalization?: {
-        enterOnConsensus?: boolean;
-        enterOnCustomVote?: boolean;
+        autoOpenVote?: boolean;
+        requireUnanimousVote?: boolean;
+        reopenUntilPassed?: boolean;
+        discussionRoundsBetweenVotes?: number;
         requirePhaseForCompletion?: boolean;
       };
     };
@@ -117,7 +121,7 @@ export type NormalizedDebateWorkflow = {
     phases: Array<{
       id: string;
       title: string;
-      kind: "analysis" | "election" | "deliberation" | "finalization";
+      kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization";
       description: string | null;
       minRounds: number | null;
       injectedPrompt: string | null;
@@ -126,10 +130,14 @@ export type NormalizedDebateWorkflow = {
       election: {
         startRound: number;
         autoOpen: boolean;
+        reopenUntilPassed: boolean;
+        discussionRoundsBetweenVotes: number;
       };
       finalization: {
-        enterOnConsensus: boolean;
-        enterOnCustomVote: boolean;
+        autoOpenVote: boolean;
+        requireUnanimousVote: boolean;
+        reopenUntilPassed: boolean;
+        discussionRoundsBetweenVotes: number;
         requirePhaseForCompletion: boolean;
       };
     };
@@ -218,42 +226,55 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
           title: "Phase 1 · 议员实战演练",
           kind: "analysis",
           description: "前两轮先独立分析、归类、指出风险，并给出主持人/监管者候选建议。",
-          minRounds: 2,
+          minRounds: null,
           injectedPrompt: null
         },
         {
-          id: "phase-2",
-          title: "Phase 2 · 民主选举",
+          id: "phase-1-5",
+          title: "Phase 1.5 · 主持人与监管者选举",
           kind: "election",
-          description: "用一整轮完成主持人与监管者选举，不夹带额外发言，形成明确任命结果。",
-          minRounds: 1,
-          injectedPrompt: null
+          description: "用一整轮完成主持人与监管者选举；若未能选出结果，则先回到 Phase 1 补充一轮发言，再重新进入本阶段投票。",
+          minRounds: null,
+          injectedPrompt:
+            "【Phase 1.5】当前是主持人与监管者的正式选举轮。你必须基于前面 Phase 1 已经出现的表现来判断谁适合做主持人、谁适合做监管者，并把判断依据讲清楚。禁止借投票继续推进新设定、新主线或新事件。若本轮无法形成明确结果，下一轮会先回到 Phase 1 继续补充发言，然后系统再发起下一次 Phase 1.5 选举。"
         },
         {
           id: "phase-3",
           title: "Phase 3 · 动态轮换讨论",
           kind: "deliberation",
           description: "主持人宣布统一模式，全员围绕创意发散、逻辑审核与方案收敛循环推进。",
-          minRounds: 8,
+          minRounds: null,
           injectedPrompt: null
+        },
+        {
+          id: "phase-3-5",
+          title: "Phase 3.5 · Phase 4 入场表决",
+          kind: "finalization_vote",
+          description: "在正式进入 Phase 4 前，先统一进入投票确认轮；本轮应聚焦是否已经具备收束条件，并完成入场表决。",
+          minRounds: null,
+          injectedPrompt: "【Phase 3.5】你们现在处于进入 Phase 4 之前的正式入场表决阶段。本阶段不是继续无边界发散，也不是直接开始最终交付，而是先判断：当前方案是否已经具备进入最终收束和交付写作的条件。发言重点必须围绕“是否已经可以进入 Phase 4”展开：现有争议是否已经收束、关键缺口是否已经补齐、哪些文件/结构已成熟、哪些风险如果不先补会导致最终总稿失真。你必须说清楚自己的判断依据，然后按规则参与入场投票。只有全员同意，下一轮才会正式进入 Phase 4。"
         },
         {
           id: "phase-4",
           title: "Phase 4 · 共识收敛与最终交付",
           kind: "finalization",
           description: "进入最终表决与最终产物输出，完成收敛与交付。",
-          minRounds: 4,
+          minRounds: null,
           injectedPrompt: null
         }
       ],
       transitionRules: {
         election: {
           startRound: 3,
-          autoOpen: true
+          autoOpen: true,
+          reopenUntilPassed: true,
+          discussionRoundsBetweenVotes: 1
         },
         finalization: {
-          enterOnConsensus: true,
-          enterOnCustomVote: true,
+          autoOpenVote: true,
+          requireUnanimousVote: true,
+          reopenUntilPassed: true,
+          discussionRoundsBetweenVotes: 1,
           requirePhaseForCompletion: true
         }
       }
@@ -281,7 +302,8 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
     },
     consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true },
     promptPolicies: {
-      openingPrompt: null,
+      openingPrompt:
+        "整场讨论都必须讲人话，禁止只丢简短结论、标签或速记句。更重要的是，后发言者的首要任务不是顺着前一个人做轻量补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应当直接提出新方案，必要时可以整体推翻前案并重建。只要提出一个方案、反驳或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响，让其他人一眼看懂你的判断依据。",
       round1Fairness: true,
       responseFormat: {
         requireMarkdown: true,
@@ -511,6 +533,41 @@ function normalizeRoles(value: unknown) {
     : [];
 }
 
+function normalizePhaseIdentifier(kind: string, id: string, title: string) {
+  if (kind !== "election") return id;
+  if (id === "phase-2" || title === "Phase 2 · 民主选举") return "phase-1-5";
+  return id;
+}
+
+function normalizePhaseTitle(kind: string, title: string) {
+  if (kind !== "election") return title;
+  if (title === "Phase 2 · 民主选举") return "Phase 1.5 · 主持人与监管者选举";
+  return title;
+}
+
+function normalizePhaseDescription(kind: string, description: string | null) {
+  if (kind !== "election") return description;
+  if (description === "用一整轮完成主持人与监管者选举，不夹带额外发言，形成明确任命结果。") {
+    return "用一整轮完成主持人与监管者选举；如果本轮未选出结果，则先回到 Phase 1 补充一轮全员发言，再重新进入本阶段。";
+  }
+  return description;
+}
+
+function normalizePhaseInjectedPrompt(kind: string, injectedPrompt: string | null) {
+  if (kind !== "election") return injectedPrompt;
+  if (
+    injectedPrompt &&
+    injectedPrompt.includes("【Phase 2 强化版】") &&
+    !injectedPrompt.includes("【Phase 1.5")
+  ) {
+    return injectedPrompt
+      .replace(/【Phase 2 强化版】/g, "【Phase 1.5 强化版】")
+      .replace(/【Phase 2】/g, "【Phase 1.5】")
+      .replace(/Phase 2/g, "Phase 1.5");
+  }
+  return injectedPrompt;
+}
+
 function normalizePhaseMachine(value: unknown) {
   const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
   const rawPhases = Array.isArray(obj?.phases) ? obj?.phases : [];
@@ -521,17 +578,29 @@ function normalizePhaseMachine(value: unknown) {
       const title = toTrimmedString(phaseObj?.title);
       const kindRaw = toTrimmedString(phaseObj?.kind);
       const kind =
-        kindRaw === "analysis" || kindRaw === "election" || kindRaw === "deliberation" || kindRaw === "finalization"
+        kindRaw === "analysis" ||
+        kindRaw === "election" ||
+        kindRaw === "deliberation" ||
+        kindRaw === "finalization_vote" ||
+        kindRaw === "finalization"
           ? kindRaw
           : null;
       if (!id || !title || !kind) return null;
-      return {
-        id,
-        title,
+      const normalizedDescription = normalizePhaseDescription(
         kind,
-        description: phaseObj?.description === null ? null : toTrimmedString(phaseObj?.description),
+        phaseObj?.description === null ? null : toTrimmedString(phaseObj?.description)
+      );
+      const normalizedInjectedPrompt = normalizePhaseInjectedPrompt(
+        kind,
+        phaseObj?.injectedPrompt === null ? null : toTrimmedString(phaseObj?.injectedPrompt)
+      );
+      return {
+        id: normalizePhaseIdentifier(kind, id, title),
+        title: normalizePhaseTitle(kind, title),
+        kind,
+        description: normalizedDescription,
         minRounds: toPositiveIntOrNull(phaseObj?.minRounds),
-        injectedPrompt: phaseObj?.injectedPrompt === null ? null : toTrimmedString(phaseObj?.injectedPrompt)
+        injectedPrompt: normalizedInjectedPrompt
       };
     })
     .filter(
@@ -540,7 +609,7 @@ function normalizePhaseMachine(value: unknown) {
       ): item is {
         id: string;
         title: string;
-        kind: "analysis" | "election" | "deliberation" | "finalization";
+        kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization";
         description: string | null;
         minRounds: number | null;
         injectedPrompt: string | null;
@@ -570,15 +639,15 @@ function normalizePhaseMachine(value: unknown) {
               title: "Phase 1 · 议员实战演练",
               kind: "analysis" as const,
               description: "所有席位先独立分析、归类、指出风险，并给出主持人/监管者候选建议。",
-              minRounds: 2,
+              minRounds: null,
               injectedPrompt: null
             },
             {
-              id: "phase-2",
-              title: "Phase 2 · 民主选举",
+              id: "phase-1-5",
+              title: "Phase 1.5 · 主持人与监管者选举",
               kind: "election" as const,
-              description: "基于前期表现投票选出主持人和监管者，形成明确任命结果。",
-              minRounds: 1,
+              description: "基于前期表现投票选出主持人和监管者；若未能选出，则先回到 Phase 1 补充发言，再重新进入本阶段。",
+              minRounds: null,
               injectedPrompt: null
             },
             {
@@ -586,7 +655,15 @@ function normalizePhaseMachine(value: unknown) {
               title: "Phase 3 · 动态轮换讨论",
               kind: "deliberation" as const,
               description: "主持人宣布统一模式，全员围绕创意发散/逻辑审核等模式循环推进。",
-              minRounds: 24,
+              minRounds: null,
+              injectedPrompt: null
+            },
+            {
+              id: "phase-3-5",
+              title: "Phase 3.5 · Phase 4 入场表决",
+              kind: "finalization_vote" as const,
+              description: "正式进入 Phase 4 之前，先做一轮入场判断与官方投票确认。",
+              minRounds: null,
               injectedPrompt: null
             },
             {
@@ -594,24 +671,34 @@ function normalizePhaseMachine(value: unknown) {
               title: "Phase 4 · 共识收敛与最终交付",
               kind: "finalization" as const,
               description: "进入最终表决与最终产物输出，完成收敛与交付。",
-              minRounds: 12,
+              minRounds: null,
               injectedPrompt: null
             }
           ],
     transitionRules: {
       election: {
         startRound: toPositiveInt(electionTransitionRaw?.startRound) ?? 1,
-        autoOpen: electionTransitionRaw?.autoOpen === undefined ? true : Boolean(electionTransitionRaw.autoOpen)
+        autoOpen: electionTransitionRaw?.autoOpen === undefined ? true : Boolean(electionTransitionRaw.autoOpen),
+        reopenUntilPassed:
+          electionTransitionRaw?.reopenUntilPassed === undefined
+            ? true
+            : Boolean(electionTransitionRaw.reopenUntilPassed),
+        discussionRoundsBetweenVotes: toPositiveInt(electionTransitionRaw?.discussionRoundsBetweenVotes) ?? 1
       },
       finalization: {
-        enterOnConsensus:
-          finalizationTransitionRaw?.enterOnConsensus === undefined
+        autoOpenVote:
+          finalizationTransitionRaw?.autoOpenVote === undefined
             ? true
-            : Boolean(finalizationTransitionRaw.enterOnConsensus),
-        enterOnCustomVote:
-          finalizationTransitionRaw?.enterOnCustomVote === undefined
+            : Boolean(finalizationTransitionRaw.autoOpenVote),
+        requireUnanimousVote:
+          finalizationTransitionRaw?.requireUnanimousVote === undefined
             ? true
-            : Boolean(finalizationTransitionRaw.enterOnCustomVote),
+            : Boolean(finalizationTransitionRaw.requireUnanimousVote),
+        reopenUntilPassed:
+          finalizationTransitionRaw?.reopenUntilPassed === undefined
+            ? true
+            : Boolean(finalizationTransitionRaw.reopenUntilPassed),
+        discussionRoundsBetweenVotes: toPositiveInt(finalizationTransitionRaw?.discussionRoundsBetweenVotes) ?? 1,
         requirePhaseForCompletion:
           finalizationTransitionRaw?.requirePhaseForCompletion === undefined
             ? true
@@ -829,6 +916,99 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
     promptPolicies,
     deliverables,
     ideaBank
+  };
+}
+
+export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig | null {
+  const normalized = normalizeDebateWorkflow(input);
+  if (!normalized) return null;
+  return {
+    workflowVersion: normalized.workflowVersion,
+    enabled: normalized.enabled,
+    phaseMachine: {
+      phases: normalized.phaseMachine.phases.map((phase) => ({
+        id: phase.id,
+        title: phase.title,
+        kind: phase.kind,
+        description: phase.description,
+        minRounds: phase.minRounds,
+        injectedPrompt: phase.injectedPrompt
+      })),
+      transitionRules: {
+        election: {
+          startRound: normalized.phaseMachine.transitionRules.election.startRound,
+          autoOpen: normalized.phaseMachine.transitionRules.election.autoOpen,
+          reopenUntilPassed: normalized.phaseMachine.transitionRules.election.reopenUntilPassed,
+          discussionRoundsBetweenVotes: normalized.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes
+        },
+        finalization: {
+          autoOpenVote: normalized.phaseMachine.transitionRules.finalization.autoOpenVote,
+          requireUnanimousVote: normalized.phaseMachine.transitionRules.finalization.requireUnanimousVote,
+          reopenUntilPassed: normalized.phaseMachine.transitionRules.finalization.reopenUntilPassed,
+          discussionRoundsBetweenVotes: normalized.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes,
+          requirePhaseForCompletion: normalized.phaseMachine.transitionRules.finalization.requirePhaseForCompletion
+        }
+      }
+    },
+    election: {
+      startRound: normalized.election.startRound,
+      roles: normalized.election.roles,
+      speakingOrder: {
+        firstRole: normalized.election.speakingOrder.firstRole,
+        lastRole: normalized.election.speakingOrder.lastRole
+      }
+    },
+    seatOrderRules: normalized.seatOrderRules.map((rule) => ({
+      afterRound: rule.afterRound,
+      policy: rule.policy.type === "rotate" ? { type: "rotate", offset: rule.policy.offset } : { type: "reverse" }
+    })),
+    voting: {
+      custom: {
+        minOptions: normalized.voting.custom.minOptions,
+        maxOptions: normalized.voting.custom.maxOptions
+      },
+      announcement: {
+        announcer: normalized.voting.announcement.announcer,
+        fallback: normalized.voting.announcement.fallback
+      },
+      governance: {
+        tieBreaker: normalized.voting.governance.tieBreaker,
+        maxTieRounds: normalized.voting.governance.maxTieRounds,
+        fallbackMode: normalized.voting.governance.fallbackMode
+      }
+    },
+    consensus: {
+      enabled: normalized.consensus.enabled,
+      minAvgScore: normalized.consensus.minAvgScore,
+      requireAllSeats: normalized.consensus.requireAllSeats
+    },
+    promptPolicies: {
+      openingPrompt: normalized.promptPolicies.openingPrompt,
+      round1Fairness: normalized.promptPolicies.round1Fairness,
+      responseFormat: {
+        requireMarkdown: normalized.promptPolicies.responseFormat.requireMarkdown,
+        forbidRawJson: normalized.promptPolicies.responseFormat.forbidRawJson
+      },
+      outputBudget: {
+        discussionMaxTokens: normalized.promptPolicies.outputBudget.discussionMaxTokens,
+        writingMaxTokens: normalized.promptPolicies.outputBudget.writingMaxTokens
+      }
+    },
+    deliverables: {
+      allowedPaths: normalized.deliverables.allowedPaths,
+      requiredFiles: normalized.deliverables.requiredFiles.map((file) => ({
+        path: file.path,
+        ownerRole: file.ownerRole,
+        description: file.description,
+        minChars: file.minChars,
+        minMarkdownHeadings: file.minMarkdownHeadings,
+        requiredSnippets: file.requiredSnippets
+      }))
+    },
+    ideaBank: {
+      rawIdeaBankPath: normalized.ideaBank.rawIdeaBankPath,
+      derivedFiles: normalized.ideaBank.derivedFiles
+    }
   };
 }
 

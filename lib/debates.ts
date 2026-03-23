@@ -6,7 +6,7 @@ import { runDebate } from "@/lib/runtime";
 import { readSession } from "@/lib/session";
 import type { DebateRecord } from "@/lib/types";
 import { createDebateSchema, updateDebateQuestionSchema, updateDebateSharingSchema } from "@/lib/validation";
-import { formatRequiredDeliverableSummary, normalizeDebateWorkflow } from "@/lib/workflow";
+import { formatRequiredDeliverableSummary, normalizeDebateWorkflow, toCanonicalWorkflowConfig } from "@/lib/workflow";
 
 const DISPLAY_NAME_ADJECTIVES = ["青", "赤", "白", "玄", "金", "银", "苍", "墨", "紫", "绿", "蓝", "橙"];
 const DISPLAY_NAME_NOUNS = ["狐", "狼", "鹰", "鲸", "蛇", "虎", "鹿", "鸦", "猫", "犬", "熊", "龙", "雀"];
@@ -40,38 +40,53 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
           title: "Phase 1 · 议员实战演练",
           kind: "analysis",
           description: "前两轮先独立分析、归类、指出风险，并给出主持人/监管者候选建议。",
-          minRounds: 2
+          minRounds: null
         },
         {
-          id: "phase-2",
-          title: "Phase 2 · 民主选举",
+          id: "phase-1-5",
+          title: "Phase 1.5 · 主持人与监管者选举",
           kind: "election",
-          description: "用一整轮完成主持人与监管者选举，不夹带额外发言，形成明确任命结果。",
-          minRounds: 1
+          description: "用一整轮完成主持人与监管者选举；如果本轮未选出结果，则先回到 Phase 1 补充一轮全员发言，再重新进入本阶段。",
+          minRounds: null,
+          injectedPrompt:
+            "【Phase 1.5】当前是主持人与监管者的正式选举轮。你必须基于前面 Phase 1 的实际表现投票，并把判断依据讲清楚。禁止借投票继续推进新设定、新主线或新事件。如果本轮没能选出结果，下一轮会先回到 Phase 1 继续补充发言，之后系统再发起下一次 Phase 1.5 选举。"
         },
         {
           id: "phase-3",
           title: "Phase 3 · 动态轮换讨论",
           kind: "deliberation",
           description: "主持人宣布统一模式，全员围绕创意发散、逻辑审核与方案收敛循环推进。",
-          minRounds: 8
+          minRounds: null
+        },
+        {
+          id: "phase-3-5",
+          title: "Phase 3.5 · Phase 4 入场表决",
+          kind: "finalization_vote",
+          description: "正式进入 Phase 4 前，先用一整轮检查是否已经具备收束条件，并完成官方入场表决。",
+          minRounds: null,
+          injectedPrompt:
+            "【Phase 3.5】当前是进入 Phase 4 前的正式入场表决阶段。你需要先判断：现有争议是否已经收束、关键结构是否稳定、必须交付的文件是否已经具备被汇总的前提。如果支持进入 Phase 4，必须把成熟依据讲清楚；如果反对，也必须明确指出还缺什么。禁止只表态不解释。只有全员同意，下一轮才正式进入 Phase 4。"
         },
         {
           id: "phase-4",
           title: "Phase 4 · 共识收敛与最终交付",
           kind: "finalization",
           description: "进入最终表决与最终产物输出，完成收敛与交付。",
-          minRounds: 4
+          minRounds: null
         }
       ],
       transitionRules: {
         election: {
           startRound: 3,
-          autoOpen: true
+          autoOpen: true,
+          reopenUntilPassed: true,
+          discussionRoundsBetweenVotes: 1
         },
         finalization: {
-          enterOnConsensus: true,
-          enterOnCustomVote: true,
+          autoOpenVote: true,
+          requireUnanimousVote: true,
+          reopenUntilPassed: true,
+          discussionRoundsBetweenVotes: 1,
           requirePhaseForCompletion: true
         }
       }
@@ -100,7 +115,7 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
     consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true },
     promptPolicies: {
       openingPrompt:
-        "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么成立、会带来什么影响，让其他人一眼看懂你的意思。",
+        "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。后发言者的首要任务不是沿着前一个人的结论做一点补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应该直接提出新方案，必要时可以彻底推翻前案。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响，让其他人一眼看懂你的意思。",
       round1Fairness: true,
       responseFormat: {
         requireMarkdown: true,
@@ -193,6 +208,9 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
     workflowPhaseKind: (row.workflow_phase_kind as DebateRecord["workflowPhaseKind"]) ?? null,
     workflowPhaseTitle: (row.workflow_phase_title as string | null) ?? null,
     workflowPhaseRound: row.workflow_phase_round === null ? null : Number(row.workflow_phase_round),
+    runtimeNoticeKind: (row.runtime_notice_kind as DebateRecord["runtimeNoticeKind"]) ?? null,
+    runtimeNoticeMessage: (row.runtime_notice_message as string | null) ?? null,
+    runtimeNoticeAt: (row.runtime_notice_at as string | null) ?? null,
     lastErrorCode: (row.last_error_code as string | null) ?? null,
     lastErrorMessage: (row.last_error_message as string | null) ?? null,
     startedAt: (row.started_at as string | null) ?? null,
@@ -210,6 +228,7 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<Retur
   );
   const electionMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "election")?.minRounds ?? 1;
   const deliberationMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "deliberation")?.minRounds ?? 0;
+  const finalizationVoteMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "finalization_vote")?.minRounds ?? 1;
   const finalizationMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "finalization")?.minRounds ?? 0;
   lines.push(`- version: v${workflow.workflowVersion}`);
   if (workflow.phaseMachine.phases.length > 0) {
@@ -221,13 +240,13 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<Retur
     }
   }
   lines.push(
-    `- phase minRounds: analysis=${analysisMinRounds}; election=${electionMinRounds}; deliberation=${deliberationMinRounds}; finalization=${finalizationMinRounds}`
+    `- phase minRounds: analysis=${analysisMinRounds}; election=${electionMinRounds}; deliberation=${deliberationMinRounds}; finalization_vote=${finalizationVoteMinRounds}; finalization=${finalizationMinRounds}`
   );
   lines.push(
-    `- phase transitions: election@round ${workflow.phaseMachine.transitionRules.election.startRound}; election autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}`
+    `- phase transitions: election@round ${workflow.phaseMachine.transitionRules.election.startRound}; election autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}; election reopenUntilPassed=${workflow.phaseMachine.transitionRules.election.reopenUntilPassed ? "yes" : "no"}; election discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes}`
   );
   lines.push(
-    `- phase finalization: onConsensus=${workflow.phaseMachine.transitionRules.finalization.enterOnConsensus ? "yes" : "no"}; onCustomVote=${workflow.phaseMachine.transitionRules.finalization.enterOnCustomVote ? "yes" : "no"}; requirePhaseForCompletion=${workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "yes" : "no"}`
+    `- phase finalization: autoOpenVote=${workflow.phaseMachine.transitionRules.finalization.autoOpenVote ? "yes" : "no"}; requireUnanimousVote=${workflow.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "yes" : "no"}; reopenUntilPassed=${workflow.phaseMachine.transitionRules.finalization.reopenUntilPassed ? "yes" : "no"}; discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes}; requirePhaseForCompletion=${workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "yes" : "no"}`
   );
   lines.push(`- election startRound: ${workflow.election.startRound}`);
   lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
@@ -293,6 +312,9 @@ function toListItem(debate: DebateRecord) {
     workflowPhaseKind: debate.workflowPhaseKind,
     workflowPhaseTitle: debate.workflowPhaseTitle,
     workflowPhaseRound: debate.workflowPhaseRound,
+    runtimeNoticeKind: debate.runtimeNoticeKind,
+    runtimeNoticeMessage: debate.runtimeNoticeMessage,
+    runtimeNoticeAt: debate.runtimeNoticeAt,
     createdAt: debate.createdAt
   };
 }
@@ -421,8 +443,14 @@ export async function createDebate(input: unknown) {
       `insert into debates (
         user_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
         consensus_reached, consensus_summary, workflow_phase_kind, workflow_phase_title, workflow_phase_round, last_error_code, last_error_message,
+        runtime_notice_kind, runtime_notice_message, runtime_notice_at,
         started_at, finished_at, stopped_reason, created_at, updated_at
-      ) values ($1,$2,'pending',$3,0,null,0,$4,false,null,null,null,null,null,null,null,null,null,$5,$5)
+      ) values (
+        $1,$2,'pending',$3,0,null,0,$4,
+        false,null,null,null,null,null,null,
+        null,null,null,
+        null,null,null,$5,$5
+      )
       returning *`,
       [session.userId, data.question, data.maxTurns, data.enableSharedFacts, now]
     );
@@ -513,8 +541,14 @@ export async function createDebate(input: unknown) {
     `insert into debates (
       user_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
       consensus_reached, consensus_summary, workflow_phase_kind, workflow_phase_title, workflow_phase_round, last_error_code, last_error_message,
+      runtime_notice_kind, runtime_notice_message, runtime_notice_at,
       started_at, finished_at, stopped_reason, created_at, updated_at
-    ) values ($1,$2,'pending',$3,0,null,0,$4,false,null,null,null,null,null,null,null,null,null,$5,$5)
+    ) values (
+      $1,$2,'pending',$3,0,null,0,$4,
+      false,null,null,null,null,null,null,
+      null,null,null,
+      null,null,null,$5,$5
+    )
     returning *`,
     [session.userId, data.question, data.maxTurns, data.enableSharedFacts, now]
   );
@@ -536,6 +570,15 @@ export async function createDebate(input: unknown) {
     );
     const workflowContent =
       (workflow.rowCount ?? 0) >= 1 ? String(workflow.rows[0]?.content ?? "").trim() : "";
+    const canonicalWorkflowContent = (() => {
+      if (!workflowContent) return DEFAULT_WORKFLOW_JSON;
+      try {
+        const parsed = JSON.parse(workflowContent) as unknown;
+        return JSON.stringify(toCanonicalWorkflowConfig(parsed) ?? parsed, null, 2);
+      } catch {
+        return DEFAULT_WORKFLOW_JSON;
+      }
+    })();
     await query(
       `
         insert into debate_files (debate_id, path, content, created_at, updated_at)
@@ -543,7 +586,7 @@ export async function createDebate(input: unknown) {
         on conflict (debate_id, path)
         do update set content = excluded.content, updated_at = excluded.updated_at
       `,
-      [debate.id, workflowContent || DEFAULT_WORKFLOW_JSON, now]
+      [debate.id, canonicalWorkflowContent, now]
     );
 
     const sharedDebateFiles = await query<{ path: string; content: string }>(
@@ -1479,6 +1522,9 @@ export async function startDebate(id: string) {
     `update debates
         set status = 'running',
             started_at = coalesce(started_at, $3),
+            runtime_notice_kind = null,
+            runtime_notice_message = null,
+            runtime_notice_at = null,
             updated_at = $3
       where id = $1 and user_id = $2 and status in ('pending','paused')
       returning *`,
@@ -1561,6 +1607,9 @@ export async function resumeDebate(id: string) {
   const result = await query<Record<string, unknown>>(
     `update debates
         set status = 'running',
+            runtime_notice_kind = null,
+            runtime_notice_message = null,
+            runtime_notice_at = null,
             updated_at = $3
       where id = $1 and user_id = $2 and status = 'paused'
       returning *`,

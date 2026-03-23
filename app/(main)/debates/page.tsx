@@ -12,6 +12,9 @@ type Debate = {
   tokenUsed: number;
   consensusReached: boolean;
   isShared: boolean;
+  runtimeNoticeKind: "recovering" | "recovered" | null;
+  runtimeNoticeMessage: string | null;
+  runtimeNoticeAt: string | null;
   agentCount: number;
   createdAt: string;
 };
@@ -20,6 +23,24 @@ function formatTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString();
+}
+
+function RecoveryBadge(props: {
+  runtimeNoticeKind: "recovering" | "recovered" | null;
+  runtimeNoticeMessage: string | null;
+  runtimeNoticeAt: string | null;
+}) {
+  if (!props.runtimeNoticeKind || !props.runtimeNoticeMessage) return null;
+  const badgeClass = props.runtimeNoticeKind === "recovering" ? "badge-recovering" : "badge-recovered";
+  const label = props.runtimeNoticeKind === "recovering" ? "恢复中" : "已自动恢复";
+  const title = props.runtimeNoticeAt
+    ? `${props.runtimeNoticeMessage} · ${formatTime(props.runtimeNoticeAt)}`
+    : props.runtimeNoticeMessage;
+  return (
+    <span className={`badge ${badgeClass}`} title={title}>
+      {label}
+    </span>
+  );
 }
 
 export default function DebatesPage() {
@@ -175,6 +196,11 @@ export default function DebatesPage() {
                       </Link>
                       <div className="row" style={{ gap: 8 }}>
                         <span className={`badge badge-${debate.status}`}>{debate.status}</span>
+                        <RecoveryBadge
+                          runtimeNoticeKind={debate.runtimeNoticeKind}
+                          runtimeNoticeMessage={debate.runtimeNoticeMessage}
+                          runtimeNoticeAt={debate.runtimeNoticeAt}
+                        />
                         {scope === "mine" ? (
                           <>
                             <button
@@ -212,6 +238,12 @@ export default function DebatesPage() {
                       {debate.consensusReached ? " · 已达成共识" : ""} · 创建于{" "}
                       {formatTime(debate.createdAt)}
                     </div>
+                    {debate.runtimeNoticeMessage ? (
+                      <div className="muted" title={debate.runtimeNoticeMessage}>
+                        {debate.runtimeNoticeMessage}
+                        {debate.runtimeNoticeAt ? ` · ${formatTime(debate.runtimeNoticeAt)}` : ""}
+                      </div>
+                    ) : null}
                   </>
                 );
               })()}
@@ -272,6 +304,11 @@ export default function DebatesPage() {
                       </Link>
                       <div className="row" style={{ gap: 8 }}>
                         <span className={`badge badge-${debate.status}`}>{debate.status}</span>
+                        <RecoveryBadge
+                          runtimeNoticeKind={debate.runtimeNoticeKind}
+                          runtimeNoticeMessage={debate.runtimeNoticeMessage}
+                          runtimeNoticeAt={debate.runtimeNoticeAt}
+                        />
                         {scope === "mine" ? (
                           <>
                             <button
@@ -309,6 +346,12 @@ export default function DebatesPage() {
                       {debate.consensusReached ? " · 已达成共识" : ""} · 创建于{" "}
                       {formatTime(debate.createdAt)}
                     </div>
+                    {debate.runtimeNoticeMessage ? (
+                      <div className="muted" title={debate.runtimeNoticeMessage}>
+                        {debate.runtimeNoticeMessage}
+                        {debate.runtimeNoticeAt ? ` · ${formatTime(debate.runtimeNoticeAt)}` : ""}
+                      </div>
+                    ) : null}
                   </>
                 );
               })()}

@@ -29,7 +29,7 @@ type RoleDraft = { clientId: string; id: string; name: string; systemPrompt: str
 type WorkflowPhasePrompt = {
   id: string;
   title: string;
-  kind: "analysis" | "election" | "deliberation" | "finalization";
+  kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization";
   description: string | null;
   minRounds: number | null;
   injectedPrompt: string;
@@ -140,7 +140,11 @@ export default function StrategyDetailPage() {
             id: String(phase.id ?? ""),
             title: String(phase.title ?? ""),
             kind:
-              phase.kind === "analysis" || phase.kind === "election" || phase.kind === "deliberation" || phase.kind === "finalization"
+              phase.kind === "analysis" ||
+              phase.kind === "election" ||
+              phase.kind === "deliberation" ||
+              phase.kind === "finalization_vote" ||
+              phase.kind === "finalization"
                 ? phase.kind
                 : "analysis",
             description: typeof phase.description === "string" ? phase.description : null,
@@ -502,7 +506,11 @@ export default function StrategyDetailPage() {
           id: String(phase.id ?? ""),
           title: String(phase.title ?? ""),
           kind:
-            phase.kind === "analysis" || phase.kind === "election" || phase.kind === "deliberation" || phase.kind === "finalization"
+            phase.kind === "analysis" ||
+            phase.kind === "election" ||
+            phase.kind === "deliberation" ||
+            phase.kind === "finalization_vote" ||
+            phase.kind === "finalization"
               ? phase.kind
               : "analysis",
           description: typeof phase.description === "string" ? phase.description : null,

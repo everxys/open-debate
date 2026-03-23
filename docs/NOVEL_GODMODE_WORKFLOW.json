@@ -8,38 +8,51 @@
         "title": "Phase 1 · 议员实战演练",
         "kind": "analysis",
         "description": "前两轮只做世界规则、胜负结构、人物功能分工与高优先级风险分析，不允许急着收尾。",
-        "minRounds": 2
+        "minRounds": null
       },
       {
-        "id": "phase-2",
-        "title": "Phase 2 · 民主选举",
+        "id": "phase-1-5",
+        "title": "Phase 1.5 · 主持人与监管者选举",
         "kind": "election",
-        "description": "用一整轮完成主持人与监管者选举，不夹带额外发言，形成明确任命结果。",
-        "minRounds": 1
+        "description": "用一整轮完成主持人与监管者选举；如果本轮未选出结果，则先回到 Phase 1 补充一轮全员发言，再重新进入本阶段。",
+        "minRounds": null,
+        "injectedPrompt": "【Phase 1.5】当前是主持人与监管者的正式选举轮。你必须基于前面 Phase 1 已经出现的表现来判断谁适合做主持人、谁适合做监管者，并把判断依据讲清楚。禁止借投票继续推进新设定、新主线或新事件。若本轮无法形成明确结果，下一轮会先回到 Phase 1 继续补充一轮全员发言，然后系统再发起下一次 Phase 1.5 选举。"
       },
       {
         "id": "phase-3",
         "title": "Phase 3 · 动态轮换讨论",
         "kind": "deliberation",
         "description": "用长轮次反复打磨核心诡计、五大事件、人物关系与分卷结构，优先提高点子密度与互锁强度。",
-        "minRounds": 24
+        "minRounds": null
+      },
+      {
+        "id": "phase-3-5",
+        "title": "Phase 3.5 · Phase 4 入场表决",
+        "kind": "finalization_vote",
+        "description": "正式进入 Phase 4 前，先统一判断是否已经具备收束条件，并完成官方入场表决。",
+        "minRounds": null,
+        "injectedPrompt": "【Phase 3.5】当前是进入 Phase 4 前的正式入场表决阶段。你要先判断：现有争议是否已经收束、关键结构是否已经稳定、主要文件是否具备被汇总的前提。如果支持进入 Phase 4，必须明确说明为什么现在已经成熟；如果反对，也必须明确指出仍未解决的硬缺口。禁止只表态不解释。只有全员同意，下一轮才正式进入 Phase 4。"
       },
       {
         "id": "phase-4",
         "title": "Phase 4 · 共识收敛与最终交付",
         "kind": "finalization",
         "description": "进入章节级扩写、伏笔台账校验、关键场景与终局回收，不满足厚度与密度门槛不得结束。",
-        "minRounds": 12
+        "minRounds": null
       }
     ],
     "transitionRules": {
       "election": {
         "startRound": 3,
-        "autoOpen": true
+        "autoOpen": true,
+        "reopenUntilPassed": true,
+        "discussionRoundsBetweenVotes": 1
       },
       "finalization": {
-        "enterOnConsensus": false,
-        "enterOnCustomVote": true,
+        "autoOpenVote": true,
+        "requireUnanimousVote": true,
+        "reopenUntilPassed": true,
+        "discussionRoundsBetweenVotes": 1,
         "requirePhaseForCompletion": true
       }
     }
@@ -93,7 +106,7 @@
     "requireAllSeats": true
   },
   "promptPolicies": {
-    "openingPrompt": "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么成立、会带来什么影响，让其他人一眼看懂你的意思。",
+    "openingPrompt": "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。后发言者的首要任务不是顺着前一个人的结论做轻量补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应该直接提出新方案，必要时可以整体推翻前案并重建。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响，让其他人一眼看懂你的意思。",
     "round1Fairness": true,
     "responseFormat": {
       "requireMarkdown": true,

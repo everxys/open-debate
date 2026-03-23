@@ -542,6 +542,18 @@ button {
   color: var(--red);
 }
 
+.badge-recovering {
+  background: #fff7df;
+  color: var(--yellow);
+  border: 1px solid #ecd18a;
+}
+
+.badge-recovered {
+  background: #e9f8f0;
+  color: var(--green);
+  border: 1px solid #b9e3ca;
+}
+
 .card-list {
   display: grid;
   gap: 12px;
@@ -549,6 +561,37 @@ button {
 
 .muted {
   color: var(--muted);
+}
+
+.runtimeNoticeCard {
+  border-radius: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  background: #f8fbff;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.runtimeNoticeCardRecovering {
+  background: linear-gradient(180deg, #fffaf0 0%, #fff4d9 100%);
+  border-color: #ecd18a;
+}
+
+.runtimeNoticeCardRecovered {
+  background: linear-gradient(180deg, #f2fbf6 0%, #e7f8ee 100%);
+  border-color: #b9e3ca;
+}
+
+.runtimeNoticeTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.runtimeNoticeText {
+  line-height: 1.5;
 }
 
 .turn {
