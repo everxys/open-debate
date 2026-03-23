@@ -52,6 +52,9 @@ export type DebateRecord = {
     leadingSolution: string;
     score: number;
   } | null;
+  workflowPhaseKind: "analysis" | "election" | "deliberation" | "finalization" | null;
+  workflowPhaseTitle: string | null;
+  workflowPhaseRound: number | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
   startedAt: string | null;

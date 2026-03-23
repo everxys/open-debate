@@ -87,6 +87,9 @@ create table if not exists debates (
   is_shared boolean not null default false,
   consensus_reached boolean not null default false,
   consensus_summary jsonb null,
+  workflow_phase_kind text null,
+  workflow_phase_title text null,
+  workflow_phase_round integer null,
   last_error_code text null,
   last_error_message text null,
   started_at timestamptz null,
@@ -95,6 +98,10 @@ create table if not exists debates (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table debates add column if not exists workflow_phase_kind text null;
+alter table debates add column if not exists workflow_phase_title text null;
+alter table debates add column if not exists workflow_phase_round integer null;
 
 create table if not exists debate_agents (
   id uuid primary key default gen_random_uuid(),

@@ -4,6 +4,7 @@ import { decryptSecret } from "@/lib/crypto";
 import { query } from "@/lib/db";
 import { emitDebateLiveEvent, setDebateLiveProgress, clearDebateLiveProgress } from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
+import { appendServerLog } from "@/lib/server-log";
 import type { AgentRecord, DebateRecord, DebateTurnRecord, StructuredOutput } from "@/lib/types";
 import {
   formatRequiredDeliverableSummary,
@@ -46,6 +47,62 @@ function getPgErrorCode(error: unknown) {
   if (typeof error !== "object" || error === null) return null;
   const code = (error as { code?: unknown }).code;
   return typeof code === "string" ? code : null;
+}
+
+function describeRuntimeError(error: unknown) {
+  if (error instanceof AppError) {
+    return {
+      code: error.code,
+      message: error.message,
+      stack: error.stack ?? null
+    };
+  }
+  if (error instanceof Error) {
+    const anyError = error as Error & { code?: unknown };
+    return {
+      code: typeof anyError.code === "string" ? anyError.code : "RUNTIME_ERROR",
+      message: error.message,
+      stack: error.stack ?? null
+    };
+  }
+  return {
+    code: "RUNTIME_ERROR",
+    message: typeof error === "string" ? error : JSON.stringify(error),
+    stack: null
+  };
+}
+
+function truncateErrorMessage(message: string, maxChars = 1_500) {
+  if (message.length <= maxChars) return message;
+  return `${message.slice(0, maxChars - 1)}…`;
+}
+
+function getPhaseSnapshot(
+  phase: ReturnType<typeof resolveCurrentWorkflowPhase> | null,
+  roundNumber: number | null
+): Pick<DebateRecord, "workflowPhaseKind" | "workflowPhaseTitle" | "workflowPhaseRound"> {
+  return {
+    workflowPhaseKind: phase?.kind ?? null,
+    workflowPhaseTitle: phase?.title ?? null,
+    workflowPhaseRound: roundNumber
+  };
+}
+
+async function logRuntimeEvent(
+  level: "warn" | "error",
+  message: string,
+  meta?: Record<string, unknown>
+) {
+  if (level === "error") {
+    console.error(message, meta ?? "");
+  } else {
+    console.warn(message, meta ?? "");
+  }
+  try {
+    await appendServerLog(level, message, meta);
+  } catch (error) {
+    console.error("runtime log persistence failed", error);
+  }
 }
 
 function trimToChars(value: string, maxChars?: number | null) {
@@ -276,7 +333,7 @@ async function appendContextUsageLogAndUpdateTotals(input: {
     const next = appendWithTrim(prev, line);
     await upsertDebateFile(input.debateId, CONTEXT_USAGE_LOG_PATH, next.trim() + "\n", input.now);
   } catch (error) {
-    console.warn("context usage log append failed", error);
+    await logRuntimeEvent("warn", "context usage log append failed", { error: describeRuntimeError(error) });
   }
 
   // Update totals (incremental; keep both cumulative and session delta).
@@ -3407,7 +3464,7 @@ async function callProvider(
                 closed: closedVote
               });
             } catch (error) {
-              console.warn("vote announce after close failed", error);
+              await logRuntimeEvent("warn", "vote announce after close failed", { error: describeRuntimeError(error) });
             }
           }
         } else {
@@ -3657,7 +3714,7 @@ async function callProvider(
               closed: closedVote
             });
           } catch (error) {
-            console.warn("vote announce after close failed", error);
+            await logRuntimeEvent("warn", "vote announce after close failed", { error: describeRuntimeError(error) });
           }
         }
       } else {
@@ -3744,6 +3801,9 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
     isShared: row.is_shared === undefined ? false : Boolean(row.is_shared),
     consensusReached: Boolean(row.consensus_reached),
     consensusSummary: (row.consensus_summary as DebateRecord["consensusSummary"]) ?? null,
+    workflowPhaseKind: (row.workflow_phase_kind as DebateRecord["workflowPhaseKind"]) ?? null,
+    workflowPhaseTitle: (row.workflow_phase_title as string | null) ?? null,
+    workflowPhaseRound: row.workflow_phase_round === null ? null : Number(row.workflow_phase_round),
     lastErrorCode: (row.last_error_code as string | null) ?? null,
     lastErrorMessage: (row.last_error_message as string | null) ?? null,
     startedAt: (row.started_at as string | null) ?? null,
@@ -3786,15 +3846,53 @@ function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
   };
 }
 
-async function finishDebate(id: string, status: "completed" | "stopped" | "failed", reason?: string) {
+async function finishDebate(
+  id: string,
+  status: "completed" | "stopped" | "failed",
+  reason?: string,
+  options?: {
+    phase?: Pick<DebateRecord, "workflowPhaseKind" | "workflowPhaseTitle" | "workflowPhaseRound"> | null;
+    lastErrorCode?: string | null;
+    lastErrorMessage?: string | null;
+  }
+) {
   await query(
     `update debates
         set status = $2,
             finished_at = $3,
             stopped_reason = $4,
+            workflow_phase_kind = $5,
+            workflow_phase_title = $6,
+            workflow_phase_round = $7,
+            last_error_code = coalesce($8, last_error_code),
+            last_error_message = coalesce($9, last_error_message),
             updated_at = $3
       where id = $1`,
-    [id, status, new Date().toISOString(), reason ?? null]
+    [
+      id,
+      status,
+      new Date().toISOString(),
+      reason ?? null,
+      options?.phase?.workflowPhaseKind ?? null,
+      options?.phase?.workflowPhaseTitle ?? null,
+      options?.phase?.workflowPhaseRound ?? null,
+      options?.lastErrorCode ?? null,
+      options?.lastErrorMessage ?? null
+    ]
+  );
+}
+
+async function persistDebatePhaseSnapshot(
+  id: string,
+  phase: Pick<DebateRecord, "workflowPhaseKind" | "workflowPhaseTitle" | "workflowPhaseRound"> | null
+) {
+  await query(
+    `update debates
+        set workflow_phase_kind = $2,
+            workflow_phase_title = $3,
+            workflow_phase_round = $4
+      where id = $1`,
+    [id, phase?.workflowPhaseKind ?? null, phase?.workflowPhaseTitle ?? null, phase?.workflowPhaseRound ?? null]
   );
 }
 
@@ -4411,7 +4509,7 @@ async function maybeGenerateVoteAnnouncementWithSeat1(input: {
       content = texts.join("\n").trim();
     }
   } catch (error) {
-    console.warn("vote announcement generation failed", error);
+    await logRuntimeEvent("warn", "vote announcement generation failed", { error: describeRuntimeError(error) });
   }
 
   const now = new Date().toISOString();
@@ -4546,7 +4644,7 @@ async function generateRoundSummary(input: {
       content = texts.join("\n").trim();
     }
   } catch (error) {
-    console.warn("round summary generation failed", error);
+    await logRuntimeEvent("warn", "round summary generation failed", { error: describeRuntimeError(error) });
     return { ok: false, error };
   }
 
@@ -4575,6 +4673,7 @@ export async function runDebate(id: string, userId: string) {
 
   try {
     const pendingAutoSegmentByDebateAgentId = new Map<string, { reason: string }>();
+    let lastKnownPhase: Pick<DebateRecord, "workflowPhaseKind" | "workflowPhaseTitle" | "workflowPhaseRound"> | null = null;
     while (true) {
       const debateResult = await query<Record<string, unknown>>(
         "select * from debates where id = $1 and user_id = $2",
@@ -4641,6 +4740,15 @@ export async function runDebate(id: string, userId: string) {
         roundNumber: currentRoundNumberBeforeTurn,
         openVote: openVoteBeforeTurn
       });
+      const phaseSnapshotBeforeTurn = getPhaseSnapshot(phaseBeforeTurn, currentRoundNumberBeforeTurn);
+      const shouldPersistPhaseSnapshot =
+        lastKnownPhase?.workflowPhaseKind !== phaseSnapshotBeforeTurn.workflowPhaseKind ||
+        lastKnownPhase?.workflowPhaseTitle !== phaseSnapshotBeforeTurn.workflowPhaseTitle ||
+        lastKnownPhase?.workflowPhaseRound !== phaseSnapshotBeforeTurn.workflowPhaseRound;
+      if (shouldPersistPhaseSnapshot) {
+        await persistDebatePhaseSnapshot(id, phaseSnapshotBeforeTurn);
+        lastKnownPhase = phaseSnapshotBeforeTurn;
+      }
       if (debate.maxTurns > 0 && completedRounds >= debate.maxTurns) {
         const requiresFinalizationPhase =
           workflowBeforeTurn?.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ?? true;
@@ -4655,17 +4763,20 @@ export async function runDebate(id: string, userId: string) {
           currentRoundNumberBeforeTurn >= earliestCompletionRound &&
           missingDeliverables.length === 0
         ) {
-          await finishDebate(id, "completed");
+          await finishDebate(id, "completed", undefined, { phase: lastKnownPhase });
         } else if (missingDeliverables.length > 0) {
           await finishDebate(
             id,
             "stopped",
-            `max turns reached before required deliverables were written: ${missingDeliverables.map((file) => file.path).join(", ")}`
+            `max turns reached before required deliverables were written: ${missingDeliverables.map((file) => file.path).join(", ")}`,
+            { phase: lastKnownPhase }
           );
         } else if (currentRoundNumberBeforeTurn < earliestCompletionRound) {
-          await finishDebate(id, "stopped", `max turns reached before workflow minimum completion round ${earliestCompletionRound}`);
+          await finishDebate(id, "stopped", `max turns reached before workflow minimum completion round ${earliestCompletionRound}`, {
+            phase: lastKnownPhase
+          });
         } else {
-          await finishDebate(id, "stopped", "max turns reached before Phase 4");
+          await finishDebate(id, "stopped", "max turns reached before Phase 4", { phase: lastKnownPhase });
         }
         break;
       }
@@ -4833,7 +4944,10 @@ export async function runDebate(id: string, userId: string) {
           }
         });
       } catch (error) {
-        console.warn("generation diagnostics persistence failed", error);
+        await logRuntimeEvent("warn", "generation diagnostics persistence failed", {
+          debateId: id,
+          error: describeRuntimeError(error)
+        });
       }
 
       await query("update debate_agents set turn_count = turn_count + 1 where id = $1", [
@@ -4894,7 +5008,7 @@ export async function runDebate(id: string, userId: string) {
           now: createdAt
         });
       } catch (error) {
-        console.warn("context usage persistence failed", error);
+        await logRuntimeEvent("warn", "context usage persistence failed", { debateId: id, error: describeRuntimeError(error) });
       }
 
        emitDebateLiveEvent(id, {
@@ -4941,7 +5055,7 @@ export async function runDebate(id: string, userId: string) {
             : [])
         ]);
       } catch (error) {
-        console.warn("memory persistence failed", error);
+        await logRuntimeEvent("warn", "memory persistence failed", { debateId: id, error: describeRuntimeError(error) });
       }
 
       const turnRows = await query<Record<string, unknown>>(
@@ -4995,21 +5109,26 @@ export async function runDebate(id: string, userId: string) {
       const consensusReachedForDb = mustKeepRunningForVote ? false : consensus.reached;
       const nextStatusForDb =
         consensusReachedForDb && canCompleteByPhase && canCompleteByDeliverables ? "completed" : "running";
+      const phaseSnapshotAfterTurn = getPhaseSnapshot(finalizationPhase, currentRoundNumberAfterTurn);
+      lastKnownPhase = phaseSnapshotAfterTurn;
       await query(
         `update debates
             set current_turn = $2,
                 token_used = $3,
                 consensus_summary = $4,
                 consensus_reached = $5,
+                workflow_phase_kind = $6,
+                workflow_phase_title = $7,
+                workflow_phase_round = $8,
                 status = case
                   when status in ('paused', 'stopped') then status
-                  else $6
+                  else $9
                 end,
                 finished_at = case
-                  when $6 = 'completed' then $7
+                  when $9 = 'completed' then $10
                   else finished_at
                 end,
-                updated_at = $7
+                updated_at = $10
           where id = $1`,
         [
           id,
@@ -5022,6 +5141,9 @@ export async function runDebate(id: string, userId: string) {
               })
             : null,
           consensusReachedForDb,
+          phaseSnapshotAfterTurn.workflowPhaseKind,
+          phaseSnapshotAfterTurn.workflowPhaseTitle,
+          phaseSnapshotAfterTurn.workflowPhaseRound,
           nextStatusForDb,
           createdAt
         ]
@@ -5059,7 +5181,7 @@ export async function runDebate(id: string, userId: string) {
             });
           }
         } catch (error) {
-          console.warn("auto segment failed", error);
+          await logRuntimeEvent("warn", "auto segment failed", { debateId: id, error: describeRuntimeError(error) });
         }
       }
 
@@ -5079,7 +5201,7 @@ export async function runDebate(id: string, userId: string) {
               endedRound
             });
           } catch (error) {
-            console.warn("round summary failed", error);
+            await logRuntimeEvent("warn", "round summary failed", { debateId: id, error: describeRuntimeError(error) });
           }
 
           try {
@@ -5109,7 +5231,10 @@ export async function runDebate(id: string, userId: string) {
                     closed: closedVote
                   });
                 } catch (error) {
-                  console.warn("auto vote announce failed", error);
+                  await logRuntimeEvent("warn", "auto vote announce failed", {
+                    debateId: id,
+                    error: describeRuntimeError(error)
+                  });
                 }
               }
             } else if (closed.reopened) {
@@ -5121,7 +5246,7 @@ export async function runDebate(id: string, userId: string) {
               });
             }
           } catch (error) {
-            console.warn("auto vote close failed", error);
+            await logRuntimeEvent("warn", "auto vote close failed", { debateId: id, error: describeRuntimeError(error) });
           }
 
           try {
@@ -5140,7 +5265,7 @@ export async function runDebate(id: string, userId: string) {
               });
             }
           } catch (error) {
-            console.warn("auto vote open failed", error);
+            await logRuntimeEvent("warn", "auto vote open failed", { debateId: id, error: describeRuntimeError(error) });
           }
         }
       }
@@ -5148,8 +5273,18 @@ export async function runDebate(id: string, userId: string) {
       await sleep(1000);
     }
   } catch (error) {
-    console.error(error);
-    await finishDebate(id, "failed", "runtime error");
+    const details = describeRuntimeError(error);
+    await logRuntimeEvent("error", "debate runtime failed", {
+      debateId: id,
+      userId,
+      code: details.code,
+      message: details.message,
+      stack: details.stack
+    });
+    await finishDebate(id, "failed", "runtime error", {
+      lastErrorCode: details.code,
+      lastErrorMessage: truncateErrorMessage(details.message)
+    });
   } finally {
     activeDebates.delete(id);
     clearDebateLiveProgress(id);

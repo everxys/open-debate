@@ -93,6 +93,7 @@
     "requireAllSeats": true
   },
   "promptPolicies": {
+    "openingPrompt": "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么成立、会带来什么影响，让其他人一眼看懂你的意思。",
     "round1Fairness": true,
     "responseFormat": {
       "requireMarkdown": true,

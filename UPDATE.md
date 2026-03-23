@@ -1,5 +1,17 @@
+## 2026-03-23
+
+- 辩论详情页参与者面板滚动修复：`participants` 分支改为自身接管纵向滚动，左侧固定高度容器下不再把超长参与者列表直接裁掉，也不再出现“内容被截断但没有滚动条”的问题
+- AI 表达守则升级为硬约束：在小说策略开局提示、Phase 2、Phase 4，以及 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 中明确加入“必须讲人话、禁止只给简短结论/标签/速记句、提出方案时必须把机制与后果展开讲清楚”的硬规则；默认 workflow 也补上同类 opening prompt，并提高默认输出预算，减少 AI 发言像看不懂的速记提纲
+- 系统文件缺失改为空返回：`/api/debates/[id]/files` 针对 `votes/open.json`、`context/usage.json`、`context/usage_totals.json`、`question/history.json` 这类运行早期可能尚未生成的系统文件，缺失时不再返回 404，而是返回空默认内容，避免详情页初始化请求刷出一串无意义 404
+- 辩论详情页补出失败原因与停止原因：详情接口现在透传 `lastErrorCode`、`lastErrorMessage`、`stoppedReason` 与运行时阶段快照；左侧 `status` 面板会直接显示失败原因、停止原因和最后执行到的阶段，不再只剩一个 `failed` 标签
+- Node 运行时日志开始落盘：新增 `lib/server-log.ts`，把辩论运行时的主异常与关键 warning 追加写入项目根目录 `log/node-runtime-YYYY-MM-DD.log`，服务端不再只把错误打到控制台
+- 辩论阶段显示改为“运行时快照优先”：数据库新增 `workflow_phase_kind/title/round`，运行时在每轮推进时持久化当前阶段；详情页目录会优先使用这份阶段快照，避免辩论在 `failed/stopped/completed` 后又被前端回推成 `Phase 3`
+
 ## 2026-03-21
 
+- 辩论详情页加载容错加固：`loadDebate()` 改为用 `Promise.allSettled` 收敛详情与 turns 并发请求，服务重启或瞬时断网时不再把浏览器原生 `Failed to fetch` 直接冒到页面调用栈
+- 发言目录虚拟占位移除：右侧目录不再使用轮次级虚拟 spacer/估算高度，而是直接渲染当前窗口里的全部轮次，彻底消除展开某一轮后与下一轮之间出现大段空白的错位问题
+- 发言目录空白修复：右侧目录轮次项去掉 `content-visibility / containIntrinsicSize` 的额外占位干扰，并在展开/收起、投票标记或阶段信息变化时主动重新测量高度，避免某一轮展开后和下一轮之间出现大段空白
 - 辩论页发言目录精简：右侧目录不再展示每条发言的摘要 preview，只保留轮次、回合、席位、姓名和时间，减少噪声与目录区额外文本渲染
 - 辩论页可选运行时文件探测降噪：`votes/open.json`、`context/usage.json`、`context/usage_totals.json` 在当前 turn 缺失时只记录一次 404，并在没有新 turn 产生前跳过重复探测；等到新 turn 到来后再自动重试，避免网络面板被相同 404 持续刷屏
 - 辩论页初始化请求收敛：`loadWorkflowRules` 不再依赖自身 `loading` 状态重建，避免初始化 effect 被反复触发，间接导致 `workflow.json` 与 `question/history.json` 在进入页面时连续重复请求

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { listDebateFiles, readDebateFile } from "@/lib/debates";
-import { toErrorResponse } from "@/lib/http";
+import { AppError, toErrorResponse } from "@/lib/http";
 
 function toPositiveInt(value: string | null) {
   if (!value) return null;
@@ -29,6 +29,20 @@ function maybeTruncateFileContent(input: {
   return { ...input, content, truncated: true, totalChars, shownChars: content.length, slice };
 }
 
+function getOptionalSystemFileFallback(path: string) {
+  const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").trim().toLowerCase();
+  if (normalized === "votes/open.json") {
+    return { path, content: JSON.stringify({ status: "closed" }), updatedAt: "" };
+  }
+  if (normalized === "context/usage.json" || normalized === "context/usage_totals.json") {
+    return { path, content: JSON.stringify({ byDebateAgentId: {} }), updatedAt: "" };
+  }
+  if (normalized === "question/history.json") {
+    return { path, content: "[]", updatedAt: "" };
+  }
+  return null;
+}
+
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params;
@@ -39,7 +53,21 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     const tail = url.searchParams.get("tail") === "1";
 
     if (path) {
-      const file = await readDebateFile(id, path);
+      let file;
+      try {
+        file = await readDebateFile(id, path);
+      } catch (error) {
+        if (error instanceof AppError && error.code === "NOT_FOUND") {
+          const fallback = getOptionalSystemFileFallback(path);
+          if (fallback) {
+            file = fallback;
+          } else {
+            throw error;
+          }
+        } else {
+          throw error;
+        }
+      }
       const data = maybeTruncateFileContent({ ...file, maxChars, tail });
       return NextResponse.json({ success: true, data });
     }

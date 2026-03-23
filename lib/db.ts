@@ -79,6 +79,9 @@ async function ensureSchema(pool: Pool) {
   await pool.query("alter table ai_agents add column if not exists max_input_tokens int null");
   await pool.query("alter table ai_agents add column if not exists max_output_tokens int null");
   await pool.query("alter table ai_agents add column if not exists deleted_at timestamptz null");
+  await pool.query("alter table debates add column if not exists workflow_phase_kind text null");
+  await pool.query("alter table debates add column if not exists workflow_phase_title text null");
+  await pool.query("alter table debates add column if not exists workflow_phase_round int null");
   // Per-seat identity (cannot rely on ai_agents.name because same config can be reused).
   await pool.query("alter table debate_agents add column if not exists display_name text null");
   await pool.query(`

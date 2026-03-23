@@ -99,14 +99,16 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
     },
     consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true },
     promptPolicies: {
+      openingPrompt:
+        "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么成立、会带来什么影响，让其他人一眼看懂你的意思。",
       round1Fairness: true,
       responseFormat: {
         requireMarkdown: true,
         forbidRawJson: true
       },
       outputBudget: {
-        discussionMaxTokens: 1200,
-        writingMaxTokens: 2400
+        discussionMaxTokens: 2200,
+        writingMaxTokens: 4200
       }
     },
     deliverables: {
@@ -188,6 +190,9 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
     isShared: row.is_shared === undefined ? false : Boolean(row.is_shared),
     consensusReached: Boolean(row.consensus_reached),
     consensusSummary: (row.consensus_summary as DebateRecord["consensusSummary"]) ?? null,
+    workflowPhaseKind: (row.workflow_phase_kind as DebateRecord["workflowPhaseKind"]) ?? null,
+    workflowPhaseTitle: (row.workflow_phase_title as string | null) ?? null,
+    workflowPhaseRound: row.workflow_phase_round === null ? null : Number(row.workflow_phase_round),
     lastErrorCode: (row.last_error_code as string | null) ?? null,
     lastErrorMessage: (row.last_error_message as string | null) ?? null,
     startedAt: (row.started_at as string | null) ?? null,
@@ -285,6 +290,9 @@ function toListItem(debate: DebateRecord) {
     tokenUsed: debate.tokenUsed,
     isShared: debate.isShared,
     consensusReached: debate.consensusReached,
+    workflowPhaseKind: debate.workflowPhaseKind,
+    workflowPhaseTitle: debate.workflowPhaseTitle,
+    workflowPhaseRound: debate.workflowPhaseRound,
     createdAt: debate.createdAt
   };
 }
@@ -412,9 +420,9 @@ export async function createDebate(input: unknown) {
     const insertedDebate = await query<Record<string, unknown>>(
       `insert into debates (
         user_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
-        consensus_reached, consensus_summary, last_error_code, last_error_message,
+        consensus_reached, consensus_summary, workflow_phase_kind, workflow_phase_title, workflow_phase_round, last_error_code, last_error_message,
         started_at, finished_at, stopped_reason, created_at, updated_at
-      ) values ($1,$2,'pending',$3,0,null,0,$4,false,null,null,null,null,null,null,$5,$5)
+      ) values ($1,$2,'pending',$3,0,null,0,$4,false,null,null,null,null,null,null,null,null,null,$5,$5)
       returning *`,
       [session.userId, data.question, data.maxTurns, data.enableSharedFacts, now]
     );
@@ -504,9 +512,9 @@ export async function createDebate(input: unknown) {
   const insertedDebate = await query<Record<string, unknown>>(
     `insert into debates (
       user_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
-      consensus_reached, consensus_summary, last_error_code, last_error_message,
+      consensus_reached, consensus_summary, workflow_phase_kind, workflow_phase_title, workflow_phase_round, last_error_code, last_error_message,
       started_at, finished_at, stopped_reason, created_at, updated_at
-    ) values ($1,$2,'pending',$3,0,null,0,$4,false,null,null,null,null,null,null,$5,$5)
+    ) values ($1,$2,'pending',$3,0,null,0,$4,false,null,null,null,null,null,null,null,null,null,$5,$5)
     returning *`,
     [session.userId, data.question, data.maxTurns, data.enableSharedFacts, now]
   );
@@ -670,6 +678,12 @@ export async function getDebateDetail(id: string) {
     isOwner,
     consensusReached: debate.consensusReached,
     consensusSummary: debate.consensusSummary,
+    workflowPhaseKind: debate.workflowPhaseKind,
+    workflowPhaseTitle: debate.workflowPhaseTitle,
+    workflowPhaseRound: debate.workflowPhaseRound,
+    lastErrorCode: debate.lastErrorCode,
+    lastErrorMessage: debate.lastErrorMessage,
+    stoppedReason: debate.stoppedReason,
     agents
   };
 }

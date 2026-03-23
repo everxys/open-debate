@@ -59,6 +59,12 @@ type Debate = {
     leadingSolution: string;
     score: number;
   } | null;
+  workflowPhaseKind: "analysis" | "election" | "deliberation" | "finalization" | null;
+  workflowPhaseTitle: string | null;
+  workflowPhaseRound: number | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  stoppedReason: string | null;
   agents: DebateAgent[];
 };
 
@@ -116,7 +122,6 @@ type DebateRoundDirectoryItemProps = {
   onOpenInjectedPrompt: (input: { round: number; phaseTitle: string; prompt: string }) => void;
   onOpenVoteRound: (round: number) => void;
   onSelectTurn: (turnId: string) => void;
-  onMeasuredHeight: (round: number, height: number) => void;
 };
 
 type LeftTab = "status" | "participants" | "workflow" | "memory";
@@ -465,6 +470,33 @@ function resolveDirectoryPhaseForRound(
   return phaseByKind.get("analysis") ?? null;
 }
 
+function resolveStoredDirectoryPhase(
+  workflow: NormalizedDebateWorkflow | null,
+  debate: Debate | null,
+  round: number | null
+): DebateDirectoryPhaseInfo | null {
+  if (!workflow?.enabled || !debate?.workflowPhaseKind || !round) return null;
+  if (debate.workflowPhaseRound !== round) return null;
+  const matched = workflow.phaseMachine.phases.find((phase) => phase.kind === debate.workflowPhaseKind) ?? null;
+  if (matched) {
+    return {
+      phaseId: matched.id,
+      title: matched.title,
+      kind: matched.kind,
+      description: matched.description ?? null,
+      injectedPrompt: matched.injectedPrompt ?? null
+    };
+  }
+  if (!debate.workflowPhaseTitle) return null;
+  return {
+    phaseId: `stored-${debate.workflowPhaseKind}`,
+    title: debate.workflowPhaseTitle,
+    kind: debate.workflowPhaseKind,
+    description: null,
+    injectedPrompt: null
+  };
+}
+
 function isPhaseEntryRound(workflow: NormalizedDebateWorkflow | null, round: number, kind: DebateDirectoryPhaseInfo["kind"]) {
   if (!workflow?.enabled) return false;
   if (kind === "analysis") return round === 1;
@@ -492,26 +524,12 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
     onToggleRound,
     onOpenInjectedPrompt,
     onOpenVoteRound,
-    onSelectTurn,
-    onMeasuredHeight
+    onSelectTurn
   } = props;
-  const containerRef = useRef<HTMLDetailsElement | null>(null);
-
-  useEffect(() => {
-    const node = containerRef.current;
-    if (!node) return;
-    const report = () => onMeasuredHeight(round, node.getBoundingClientRect().height);
-    report();
-    const observer = new ResizeObserver(() => report());
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [round, onMeasuredHeight]);
 
   return (
     <details
-      ref={containerRef}
       open={isOpen}
-      style={{ contentVisibility: "auto", containIntrinsicSize: "220px" }}
       onToggle={(event) => {
         onToggleRound(round, (event.currentTarget as HTMLDetailsElement).open);
       }}
@@ -1110,7 +1128,7 @@ function ParticipantsPanel(props: {
   onResetUsageSession: (debateAgentId: string) => void;
 }) {
   return (
-    <Fragment>
+    <div className="stack" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
       {props.canAddAgent ? (
         <div className="panel">
           <div className="row" style={{ justifyContent: "space-between" }}>
@@ -1205,7 +1223,7 @@ function ParticipantsPanel(props: {
           </div>
         );
       })}
-    </Fragment>
+    </div>
   );
 }
 
@@ -1305,6 +1323,18 @@ function StatusSummaryPanel(props: {
           ? ` · ${props.debate.consensusSummary.leadingSolution} · ${props.debate.consensusSummary.score}`
           : ""}
       </div>
+      {props.debate.workflowPhaseTitle ? (
+        <div className="muted">
+          阶段快照: {props.debate.workflowPhaseTitle}
+          {props.debate.workflowPhaseRound ? ` · 第 ${props.debate.workflowPhaseRound} 轮` : ""}
+        </div>
+      ) : null}
+      {props.debate.stoppedReason ? <div className="muted">停止原因: {props.debate.stoppedReason}</div> : null}
+      {props.debate.lastErrorCode || props.debate.lastErrorMessage ? (
+        <div className="muted">
+          失败原因: {[props.debate.lastErrorCode, props.debate.lastErrorMessage].filter(Boolean).join(" · ")}
+        </div>
+      ) : null}
     </Fragment>
   );
 }
@@ -2491,10 +2521,6 @@ export default function DebateDetailPage() {
   const lastSseEventAtRef = useRef(0);
   const memoryFetchAbortRef = useRef<AbortController | null>(null);
   const memoryFetchTokenRef = useRef(0);
-  const directoryScrollRef = useRef<HTMLDivElement | null>(null);
-  const [directoryScrollTop, setDirectoryScrollTop] = useState(0);
-  const [directoryViewportHeight, setDirectoryViewportHeight] = useState(0);
-  const [directoryRoundHeights, setDirectoryRoundHeights] = useState<Record<number, number>>({});
   const { toast, showToast } = useAutoDismissToast(1200);
   const preWrapStyle = useMemo(
     () =>
@@ -2959,80 +2985,97 @@ export default function DebateDetailPage() {
     loadingDebateIdRef.current = expectedId;
     try {
       const after = lastTurnNumberRef.current;
-      const [debateResponse, turnsResponse] = await Promise.all([
-        fetch(`/api/debates/${expectedId}`, { cache: "no-store" }),
+      const [debateResult, turnsResult] = await Promise.allSettled([
+        fetch(`/api/debates/${expectedId}`, { cache: "no-store" }).then(async (response) => ({
+          response,
+          payload: await response.json().catch(() => ({}))
+        })),
         fetchTurnSummaries({
           debateId: expectedId,
           ...(after > 0 ? { after } : { limit: RECENT_TURNS_LIMIT })
-        }).then((result) => ({
-          ok: result.response.ok,
-          payload: result.payload
-        }))
+        })
       ]);
-      const debatePayload = await debateResponse.json().catch(() => ({}));
-      const turnsPayload = turnsResponse.payload;
 
       if (activeDebateIdRef.current && activeDebateIdRef.current !== expectedId) {
         return;
       }
 
-      if (debateResponse.ok) {
-        setDebate(debatePayload.data ?? null);
-        const now = Date.now();
-        if (now - lastVoteIndexAtRef.current > 5000) {
-          lastVoteIndexAtRef.current = now;
-          void loadVoteIndex();
-          void loadOpenVoteState();
-        }
-        const isOwner = Boolean(debatePayload.data?.isOwner);
-        if (isOwner && now - lastContextUsageAtRef.current > 1500) {
-          lastContextUsageAtRef.current = now;
-          void loadContextUsage();
-          void loadContextUsageTotals();
+      let hadNetworkFailure = false;
+
+      if (debateResult.status === "fulfilled") {
+        const { response: debateResponse, payload: debatePayload } = debateResult.value;
+        if (debateResponse.ok) {
+          setDebate(debatePayload.data ?? null);
+          const now = Date.now();
+          if (now - lastVoteIndexAtRef.current > 5000) {
+            lastVoteIndexAtRef.current = now;
+            void loadVoteIndex();
+            void loadOpenVoteState();
+          }
+          const isOwner = Boolean(debatePayload.data?.isOwner);
+          if (isOwner && now - lastContextUsageAtRef.current > 1500) {
+            lastContextUsageAtRef.current = now;
+            void loadContextUsage();
+            void loadContextUsageTotals();
+          }
+        } else {
+          const message = debatePayload?.error?.message ?? "加载辩论失败";
+          const now = Date.now();
+          if (now - lastLoadErrorAtRef.current > 5000) {
+            lastLoadErrorAtRef.current = now;
+            showToast("error", message);
+          }
         }
       } else {
-        const message = debatePayload?.error?.message ?? "加载辩论失败";
+        hadNetworkFailure = true;
+      }
+
+      if (turnsResult.status === "fulfilled") {
+        const turnsPayload = turnsResult.value.payload;
+        if (turnsResult.value.response.ok) {
+          const incoming = Array.isArray(turnsPayload.data) ? (turnsPayload.data as TurnSummary[]) : [];
+          if (after > 0) {
+            if (incoming.length > 0) {
+              updateTurnWindow((current) => {
+                const merged = mergeTurnSummaries(current, incoming);
+                const last = merged.length ? merged[merged.length - 1] : null;
+                const nextTurnNumber =
+                  last && typeof last.turnNumber === "number" ? Math.floor(last.turnNumber) : lastTurnNumberRef.current;
+                if (nextTurnNumber !== lastTurnNumberRef.current) {
+                  missingContextUsageAtTurnRef.current = null;
+                  missingContextUsageTotalsAtTurnRef.current = null;
+                  missingOpenVoteAtTurnRef.current = null;
+                }
+                lastTurnNumberRef.current = nextTurnNumber;
+                return merged;
+              });
+            }
+          } else {
+            updateTurnWindow(incoming);
+            const last = incoming.length ? incoming[incoming.length - 1] : null;
+            const nextTurnNumber = last && typeof last.turnNumber === "number" ? Math.floor(last.turnNumber) : 0;
+            if (nextTurnNumber !== lastTurnNumberRef.current) {
+              missingContextUsageAtTurnRef.current = null;
+              missingContextUsageTotalsAtTurnRef.current = null;
+              missingOpenVoteAtTurnRef.current = null;
+            }
+            lastTurnNumberRef.current = nextTurnNumber;
+            setOldestLoadedTurnNumber(incoming.length ? incoming[0]?.turnNumber ?? null : null);
+            setHasOlderTurns(Boolean(turnsPayload.meta?.hasMore));
+          }
+        }
+      } else {
+        hadNetworkFailure = true;
+      }
+
+      if (hadNetworkFailure) {
         const now = Date.now();
         if (now - lastLoadErrorAtRef.current > 5000) {
           lastLoadErrorAtRef.current = now;
-          showToast("error", message);
-        }
-      }
-
-      if (turnsResponse.ok) {
-        const incoming = Array.isArray(turnsPayload.data) ? (turnsPayload.data as TurnSummary[]) : [];
-        if (after > 0) {
-          if (incoming.length > 0) {
-            updateTurnWindow((current) => {
-              const merged = mergeTurnSummaries(current, incoming);
-              const last = merged.length ? merged[merged.length - 1] : null;
-              const nextTurnNumber =
-                last && typeof last.turnNumber === "number" ? Math.floor(last.turnNumber) : lastTurnNumberRef.current;
-              if (nextTurnNumber !== lastTurnNumberRef.current) {
-                missingContextUsageAtTurnRef.current = null;
-                missingContextUsageTotalsAtTurnRef.current = null;
-                missingOpenVoteAtTurnRef.current = null;
-              }
-              lastTurnNumberRef.current = nextTurnNumber;
-              return merged;
-            });
-          }
-        } else {
-          updateTurnWindow(incoming);
-          const last = incoming.length ? incoming[incoming.length - 1] : null;
-          const nextTurnNumber = last && typeof last.turnNumber === "number" ? Math.floor(last.turnNumber) : 0;
-          if (nextTurnNumber !== lastTurnNumberRef.current) {
-            missingContextUsageAtTurnRef.current = null;
-            missingContextUsageTotalsAtTurnRef.current = null;
-            missingOpenVoteAtTurnRef.current = null;
-          }
-          lastTurnNumberRef.current = nextTurnNumber;
-          setOldestLoadedTurnNumber(incoming.length ? incoming[0]?.turnNumber ?? null : null);
-          setHasOlderTurns(Boolean(turnsPayload.meta?.hasMore));
+          showToast("error", "网络错误：加载失败（将自动重试）");
         }
       }
     } catch (error) {
-      console.error(error);
       const now = Date.now();
       if (now - lastLoadErrorAtRef.current > 5000) {
         lastLoadErrorAtRef.current = now;
@@ -3820,25 +3863,6 @@ export default function DebateDetailPage() {
   const liveDisplayMessage =
     typeof liveMessageNumber === "number" && liveMessageNumber > 0 ? liveMessageNumber : null;
 
-  useEffect(() => {
-    const node = directoryScrollRef.current;
-    if (!node) return;
-    const update = () => setDirectoryViewportHeight(node.clientHeight);
-    update();
-    const observer = new ResizeObserver(() => update());
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-
-  const handleDirectoryRoundHeight = useCallback((round: number, height: number) => {
-    if (!Number.isFinite(height) || height <= 0) return;
-    const nextHeight = Math.ceil(height);
-    setDirectoryRoundHeights((current) => {
-      if (current[round] === nextHeight) return current;
-      return { ...current, [round]: nextHeight };
-    });
-  }, []);
-
   const handleToggleDirectoryRound = useCallback((round: number, open: boolean) => {
     setOpenRoundsByNumber((current) => ({ ...current, [round]: open }));
   }, []);
@@ -3869,6 +3893,8 @@ export default function DebateDetailPage() {
     (debate && debate.currentTurn > 0 ? Math.floor((debate.currentTurn - 1) / agentCount) + 1 : null);
   const currentDirectoryPhase = useMemo(() => {
     if (!currentDirectoryRound) return null;
+    const storedPhase = resolveStoredDirectoryPhase(workflowConfig, debate, currentDirectoryRound);
+    if (storedPhase) return storedPhase;
     const mayBeFinalization = Boolean(debate?.consensusReached || debate?.status === "completed");
     return resolveDirectoryPhaseForRound(
       workflowConfig,
@@ -3877,72 +3903,36 @@ export default function DebateDetailPage() {
       openVoteState,
       currentDirectoryRound
     );
-  }, [currentDirectoryRound, debate?.consensusReached, debate?.status, workflowConfig, openVoteState]);
-
-  const virtualRounds = useMemo(() => {
-    const overscan = 500;
-    const viewportBottom = directoryScrollTop + directoryViewportHeight;
-    const items: Array<{
-      round: number;
-      roundTurns: TurnSummary[];
-      offset: number;
-      estimatedHeight: number;
-      phase: DebateDirectoryPhaseInfo | null;
-      hasInjectedPrompt: boolean;
-      isCurrentPhaseRound: boolean;
-      hasVoteResult: boolean;
-    }> = [];
-    let offset = 0;
-    for (const group of turnRoundGroups) {
-      const round = group.roundNumber;
-      const roundTurns = group.turns;
-      const phase = resolveDirectoryPhaseForRound(
-        workflowConfig,
-        round,
-        Boolean(currentDirectoryPhase?.kind === "finalization"),
-        openVoteState,
-        currentDirectoryRound
-      );
-      const phaseEntryRound = phase ? isPhaseEntryRound(workflowConfig, round, phase.kind) : false;
-      const hasInjectedPrompt = Boolean(phase?.injectedPrompt && phaseEntryRound);
-      const isCurrentPhaseRound = Boolean(currentDirectoryRound === round);
-      const hasVoteResult = Boolean(votePathsByRound[round]);
-      const isOpen = Boolean(openRoundsByNumber[round]);
-      const fallbackHeight = isOpen
-        ? 84 + roundTurns.length * 86 + (hasVoteResult ? 52 : 0) + (phase ? 40 : 0)
-        : 42;
-      const estimatedHeight = directoryRoundHeights[round] ?? fallbackHeight;
-      const visible = offset + estimatedHeight >= directoryScrollTop - overscan && offset <= viewportBottom + overscan;
-      if (visible) {
-        items.push({
-          round,
-          roundTurns,
-          offset,
-          estimatedHeight,
-          phase,
-          hasInjectedPrompt,
-          isCurrentPhaseRound,
-          hasVoteResult
-        });
-      }
-      offset += estimatedHeight;
-    }
-    const topSpacer = items.length ? items[0]!.offset : 0;
-    const last = items.length ? items[items.length - 1]! : null;
-    const bottomSpacer = last ? Math.max(0, offset - (last.offset + last.estimatedHeight)) : 0;
-    return { items, topSpacer, bottomSpacer };
   }, [
-    turnRoundGroups,
-    workflowConfig,
-    currentDirectoryPhase?.kind,
-    openVoteState,
     currentDirectoryRound,
-    votePathsByRound,
-    openRoundsByNumber,
-    directoryRoundHeights,
-    directoryScrollTop,
-    directoryViewportHeight
+    debate,
+    workflowConfig,
+    openVoteState
   ]);
+
+  const directoryRounds = useMemo(() => {
+    return turnRoundGroups.map((group) => {
+      const round = group.roundNumber;
+      const phase =
+        resolveStoredDirectoryPhase(workflowConfig, debate, round) ??
+        resolveDirectoryPhaseForRound(
+          workflowConfig,
+          round,
+          Boolean(currentDirectoryPhase?.kind === "finalization"),
+          openVoteState,
+          currentDirectoryRound
+        );
+      const phaseEntryRound = phase ? isPhaseEntryRound(workflowConfig, round, phase.kind) : false;
+      return {
+        round,
+        roundTurns: group.turns,
+        phase,
+        hasInjectedPrompt: Boolean(phase?.injectedPrompt && phaseEntryRound),
+        isCurrentPhaseRound: Boolean(currentDirectoryRound === round),
+        hasVoteResult: Boolean(votePathsByRound[round])
+      };
+    });
+  }, [turnRoundGroups, workflowConfig, debate, currentDirectoryPhase?.kind, openVoteState, currentDirectoryRound, votePathsByRound]);
 
   useEffect(() => {
     if (turnRoundGroups.length < 1) return;
@@ -3951,14 +3941,6 @@ export default function DebateDetailPage() {
     setOpenRoundsByNumber((current) => {
       if (Object.prototype.hasOwnProperty.call(current, String(lastRound))) return current;
       return { ...current, [lastRound]: true };
-    });
-  }, [turnRoundGroups]);
-
-  useEffect(() => {
-    const validRounds = new Set(turnRoundGroups.map((group) => group.roundNumber));
-    setDirectoryRoundHeights((current) => {
-      const next = Object.fromEntries(Object.entries(current).filter(([round]) => validRounds.has(Number(round))));
-      return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
   }, [turnRoundGroups]);
 
@@ -4514,12 +4496,9 @@ export default function DebateDetailPage() {
         ) : null}
 
         <div
-          ref={directoryScrollRef}
           style={{ minHeight: 0, overflowY: "auto", flex: 1 }}
-          onScroll={(event) => setDirectoryScrollTop(event.currentTarget.scrollTop)}
         >
-          {virtualRounds.topSpacer > 0 ? <div style={{ height: virtualRounds.topSpacer }} /> : null}
-          {virtualRounds.items.map(({ round, roundTurns, phase, hasInjectedPrompt, isCurrentPhaseRound, hasVoteResult }) => {
+          {directoryRounds.map(({ round, roundTurns, phase, hasInjectedPrompt, isCurrentPhaseRound, hasVoteResult }) => {
             return (
               <DebateRoundDirectoryItem
                 key={round}
@@ -4537,11 +4516,9 @@ export default function DebateDetailPage() {
                 onOpenInjectedPrompt={handleOpenInjectedPromptDialog}
                 onOpenVoteRound={handleOpenVoteRound}
                 onSelectTurn={handleSelectDirectoryTurn}
-                onMeasuredHeight={handleDirectoryRoundHeight}
               />
             );
           })}
-          {virtualRounds.bottomSpacer > 0 ? <div style={{ height: virtualRounds.bottomSpacer }} /> : null}
         </div>
       </section>
     </div>
