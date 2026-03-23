@@ -339,13 +339,13 @@ function formatWorkflowRulesMarkdown(raw: string) {
 
   rules.push("**输出与交付**");
   rules.push(
-    `- Phase 4 进入条件：先进入 Phase 3.5 入场表决；自动发起入场表决=${parsed.phaseMachine.transitionRules.finalization.autoOpenVote ? "是" : "否"}；要求全员同意=${parsed.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "是" : "否"}`
+    `- Phase 3 进入条件：先进入 Phase 2.5 入场表决；自动发起入场表决=${parsed.phaseMachine.transitionRules.finalization.autoOpenVote ? "是" : "否"}；要求全员同意=${parsed.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "是" : "否"}`
   );
   rules.push(
     `- 入场表决失败后：继续讨论直到通过=${parsed.phaseMachine.transitionRules.finalization.reopenUntilPassed ? "是" : "否"}；两次投票之间至少讨论轮数=${parsed.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes}`
   );
   rules.push(
-    `- 完成限制：必须先进入 Phase 4 才能完成=${parsed.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "是" : "否"}`
+    `- 完成限制：必须先进入 Phase 3 才能完成=${parsed.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "是" : "否"}`
   );
   rules.push(`- 输出格式：${parsed.promptPolicies.responseFormat.requireMarkdown ? "Markdown" : "不强制 Markdown"}`);
   rules.push(`- 禁止原始 JSON：${parsed.promptPolicies.responseFormat.forbidRawJson ? "是" : "否"}`);
@@ -454,7 +454,29 @@ function getWorkflowEarliestFinalizationRound(workflow: NormalizedDebateWorkflow
 
 function getWorkflowEarliestFinalizationVoteRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
-  return getWorkflowEarliestDeliberationRound(workflow) + getWorkflowPhaseMinRounds(workflow, "deliberation", 0);
+  const minimumDiscussionRounds = Math.max(1, getWorkflowPhaseMinRounds(workflow, "deliberation", 0));
+  return getWorkflowEarliestDeliberationRound(workflow) + minimumDiscussionRounds;
+}
+
+function buildDirectoryRoundSequence(input: {
+  roundGroups: TurnRoundGroup[];
+  votePathsByRound: Record<number, string>;
+  openVoteRound: number | null;
+  liveRound: number | null;
+  currentRound: number | null;
+}) {
+  const rounds = new Set<number>();
+  for (const group of input.roundGroups) {
+    if (Number.isFinite(group.roundNumber) && group.roundNumber > 0) rounds.add(group.roundNumber);
+  }
+  for (const key of Object.keys(input.votePathsByRound)) {
+    const round = Number(key);
+    if (Number.isFinite(round) && round > 0) rounds.add(Math.floor(round));
+  }
+  if (typeof input.openVoteRound === "number" && input.openVoteRound > 0) rounds.add(Math.floor(input.openVoteRound));
+  if (typeof input.liveRound === "number" && input.liveRound > 0) rounds.add(Math.floor(input.liveRound));
+  if (typeof input.currentRound === "number" && input.currentRound > 0) rounds.add(Math.floor(input.currentRound));
+  return [...rounds].sort((a, b) => a - b);
 }
 
 function resolveDirectoryPhaseForRound(
@@ -462,7 +484,9 @@ function resolveDirectoryPhaseForRound(
   round: number,
   allowFinalization = false,
   openVote: OfficialVoteOpenState | null = null,
-  currentRound: number | null = null
+  currentRound: number | null = null,
+  closedVote: OfficialVoteClosed | null = null,
+  hasVoteResult = false
 ): DebateDirectoryPhaseInfo | null {
   if (!workflow?.enabled) return null;
   const phaseByKind = new Map(workflow.phaseMachine.phases.map((phase) => [phase.kind, phase] as const));
@@ -474,6 +498,20 @@ function resolveDirectoryPhaseForRound(
       return phaseByKind.get("finalization_vote") ?? null;
     }
     return phaseByKind.get("finalization") ?? null;
+  }
+  if (closedVote?.kind === "election") {
+    return phaseByKind.get("election") ?? null;
+  }
+  if (closedVote?.kind === "finalization") {
+    return phaseByKind.get("finalization_vote") ?? null;
+  }
+  if (hasVoteResult) {
+    if (round < getWorkflowEarliestDeliberationRound(workflow)) {
+      return phaseByKind.get("election") ?? null;
+    }
+    if (round >= getWorkflowEarliestFinalizationVoteRound(workflow) && round < getWorkflowEarliestFinalizationRound(workflow)) {
+      return phaseByKind.get("finalization_vote") ?? null;
+    }
   }
   if (allowFinalization && round >= getWorkflowEarliestFinalizationRound(workflow)) {
     return phaseByKind.get("finalization") ?? null;
@@ -1826,7 +1864,7 @@ function buildVoteMarkdown(vote: OfficialVoteClosed) {
         ? Math.floor(vote.result.attempt)
         : 1;
 
-    lines.push(`- 结果：${vote.result.passed ? "通过，下一轮进入 Phase 4" : "未通过，继续留在 Phase 3.5"}`);
+    lines.push(`- 结果：${vote.result.passed ? "通过，下一轮进入 Phase 3" : "未通过，继续留在 Phase 2.5"}`);
     lines.push(`- 尝试次数：第 ${attempt} 次`);
     lines.push(`- 需要席位数：${vote.result.requiredSeats}`);
     lines.push(`- 同意：${vote.result.agreeCount}`);
@@ -3215,7 +3253,7 @@ export default function DebateDetailPage() {
     void loadWorkflowRules();
   }, [id, loadDebate, loadQuestionVersionMeta, loadWorkflowRules]);
 
-  async function loadVoteRound(round: number) {
+  const loadVoteRound = useCallback(async (round: number) => {
     if (!id) return null;
     const path = votePathsByRound[round];
     if (!path) return null;
@@ -3235,7 +3273,7 @@ export default function DebateDetailPage() {
     } finally {
       setVoteLoadingRound((current) => (current === round ? null : current));
     }
-  }
+  }, [id, voteLoadingRound, votePathsByRound]);
 
   function buildQuestionCompareRows(oldText: string, newText: string) {
     const oldLines = oldText.replace(/\r\n/g, "\n").split("\n");
@@ -3545,6 +3583,8 @@ export default function DebateDetailPage() {
       lastSseEventAtRef.current = Date.now();
       setLiveStatus("本轮完成（等待保存/下一轮）");
       setIsStreaming(false);
+      void loadVoteIndex();
+      void loadOpenVoteState();
       void loadDebate().catch(() => {});
     });
     source.onerror = () => {
@@ -3558,7 +3598,7 @@ export default function DebateDetailPage() {
       sseConnectedRef.current = false;
       source.close();
     };
-  }, [id, debate?.status, loadDebate]);
+  }, [id, debate?.status, loadDebate, loadOpenVoteState, loadVoteIndex]);
 
   useEffect(() => {
     const debateStatus = debate?.status ?? "";
@@ -4018,8 +4058,16 @@ export default function DebateDetailPage() {
 
   const latestCompletedRound =
     turnRoundGroups.length > 0 ? turnRoundGroups[turnRoundGroups.length - 1]?.roundNumber ?? null : null;
+  const latestVoteRound = useMemo(() => {
+    const rounds = Object.keys(votePathsByRound)
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    return rounds.length > 0 ? Math.max(...rounds) : null;
+  }, [votePathsByRound]);
   const currentDirectoryRound =
     (typeof liveDisplayRound === "number" && liveDisplayRound > 0 ? liveDisplayRound : null) ??
+    (typeof openVoteState?.roundNumber === "number" && openVoteState.roundNumber > 0 ? openVoteState.roundNumber : null) ??
+    latestVoteRound ??
     latestCompletedRound ??
     (debate && debate.currentTurn > 0 ? Math.floor((debate.currentTurn - 1) / agentCount) + 1 : null);
   const currentDirectoryPhase = useMemo(() => {
@@ -4032,18 +4080,30 @@ export default function DebateDetailPage() {
       currentDirectoryRound,
       mayBeFinalization,
       openVoteState,
-      currentDirectoryRound
+      currentDirectoryRound,
+      currentDirectoryRound ? voteByRound[currentDirectoryRound] ?? null : null,
+      currentDirectoryRound ? Boolean(votePathsByRound[currentDirectoryRound]) : false
     );
   }, [
     currentDirectoryRound,
     debate,
     workflowConfig,
-    openVoteState
+    openVoteState,
+    voteByRound,
+    votePathsByRound
   ]);
 
   const directoryRounds = useMemo(() => {
-    return turnRoundGroups.map((group) => {
-      const round = group.roundNumber;
+    const turnsByRound = new Map(turnRoundGroups.map((group) => [group.roundNumber, group.turns] as const));
+    const rounds = buildDirectoryRoundSequence({
+      roundGroups: turnRoundGroups,
+      votePathsByRound,
+      openVoteRound: openVoteState?.roundNumber ?? null,
+      liveRound: liveDisplayRound,
+      currentRound: currentDirectoryRound
+    });
+    return rounds.map((round) => {
+      const roundTurns = turnsByRound.get(round) ?? [];
       const phase =
         resolveStoredDirectoryPhase(workflowConfig, debate, round) ??
         resolveDirectoryPhaseForRound(
@@ -4051,29 +4111,56 @@ export default function DebateDetailPage() {
           round,
           Boolean(currentDirectoryPhase?.kind === "finalization"),
           openVoteState,
-          currentDirectoryRound
+          currentDirectoryRound,
+          voteByRound[round] ?? null,
+          Boolean(votePathsByRound[round])
         );
       const phaseEntryRound = phase ? isPhaseEntryRound(workflowConfig, round, phase.kind) : false;
       return {
         round,
-        roundTurns: group.turns,
+        roundTurns,
         phase,
         hasInjectedPrompt: Boolean(phase?.injectedPrompt && phaseEntryRound),
         isCurrentPhaseRound: Boolean(currentDirectoryRound === round),
         hasVoteResult: Boolean(votePathsByRound[round])
       };
     });
-  }, [turnRoundGroups, workflowConfig, debate, currentDirectoryPhase?.kind, openVoteState, currentDirectoryRound, votePathsByRound]);
+  }, [turnRoundGroups, workflowConfig, debate, currentDirectoryPhase?.kind, openVoteState, currentDirectoryRound, votePathsByRound, voteByRound, liveDisplayRound]);
 
   useEffect(() => {
-    if (turnRoundGroups.length < 1) return;
-    const lastRound = turnRoundGroups[turnRoundGroups.length - 1]?.roundNumber ?? null;
+    const rounds = buildDirectoryRoundSequence({
+      roundGroups: turnRoundGroups,
+      votePathsByRound,
+      openVoteRound: openVoteState?.roundNumber ?? null,
+      liveRound: liveDisplayRound,
+      currentRound: currentDirectoryRound
+    });
+    const lastRound = rounds.length > 0 ? rounds[rounds.length - 1] : null;
     if (!lastRound) return;
     setOpenRoundsByNumber((current) => {
       if (Object.prototype.hasOwnProperty.call(current, String(lastRound))) return current;
       return { ...current, [lastRound]: true };
     });
-  }, [turnRoundGroups]);
+  }, [turnRoundGroups, votePathsByRound, openVoteState?.roundNumber, liveDisplayRound, currentDirectoryRound]);
+
+  useEffect(() => {
+    const roundsToPreload = Object.keys(votePathsByRound)
+      .map((value) => Number(value))
+      .filter((round) => Number.isFinite(round) && round > 0 && !voteByRound[round]);
+    if (roundsToPreload.length <= 0) return;
+    for (const round of roundsToPreload) {
+      void loadVoteRound(round);
+    }
+  }, [votePathsByRound, voteByRound, loadVoteRound]);
+
+  useEffect(() => {
+    if (!followLatest) return;
+    if (liveAvailable) return;
+    if (!currentDirectoryRound) return;
+    if (activeTurnId) return;
+    if (!votePathsByRound[currentDirectoryRound]) return;
+    setActiveVoteRound((current) => (current === currentDirectoryRound ? current : currentDirectoryRound));
+  }, [followLatest, liveAvailable, currentDirectoryRound, activeTurnId, votePathsByRound]);
 
   const allFilesTreeModel = useMemo(
     () =>

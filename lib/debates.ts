@@ -40,7 +40,9 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
           title: "Phase 1 · 议员实战演练",
           kind: "analysis",
           description: "前两轮先独立分析、归类、指出风险，并给出主持人/监管者候选建议。",
-          minRounds: null
+          minRounds: null,
+          injectedPrompt:
+            "【Phase 1】当前仍处于主持人与监管者选举之前的分析阶段。本阶段只能做独立分析、提出候选建议、说明谁适合主持人或监管者以及理由，但禁止正式投票，禁止写“我投谁”，禁止提前宣布谁当选。所有席位现在都还只是议员，真正投票只能等进入 Phase 1.5 后再进行。"
         },
         {
           id: "phase-1-5",
@@ -52,24 +54,24 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
             "【Phase 1.5】当前是主持人与监管者的正式选举轮。你必须基于前面 Phase 1 的实际表现投票，并把判断依据讲清楚。禁止借投票继续推进新设定、新主线或新事件。如果本轮没能选出结果，下一轮会先回到 Phase 1 继续补充发言，之后系统再发起下一次 Phase 1.5 选举。"
         },
         {
-          id: "phase-3",
-          title: "Phase 3 · 动态轮换讨论",
+          id: "phase-2",
+          title: "Phase 2 · 动态轮换讨论",
           kind: "deliberation",
           description: "主持人宣布统一模式，全员围绕创意发散、逻辑审核与方案收敛循环推进。",
           minRounds: null
         },
         {
-          id: "phase-3-5",
-          title: "Phase 3.5 · Phase 4 入场表决",
+          id: "phase-2-5",
+          title: "Phase 2.5 · Phase 3 入场表决",
           kind: "finalization_vote",
-          description: "正式进入 Phase 4 前，先用一整轮检查是否已经具备收束条件，并完成官方入场表决。",
+          description: "正式进入 Phase 3 前，先用一整轮检查是否已经具备收束条件，并完成官方入场表决。",
           minRounds: null,
           injectedPrompt:
-            "【Phase 3.5】当前是进入 Phase 4 前的正式入场表决阶段。你需要先判断：现有争议是否已经收束、关键结构是否稳定、必须交付的文件是否已经具备被汇总的前提。如果支持进入 Phase 4，必须把成熟依据讲清楚；如果反对，也必须明确指出还缺什么。禁止只表态不解释。只有全员同意，下一轮才正式进入 Phase 4。"
+            "【Phase 2.5】当前是进入 Phase 3 前的正式入场表决阶段。你需要先判断：现有争议是否已经收束、关键结构是否稳定、必须交付的文件是否已经具备被汇总的前提。如果支持进入 Phase 3，必须把成熟依据讲清楚；如果反对，也必须明确指出还缺什么。禁止只表态不解释。只有全员同意，下一轮才正式进入 Phase 3。"
         },
         {
-          id: "phase-4",
-          title: "Phase 4 · 共识收敛与最终交付",
+          id: "phase-3",
+          title: "Phase 3 · 共识收敛与最终交付",
           kind: "finalization",
           description: "进入最终表决与最终产物输出，完成收敛与交付。",
           minRounds: null
@@ -115,7 +117,7 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
     consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true },
     promptPolicies: {
       openingPrompt:
-        "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。后发言者的首要任务不是沿着前一个人的结论做一点补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应该直接提出新方案，必要时可以彻底推翻前案。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响，让其他人一眼看懂你的意思。",
+        "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。后发言者的首要任务不是沿着前一个人的结论做一点补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应该直接提出新方案，必要时可以彻底推翻前案。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响，让其他人一眼看懂你的意思。另外，在 Phase 1 和 Phase 1 之前严禁提前投票、严禁写“我投谁”、严禁提前宣布主持人或监管者；那只能在正式进入 Phase 1.5 后发生。",
       round1Fairness: true,
       responseFormat: {
         requireMarkdown: true,
@@ -389,15 +391,18 @@ export async function listDebates(scope: "mine" | "shared" = "mine") {
       const result = await query<Record<string, unknown>>(
         `
           select d.*,
+                 (d.user_id = $1) as is_owner,
                  (select count(*)::int from debate_agents da where da.debate_id = d.id) as agent_count
             from debates d
            where d.is_shared = true
            order by d.updated_at desc
            limit 200
-        `
+        `,
+        [session.userId]
       );
       return result.rows.map((row: Record<string, unknown>) => ({
         ...toListItem(normalizeDebateRow(row)),
+        isOwner: Boolean(row.is_owner),
         agentCount: Number(row.agent_count ?? 0)
       }));
     } catch (error) {
@@ -411,6 +416,7 @@ export async function listDebates(scope: "mine" | "shared" = "mine") {
   const result = await query<Record<string, unknown>>(
     `
       select d.*,
+             true as is_owner,
              (select count(*)::int from debate_agents da where da.debate_id = d.id) as agent_count
         from debates d
        where d.user_id = $1
@@ -420,6 +426,7 @@ export async function listDebates(scope: "mine" | "shared" = "mine") {
   );
   return result.rows.map((row: Record<string, unknown>) => ({
     ...toListItem(normalizeDebateRow(row)),
+    isOwner: Boolean(row.is_owner),
     agentCount: Number(row.agent_count ?? 0)
   }));
 }
@@ -964,6 +971,22 @@ export async function listDebateTurns(
     [debate.id]
   );
   const participantCount = Math.max(1, Number(countResult.rows[0]?.count ?? 0) || 1);
+  const voteRoundRows = await query<{ path: string }>(
+    `
+      select path
+        from debate_files
+       where debate_id = $1
+         and path like 'votes/round-%'
+    `,
+    [debate.id]
+  );
+  const closedVoteRounds = new Set<number>();
+  for (const row of voteRoundRows.rows) {
+    const match = String(row.path ?? "").replace(/\\/g, "/").match(/^votes\/round-([0-9]{1,6})\.json$/);
+    if (!match) continue;
+    const round = Number(match[1]);
+    if (Number.isFinite(round) && round > 0) closedVoteRounds.add(Math.floor(round));
+  }
   const turnRows = await query<Record<string, unknown>>(
     `
       select t.*,
@@ -991,9 +1014,22 @@ export async function listDebateTurns(
   if (limit && rows.length > limit) rows = rows.slice(0, limit);
   if (isBackfill) rows = rows.reverse();
 
+  function mapSpeechRoundIndexToActualRound(speechRoundIndex: number) {
+    if (!Number.isFinite(speechRoundIndex) || speechRoundIndex <= 0) return 1;
+    let actualRound = 0;
+    let spokenRounds = 0;
+    while (spokenRounds < speechRoundIndex) {
+      actualRound += 1;
+      if (closedVoteRounds.has(actualRound)) continue;
+      spokenRounds += 1;
+    }
+    return actualRound;
+  }
+
   const items = rows.map((turn) => {
     const turnNumber = Number(turn.turn_number);
-    const roundNumber = Math.floor((turnNumber - 1) / participantCount) + 1;
+    const speechRoundIndex = Math.floor((turnNumber - 1) / participantCount) + 1;
+    const roundNumber = mapSpeechRoundIndexToActualRound(speechRoundIndex);
     const base = {
       id: String(turn.id),
       turnNumber,
@@ -1037,6 +1073,30 @@ export async function getDebateTurnDetail(id: string, turnNumber: number) {
     [debate.id]
   );
   const participantCount = Math.max(1, Number(countResult.rows[0]?.count ?? 0) || 1);
+  const voteRoundRows = await query<{ path: string }>(
+    `
+      select path
+        from debate_files
+       where debate_id = $1
+         and path like 'votes/round-%'
+    `,
+    [debate.id]
+  );
+  const closedVoteRounds = new Set<number>();
+  for (const voteRow of voteRoundRows.rows) {
+    const match = String(voteRow.path ?? "").replace(/\\/g, "/").match(/^votes\/round-([0-9]{1,6})\.json$/);
+    if (!match) continue;
+    const round = Number(match[1]);
+    if (Number.isFinite(round) && round > 0) closedVoteRounds.add(Math.floor(round));
+  }
+  const speechRoundIndex = Math.floor((safeTurnNumber - 1) / participantCount) + 1;
+  let actualRoundNumber = 0;
+  let spokenRounds = 0;
+  while (spokenRounds < speechRoundIndex) {
+    actualRoundNumber += 1;
+    if (closedVoteRounds.has(actualRoundNumber)) continue;
+    spokenRounds += 1;
+  }
   const result = await query<Record<string, unknown>>(
     `
       select t.*,
@@ -1061,7 +1121,7 @@ export async function getDebateTurnDetail(id: string, turnNumber: number) {
   return {
     id: String(row.id),
     turnNumber: safeTurnNumber,
-    roundNumber: Math.floor((safeTurnNumber - 1) / participantCount) + 1,
+    roundNumber: actualRoundNumber,
     preview: String(row.content_preview ?? ""),
     contentLength: Number(row.content_length ?? 0),
     hasStructuredOutput: Boolean(row.has_structured_output),

@@ -454,7 +454,7 @@ export default function NewDebatePage() {
                           <span className="muted">idea bank</span>
                         </div>
                         <div className="muted">
-                          原始点子库会在 Phase 3 参与筛选；Phase 4 以后默认只读取筛选结果文件。
+                          原始点子库会在 Phase 2 参与筛选；Phase 3 以后默认只读取筛选结果文件。
                         </div>
                         <div className="muted">原始点子库：{workflowIdeaBank.rawIdeaBankPath ?? "（未配置）"}</div>
                         <div className="muted">

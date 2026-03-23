@@ -227,7 +227,8 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
           kind: "analysis",
           description: "前两轮先独立分析、归类、指出风险，并给出主持人/监管者候选建议。",
           minRounds: null,
-          injectedPrompt: null
+          injectedPrompt:
+            "【Phase 1】当前仍处于主持人与监管者选举之前的分析阶段。本阶段只能做独立分析、提出候选建议、说明谁适合主持人或监管者以及理由，但禁止正式投票，禁止写“我投谁”，禁止提前宣布谁当选。所有席位现在都还只是议员，真正投票只能等进入 Phase 1.5 后再进行。"
         },
         {
           id: "phase-1-5",
@@ -239,24 +240,24 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
             "【Phase 1.5】当前是主持人与监管者的正式选举轮。你必须基于前面 Phase 1 已经出现的表现来判断谁适合做主持人、谁适合做监管者，并把判断依据讲清楚。禁止借投票继续推进新设定、新主线或新事件。若本轮无法形成明确结果，下一轮会先回到 Phase 1 继续补充发言，然后系统再发起下一次 Phase 1.5 选举。"
         },
         {
-          id: "phase-3",
-          title: "Phase 3 · 动态轮换讨论",
+          id: "phase-2",
+          title: "Phase 2 · 动态轮换讨论",
           kind: "deliberation",
           description: "主持人宣布统一模式，全员围绕创意发散、逻辑审核与方案收敛循环推进。",
           minRounds: null,
           injectedPrompt: null
         },
         {
-          id: "phase-3-5",
-          title: "Phase 3.5 · Phase 4 入场表决",
+          id: "phase-2-5",
+          title: "Phase 2.5 · Phase 3 入场表决",
           kind: "finalization_vote",
-          description: "在正式进入 Phase 4 前，先统一进入投票确认轮；本轮应聚焦是否已经具备收束条件，并完成入场表决。",
+          description: "在正式进入 Phase 3 前，先统一进入投票确认轮；本轮应聚焦是否已经具备收束条件，并完成入场表决。",
           minRounds: null,
-          injectedPrompt: "【Phase 3.5】你们现在处于进入 Phase 4 之前的正式入场表决阶段。本阶段不是继续无边界发散，也不是直接开始最终交付，而是先判断：当前方案是否已经具备进入最终收束和交付写作的条件。发言重点必须围绕“是否已经可以进入 Phase 4”展开：现有争议是否已经收束、关键缺口是否已经补齐、哪些文件/结构已成熟、哪些风险如果不先补会导致最终总稿失真。你必须说清楚自己的判断依据，然后按规则参与入场投票。只有全员同意，下一轮才会正式进入 Phase 4。"
+          injectedPrompt: "【Phase 2.5】你们现在处于进入 Phase 3 之前的正式入场表决阶段。本阶段不是继续无边界发散，也不是直接开始最终交付，而是先判断：当前方案是否已经具备进入最终收束和交付写作的条件。发言重点必须围绕“是否已经可以进入 Phase 3”展开：现有争议是否已经收束、关键缺口是否已经补齐、哪些文件/结构已成熟、哪些风险如果不先补会导致最终总稿失真。你必须说清楚自己的判断依据，然后按规则参与入场投票。只有全员同意，下一轮才会正式进入 Phase 3。"
         },
         {
-          id: "phase-4",
-          title: "Phase 4 · 共识收敛与最终交付",
+          id: "phase-3",
+          title: "Phase 3 · 共识收敛与最终交付",
           kind: "finalization",
           description: "进入最终表决与最终产物输出，完成收敛与交付。",
           minRounds: null,
@@ -303,7 +304,7 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
     consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true },
     promptPolicies: {
       openingPrompt:
-        "整场讨论都必须讲人话，禁止只丢简短结论、标签或速记句。更重要的是，后发言者的首要任务不是顺着前一个人做轻量补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应当直接提出新方案，必要时可以整体推翻前案并重建。只要提出一个方案、反驳或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响，让其他人一眼看懂你的判断依据。",
+        "整场讨论都必须讲人话，禁止只丢简短结论、标签或速记句。更重要的是，后发言者的首要任务不是顺着前一个人做轻量补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应当直接提出新方案，必要时可以整体推翻前案并重建。只要提出一个方案、反驳或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响，让其他人一眼看懂你的判断依据。另外，在 Phase 1 和 Phase 1 之前严禁提前投票、严禁写“我投谁”、严禁提前宣布主持人或监管者；那只能在正式进入 Phase 1.5 后发生。",
       round1Fairness: true,
       responseFormat: {
         requireMarkdown: true,
@@ -534,14 +535,18 @@ function normalizeRoles(value: unknown) {
 }
 
 function normalizePhaseIdentifier(kind: string, id: string, title: string) {
-  if (kind !== "election") return id;
-  if (id === "phase-2" || title === "Phase 2 · 民主选举") return "phase-1-5";
+  if (kind === "election" && (id === "phase-2" || title === "Phase 2 · 民主选举")) return "phase-1-5";
+  if (kind === "deliberation" && id === "phase-3") return "phase-2";
+  if (kind === "finalization_vote" && id === "phase-3-5") return "phase-2-5";
+  if (kind === "finalization" && id === "phase-4") return "phase-3";
   return id;
 }
 
 function normalizePhaseTitle(kind: string, title: string) {
-  if (kind !== "election") return title;
-  if (title === "Phase 2 · 民主选举") return "Phase 1.5 · 主持人与监管者选举";
+  if (kind === "election" && title === "Phase 2 · 民主选举") return "Phase 1.5 · 主持人与监管者选举";
+  if (kind === "deliberation" && title === "Phase 3 · 动态轮换讨论") return "Phase 2 · 动态轮换讨论";
+  if (kind === "finalization_vote" && title === "Phase 3.5 · Phase 4 入场表决") return "Phase 2.5 · Phase 3 入场表决";
+  if (kind === "finalization" && title === "Phase 4 · 共识收敛与最终交付") return "Phase 3 · 共识收敛与最终交付";
   return title;
 }
 
@@ -554,16 +559,34 @@ function normalizePhaseDescription(kind: string, description: string | null) {
 }
 
 function normalizePhaseInjectedPrompt(kind: string, injectedPrompt: string | null) {
-  if (kind !== "election") return injectedPrompt;
-  if (
-    injectedPrompt &&
-    injectedPrompt.includes("【Phase 2 强化版】") &&
-    !injectedPrompt.includes("【Phase 1.5")
-  ) {
+  if (!injectedPrompt) return injectedPrompt;
+  if (kind === "election") {
+    if (injectedPrompt.includes("【Phase 2 强化版】") && !injectedPrompt.includes("【Phase 1.5")) {
+      return injectedPrompt
+        .replace(/【Phase 2 强化版】/g, "【Phase 1.5 强化版】")
+        .replace(/【Phase 2】/g, "【Phase 1.5】")
+        .replace(/Phase 2/g, "Phase 1.5");
+    }
+    return injectedPrompt;
+  }
+  if (kind === "deliberation") {
     return injectedPrompt
-      .replace(/【Phase 2 强化版】/g, "【Phase 1.5 强化版】")
-      .replace(/【Phase 2】/g, "【Phase 1.5】")
-      .replace(/Phase 2/g, "Phase 1.5");
+      .replace(/【Phase 3 强化版】/g, "【Phase 2 强化版】")
+      .replace(/【Phase 3】/g, "【Phase 2】")
+      .replace(/Phase 3/g, "Phase 2");
+  }
+  if (kind === "finalization_vote") {
+    return injectedPrompt
+      .replace(/【Phase 3\.5 强化版】/g, "【Phase 2.5 强化版】")
+      .replace(/【Phase 3\.5】/g, "【Phase 2.5】")
+      .replace(/Phase 3\.5/g, "Phase 2.5")
+      .replace(/Phase 4/g, "Phase 3");
+  }
+  if (kind === "finalization") {
+    return injectedPrompt
+      .replace(/【Phase 4 强化版】/g, "【Phase 3 强化版】")
+      .replace(/【Phase 4】/g, "【Phase 3】")
+      .replace(/Phase 4/g, "Phase 3");
   }
   return injectedPrompt;
 }
@@ -651,24 +674,24 @@ function normalizePhaseMachine(value: unknown) {
               injectedPrompt: null
             },
             {
-              id: "phase-3",
-              title: "Phase 3 · 动态轮换讨论",
+              id: "phase-2",
+              title: "Phase 2 · 动态轮换讨论",
               kind: "deliberation" as const,
               description: "主持人宣布统一模式，全员围绕创意发散/逻辑审核等模式循环推进。",
               minRounds: null,
               injectedPrompt: null
             },
             {
-              id: "phase-3-5",
-              title: "Phase 3.5 · Phase 4 入场表决",
+              id: "phase-2-5",
+              title: "Phase 2.5 · Phase 3 入场表决",
               kind: "finalization_vote" as const,
-              description: "正式进入 Phase 4 之前，先做一轮入场判断与官方投票确认。",
+              description: "正式进入 Phase 3 之前，先做一轮入场判断与官方投票确认。",
               minRounds: null,
               injectedPrompt: null
             },
             {
-              id: "phase-4",
-              title: "Phase 4 · 共识收敛与最终交付",
+              id: "phase-3",
+              title: "Phase 3 · 共识收敛与最终交付",
               kind: "finalization" as const,
               description: "进入最终表决与最终产物输出，完成收敛与交付。",
               minRounds: null,

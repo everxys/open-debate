@@ -1611,8 +1611,8 @@ type OfficialVote =
       createdAt: string;
     };
 
-const FINALIZATION_VOTE_APPROVE = "同意进入 Phase 4";
-const FINALIZATION_VOTE_REJECT = "不同意，继续 Phase 3";
+const FINALIZATION_VOTE_APPROVE = "同意进入 Phase 3";
+const FINALIZATION_VOTE_REJECT = "不同意，继续 Phase 2";
 
 function buildFinalizationVoteOptions() {
   return [FINALIZATION_VOTE_APPROVE, FINALIZATION_VOTE_REJECT];
@@ -1669,12 +1669,70 @@ function getWorkflowEarliestDeliberationRound(workflow: NormalizedDebateWorkflow
 
 function getWorkflowEarliestFinalizationVoteRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
-  return getWorkflowEarliestDeliberationRound(workflow) + getWorkflowPhaseMinRounds(workflow, "deliberation", 0);
+  const minimumDiscussionRounds = Math.max(1, getWorkflowPhaseMinRounds(workflow, "deliberation", 0));
+  return getWorkflowEarliestDeliberationRound(workflow) + minimumDiscussionRounds;
 }
 
 function getWorkflowEarliestFinalizationRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
   return getWorkflowEarliestFinalizationVoteRound(workflow) + Math.max(0, getWorkflowPhaseMinRounds(workflow, "finalization_vote", 1));
+}
+
+async function listClosedOfficialVoteRounds(userId: string, debateId: string) {
+  try {
+    const result = await query<{ path: string }>(
+      `
+        select f.path
+          from debate_files f
+          join debates d on d.id = f.debate_id
+         where f.debate_id = $1
+           and d.user_id = $2
+           and f.path like 'votes/round-%'
+      `,
+      [debateId, userId]
+    );
+    const rounds = new Set<number>();
+    for (const row of result.rows) {
+      const match = String(row.path ?? "").replace(/\\/g, "/").match(/^votes\/round-([0-9]{1,6})\.json$/);
+      if (!match) continue;
+      const round = Number(match[1]);
+      if (Number.isFinite(round) && round > 0) rounds.add(Math.floor(round));
+    }
+    return [...rounds].sort((a, b) => a - b);
+  } catch (error) {
+    if (getPgErrorCode(error) === "42P01") return [];
+    throw error;
+  }
+}
+
+function mapSpeechRoundIndexToActualRound(speechRoundIndex: number, closedVoteRounds: number[]) {
+  if (!Number.isFinite(speechRoundIndex) || speechRoundIndex <= 0) return 1;
+  const voteRounds = new Set(
+    closedVoteRounds
+      .filter((round) => Number.isFinite(round) && round > 0)
+      .map((round) => Math.floor(round))
+  );
+  let actualRound = 0;
+  let spokenRounds = 0;
+  while (spokenRounds < speechRoundIndex) {
+    actualRound += 1;
+    if (voteRounds.has(actualRound)) continue;
+    spokenRounds += 1;
+  }
+  return actualRound;
+}
+
+function resolveCurrentRoundNumberForWorkflow(input: {
+  currentTurn: number;
+  participantCount: number;
+  openVote: OfficialVote | null;
+  closedVoteRounds: number[];
+}) {
+  if (input.openVote?.status === "open") {
+    return Math.max(1, Math.floor(Number(input.openVote.roundNumber) || 1));
+  }
+  const speechRoundIndex = Math.floor(Math.max(0, input.currentTurn) / Math.max(1, input.participantCount)) + 1;
+  return mapSpeechRoundIndexToActualRound(speechRoundIndex, input.closedVoteRounds);
 }
 
 function getWorkflowEarliestCompletionRound(workflow: NormalizedDebateWorkflow | null) {
@@ -1869,7 +1927,7 @@ function buildWorkflowPhaseInline(input: {
     lines.push(current.injectedPrompt);
   }
   if (current.minRounds) lines.push(`- Minimum rounds for this phase: ${current.minRounds}`);
-  lines.push(`- Earliest Phase 4 vote round: ${getWorkflowEarliestFinalizationVoteRound(input.workflow)}`);
+  lines.push(`- Earliest Phase 3 vote round: ${getWorkflowEarliestFinalizationVoteRound(input.workflow)}`);
   lines.push(`- Earliest finalization round: ${getWorkflowEarliestFinalizationRound(input.workflow)}`);
   lines.push(`- Earliest completion round: ${getWorkflowEarliestCompletionRound(input.workflow)}`);
   const allPhases = input.workflow?.phaseMachine.phases ?? [];
@@ -1942,7 +2000,7 @@ async function loadWorkflowIdeaBankInline(input: {
       lines.push(`- Raw idea bank path: ${rawPath} (do not reopen the raw bank unless you must verify unresolved risk).`);
     }
     lines.push("- In this phase, do not expand the scope again by default.");
-    lines.push("- Focus on whether the debate is ready to enter Phase 4, what blockers remain, and whether the final deliverables can now be consolidated.");
+    lines.push("- Focus on whether the debate is ready to enter Phase 3, what blockers remain, and whether the final deliverables can now be consolidated.");
   } else if (input.phaseKind === "finalization") {
     if (rawPath) {
       lines.push(`- Raw idea bank path: ${rawPath} (do not return to this file by default in finalization).`);
@@ -2133,11 +2191,11 @@ async function loadOpenVoteInline(userId: string, debateId: string, seed?: strin
   const options = optionsList.map((opt) => `- ${opt}`).join("\n");
   if (open.kind === "finalization") {
     return [
-      "OFFICIAL VOTE (OPEN): Phase 4 Entry",
+      "OFFICIAL VOTE (OPEN): Phase 3 Entry",
       `- Title: ${open.title}`,
       `- Round: ${open.roundNumber}`,
       `- Prompt: ${open.prompt}`,
-      "- Rule: every seat must choose the approval option before the debate can enter Phase 4.",
+      "- Rule: every seat must choose the approval option before the debate can enter Phase 3.",
       `- Options:\n${options}`,
       "- How to vote: call tool debate_vote_cast with { choice: '...', reason?: '...' }",
       "- After all seats voted, call tool debate_vote_close to publish the official result."
@@ -2322,23 +2380,23 @@ async function toolVoteOpen(input: {
       return { ok: false, error: "Finalization entry vote requires workflow.json (enabled=true)." };
     }
     if (currentPhase?.kind === "finalization") {
-      return { ok: false, error: "Phase 4 has already been entered; no new entry vote is needed." };
+      return { ok: false, error: "Phase 3 has already been entered; no new entry vote is needed." };
     }
     if (input.roundNumber < getWorkflowEarliestFinalizationVoteRound(workflow)) {
       return {
         ok: false,
-        error: `Phase 4 entry vote can only start from Round ${getWorkflowEarliestFinalizationVoteRound(workflow)}. Current round is ${input.roundNumber}.`
+        error: `Phase 3 entry vote can only start from Round ${getWorkflowEarliestFinalizationVoteRound(workflow)}. Current round is ${input.roundNumber}.`
       };
     }
     const prompt =
       (typeof input.prompt === "string" && input.prompt.trim()) ||
-      "请判断本场辩论是否已经完成充分讨论、所有关键争议是否已收束、是否可以正式进入 Phase 4 做最终交付。只有全员同意，才允许进入 Phase 4。";
+      "请判断本场辩论是否已经完成充分讨论、所有关键争议是否已收束、是否可以正式进入 Phase 3 做最终交付。只有全员同意，才允许进入 Phase 3。";
     const attempt = Math.max(1, Math.floor(Number(input.meta?.attempt) || 1));
     const open: OfficialVote = {
       status: "open",
       kind: "finalization",
       roundNumber: input.roundNumber,
-      title: input.title || `第 ${input.roundNumber} 轮 · Phase 4 入场表决`,
+      title: input.title || `第 ${input.roundNumber} 轮 · Phase 3 入场表决`,
       prompt: prompt.trim(),
       options: buildFinalizationVoteOptions(),
       ballots: [],
@@ -2356,7 +2414,7 @@ async function toolVoteOpen(input: {
   if (currentPhase?.kind !== "finalization") {
     return {
       ok: false,
-      error: `Custom/final vote is only allowed in Phase 4. Current phase: ${currentPhase?.title ?? "unknown"}.`
+      error: `Custom/final vote is only allowed in Phase 3. Current phase: ${currentPhase?.title ?? "unknown"}.`
     };
   }
   if (!input.prompt || !input.prompt.trim()) {
@@ -2809,17 +2867,17 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
 
     const directive = passed
       ? [
-          "# 官方指令：Phase 4 入场表决通过",
+          "# 官方指令：Phase 3 入场表决通过",
           "",
           `- 标题：${open.title}`,
           `- 轮次：${open.roundNumber}`,
           `- 尝试次数：第 ${attempt} 次`,
           `- 结果：全员同意（${agreeCount}/${input.participantCount}）`,
           "",
-          "要求：下一轮开始正式进入 Phase 4，所有席位必须转入最终收束、总汇总和交付写作。"
+          "要求：下一轮开始正式进入 Phase 3，所有席位必须转入最终收束、总汇总和交付写作。"
         ].join("\n")
       : [
-          "# 官方指令：暂不进入 Phase 4",
+          "# 官方指令：暂不进入 Phase 3",
           "",
           `- 标题：${open.title}`,
           `- 轮次：${open.roundNumber}`,
@@ -2828,7 +2886,7 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
           `- 不同意：${disagreeCount}`,
           `- 未投票：${missingVotes}`,
           "",
-          "要求：当前继续留在 Phase 3.5，先进行至少一轮全员补充发言，把争议点、证据链和交付缺口补清楚；之后系统会按 workflow 配置再次发起 Phase 4 入场表决。"
+          "要求：当前继续留在 Phase 2.5，先进行至少一轮全员补充发言，把争议点、证据链和交付缺口补清楚；之后系统会按 workflow 配置再次发起 Phase 3 入场表决。"
         ].join("\n");
     await upsertDebateFile(input.debateId, VOTE_DIRECTIVE_PATH, directive, now);
 
@@ -2837,7 +2895,7 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
       "",
       `- 标题：${open.title}`,
       `- 轮次：${open.roundNumber}`,
-      `- 类型：Phase 4 入场表决`,
+      `- 类型：Phase 3 入场表决`,
       `- 尝试次数：第 ${attempt} 次`,
       passed ? `- 结果：通过（${agreeCount}/${input.participantCount} 全员同意）` : "- 结果：未通过",
       "",
@@ -4531,7 +4589,7 @@ async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
         debateId: input.debateId,
         participantCount: input.participantCount,
         roundNumber: nextRoundNumber,
-        title: `第 ${nextRoundNumber} 轮 · Phase 4 入场表决`,
+        title: `第 ${nextRoundNumber} 轮 · Phase 3 入场表决`,
         kind: "finalization",
         bypassStartRound: false,
         meta: { forcedOpen: true, reason: `after_round_${input.endedRound}` }
@@ -4559,7 +4617,7 @@ async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
         debateId: input.debateId,
         participantCount: input.participantCount,
         roundNumber: nextRoundNumber,
-        title: `第 ${nextRoundNumber} 轮 · Phase 4 入场复投`,
+        title: `第 ${nextRoundNumber} 轮 · Phase 3 入场复投`,
         kind: "finalization",
         bypassStartRound: false,
         meta: {
@@ -4705,8 +4763,8 @@ function buildFallbackVoteAnnouncement(input: {
     "## 结果",
     kind === "finalization"
       ? passed
-        ? "- Phase 4 入场表决已通过"
-        : "- Phase 4 入场表决未通过"
+        ? "- Phase 3 入场表决已通过"
+        : "- Phase 3 入场表决未通过"
       : kind === "custom"
       ? winner
         ? `- Winner：${winner}`
@@ -5162,11 +5220,17 @@ export async function runDebate(id: string, userId: string) {
         );
       }
 
-      const completedRounds = Math.floor(debate.currentTurn / participantCount);
       const workflowBeforeTurn = await loadDebateWorkflow(userId, id);
       const openVoteBeforeTurn = await loadOpenVote(userId, id);
       const latestVoteBeforeTurn = await loadLatestVote(userId, id);
-      const currentRoundNumberBeforeTurn = Math.floor(Math.max(0, debate.currentTurn) / Math.max(1, participantCount)) + 1;
+      const closedVoteRoundsBeforeTurn = await listClosedOfficialVoteRounds(userId, id);
+      const completedSpeakingRounds = Math.floor(debate.currentTurn / participantCount);
+      const currentRoundNumberBeforeTurn = resolveCurrentRoundNumberForWorkflow({
+        currentTurn: debate.currentTurn,
+        participantCount,
+        openVote: openVoteBeforeTurn,
+        closedVoteRounds: closedVoteRoundsBeforeTurn
+      });
       const phaseBeforeTurn = resolveCurrentWorkflowPhase({
         workflow: workflowBeforeTurn,
         roundNumber: currentRoundNumberBeforeTurn,
@@ -5183,7 +5247,7 @@ export async function runDebate(id: string, userId: string) {
         await persistDebatePhaseSnapshot(id, phaseSnapshotBeforeTurn);
         lastKnownPhase = phaseSnapshotBeforeTurn;
       }
-      if (debate.maxTurns > 0 && completedRounds >= debate.maxTurns) {
+      if (debate.maxTurns > 0 && completedSpeakingRounds >= debate.maxTurns) {
         const requiresFinalizationPhase =
           workflowBeforeTurn?.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ?? true;
         const earliestCompletionRound = getWorkflowEarliestCompletionRound(workflowBeforeTurn);
@@ -5210,7 +5274,7 @@ export async function runDebate(id: string, userId: string) {
             phase: lastKnownPhase
           });
         } else {
-          await finishDebate(id, "stopped", "max turns reached before Phase 4", { phase: lastKnownPhase });
+          await finishDebate(id, "stopped", "max turns reached before Phase 3", { phase: lastKnownPhase });
         }
         break;
       }
@@ -5239,9 +5303,11 @@ export async function runDebate(id: string, userId: string) {
             ? String((currentParticipant as any).displayName)
             : "";
       const eventAgentName = `Seat-${seatNumberForEvent}${displayNameForEvent ? ` · ${displayNameForEvent}` : ""}`;
+      const currentSpeechRoundIndex = Math.floor(Math.max(0, debate.currentTurn) / Math.max(1, participantCount)) + 1;
+      const actualRoundNumber = mapSpeechRoundIndexToActualRound(currentSpeechRoundIndex, closedVoteRoundsBeforeTurn);
       setDebateLiveProgress({
         debateId: id,
-        roundNumber: completedRounds + 1,
+        roundNumber: actualRoundNumber,
         messageNumber: debate.currentTurn + 1,
         debateAgentId: String(currentParticipant.id),
         aiAgentId: String(currentParticipant.ai_agent_id),
@@ -5263,7 +5329,7 @@ export async function runDebate(id: string, userId: string) {
         | null = null;
       let retryCount = 0;
       const messageNumber = debate.currentTurn + 1;
-      const roundNumber = completedRounds + 1;
+      const roundNumber = actualRoundNumber;
 
       while (retryCount <= 2) {
         try {
@@ -5536,7 +5602,8 @@ export async function runDebate(id: string, userId: string) {
       const consensus = aggregateConsensusByLastRound(turns, participantCount, workflow?.consensus ?? null);
       const nextTurn = debate.currentTurn + 1;
       const isBoundary = participantCount > 0 ? nextTurn % participantCount === 0 : false;
-      const endedRound = participantCount > 0 ? Math.floor(nextTurn / participantCount) : 0;
+      const endedSpeechRoundIndex = participantCount > 0 ? Math.floor(nextTurn / participantCount) : 0;
+      const endedRound = mapSpeechRoundIndexToActualRound(endedSpeechRoundIndex, closedVoteRoundsBeforeTurn);
       const openVoteBeforeUpdate = await loadOpenVote(userId, id);
       const latestVoteBeforeUpdate = await loadLatestVote(userId, id);
       const mustKeepRunningForVote =
@@ -5550,7 +5617,11 @@ export async function runDebate(id: string, userId: string) {
         persistedPhaseKind: debate.workflowPhaseKind
       });
       const requiresFinalizationPhase = workflow?.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ?? true;
-      const currentRoundNumberAfterTurn = Math.floor(Math.max(0, nextTurn - 1) / Math.max(1, participantCount)) + 1;
+      const currentSpeechRoundIndexAfterTurn = Math.floor(Math.max(0, nextTurn - 1) / Math.max(1, participantCount)) + 1;
+      const currentRoundNumberAfterTurn = mapSpeechRoundIndexToActualRound(
+        currentSpeechRoundIndexAfterTurn,
+        closedVoteRoundsBeforeTurn
+      );
       const canCompleteByPhase =
         requiresFinalizationPhase
           ? finalizationPhase?.kind === "finalization" && currentRoundNumberAfterTurn >= getWorkflowEarliestCompletionRound(workflow)
@@ -5683,7 +5754,7 @@ export async function runDebate(id: string, userId: string) {
                   const workflowPhase = getWorkflowPhaseByKind(workflow, "finalization");
                   const phaseSnapshot = {
                     workflowPhaseKind: "finalization" as const,
-                    workflowPhaseTitle: workflowPhase?.title ?? "Phase 4 · 共识收敛与最终交付",
+                    workflowPhaseTitle: workflowPhase?.title ?? "Phase 3 · 共识收敛与最终交付",
                     workflowPhaseRound: endedRound + 1
                   };
                   await persistDebatePhaseSnapshot(id, phaseSnapshot);
@@ -5692,7 +5763,7 @@ export async function runDebate(id: string, userId: string) {
                   emitDebateLiveEvent(id, {
                     type: "status",
                     debateId: id,
-                    message: `Phase 4 入场表决已通过，第 ${endedRound + 1} 轮起正式进入 Phase 4`,
+                    message: `Phase 3 入场表决已通过，第 ${endedRound + 1} 轮起正式进入 Phase 3`,
                     at: new Date().toISOString()
                   });
                 }

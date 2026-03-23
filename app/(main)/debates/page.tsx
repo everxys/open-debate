@@ -15,6 +15,7 @@ type Debate = {
   runtimeNoticeKind: "recovering" | "recovered" | null;
   runtimeNoticeMessage: string | null;
   runtimeNoticeAt: string | null;
+  isOwner?: boolean;
   agentCount: number;
   createdAt: string;
 };
@@ -46,6 +47,7 @@ function RecoveryBadge(props: {
 export default function DebatesPage() {
   const [debates, setDebates] = useState<Debate[]>([]);
   const [deletingId, setDeletingId] = useState<string>("");
+  const [stoppingId, setStoppingId] = useState<string>("");
   const [scope, setScope] = useState<"mine" | "shared">("mine");
   const [loadError, setLoadError] = useState<string>("");
   const [selectedFinishedIds, setSelectedFinishedIds] = useState<string[]>([]);
@@ -96,6 +98,26 @@ export default function DebatesPage() {
       await load();
     } finally {
       setDeletingId("");
+    }
+  }
+
+  async function stopDebate(id: string) {
+    const target = debates.find((d) => d.id === id);
+    if (!target || !target.isOwner) return;
+    if (!["pending", "running", "paused"].includes(String(target.status))) return;
+    if (!window.confirm("确定终止这场辩论吗？")) return;
+
+    setStoppingId(id);
+    try {
+      const response = await fetch(`/api/debates/${id}/stop`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        window.alert(payload.error?.message ?? "终止失败");
+        return;
+      }
+      await load(scope);
+    } finally {
+      setStoppingId("");
     }
   }
 
@@ -201,11 +223,11 @@ export default function DebatesPage() {
                           runtimeNoticeMessage={debate.runtimeNoticeMessage}
                           runtimeNoticeAt={debate.runtimeNoticeAt}
                         />
-                        {scope === "mine" ? (
+                        {debate.isOwner ? (
                           <>
                             <button
                               className={`btn ${debate.isShared ? "btn-active" : ""}`}
-                              disabled={deletingId === debate.id}
+                              disabled={deletingId === debate.id || stoppingId === debate.id}
                               onClick={async () => {
                                 const response = await fetch(`/api/debates/${debate.id}`, {
                                   method: "PATCH",
@@ -224,7 +246,14 @@ export default function DebatesPage() {
                             </button>
                             <button
                               className="btn btn-danger"
-                              disabled={deletingId === debate.id}
+                              disabled={deletingId === debate.id || stoppingId === debate.id}
+                              onClick={() => void stopDebate(debate.id)}
+                            >
+                              {stoppingId === debate.id ? "终止中..." : "终止"}
+                            </button>
+                            <button
+                              className="btn btn-danger"
+                              disabled={deletingId === debate.id || stoppingId === debate.id}
                               onClick={() => void removeDebate(debate.id)}
                             >
                               {deletingId === debate.id ? "删除中..." : "删除"}
@@ -309,11 +338,11 @@ export default function DebatesPage() {
                           runtimeNoticeMessage={debate.runtimeNoticeMessage}
                           runtimeNoticeAt={debate.runtimeNoticeAt}
                         />
-                        {scope === "mine" ? (
+                        {debate.isOwner ? (
                           <>
                             <button
                               className={`btn ${debate.isShared ? "btn-active" : ""}`}
-                              disabled={deletingId === debate.id}
+                              disabled={deletingId === debate.id || stoppingId === debate.id}
                               onClick={async () => {
                                 const response = await fetch(`/api/debates/${debate.id}`, {
                                   method: "PATCH",
@@ -332,7 +361,7 @@ export default function DebatesPage() {
                             </button>
                             <button
                               className="btn btn-danger"
-                              disabled={deletingId === debate.id}
+                              disabled={deletingId === debate.id || stoppingId === debate.id}
                               onClick={() => void removeDebate(debate.id)}
                             >
                               {deletingId === debate.id ? "删除中..." : "删除"}

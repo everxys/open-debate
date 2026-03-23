@@ -1,5 +1,13 @@
 ## 2026-03-23
 
+- 修复“纯投票轮不算轮次”导致的阶段错位：运行时与 turns API 现在都会把官方投票轮计入实际 round，第三轮如果是纯投票，下一次发言会正确显示为第四轮，不会再把第四轮发言误判成第三轮并继续注入 `Phase 1`
+- 修复发言目录遗漏纯投票轮和 live 新轮：左侧目录现在会把 `votes/round-*.json`、当前 open vote 轮，以及正在生成但尚未落库的新轮次一起并入目录，不再只根据已落库 turn 生成轮次列表
+- 修复投票结果不及时展示：投票结果索引出现后会自动预取该轮结果；在“跟随最新”开启且当前轮是纯投票轮时，主视图也会自动切到该轮投票结果
+- 修复 `Phase 2.5` 过早开启：`Phase 2` 设为 `minRounds = null` 后，之前运行时把“未设限”按 `0` 处理，导致主持人/监管者选举一结束，下一轮就直接自动开 `Phase 2.5` 入场表决。现在前后端统一改成：无论 `Phase 2` 是否配置 `minRounds`，至少先完整进行 1 轮 `Phase 2` 讨论，之后才允许进入 `Phase 2.5`
+- 阶段逻辑残留补修：扩展 workflow 兼容层，对旧数据里 `Phase 3 / 3.5 / 4` 的 injected prompt 也自动改写成新编号 `Phase 2 / 2.5 / 3`，避免标题升级后提示词正文仍在说旧阶段；同时在 `turn_end` 后强制刷新 vote index 和 open vote 状态，修复官方投票刚关闭时目录与投票结果偶发延迟 1 个刷新周期的问题
+- 阶段编号整体前移并修复目录判定：默认 workflow、默认新建辩论配置、示例 workflow、seed 策略里的后续阶段统一改成 `Phase 2 / Phase 2.5 / Phase 3`；目录判定新增“若该轮已有 closed official vote，则优先按该票型认阶段”，修复第 3 轮选举仍显示 `Phase 1`、选举通过后又错跳到旧 `Phase 3.5` 的问题；投票结果文案、自动开票标题和运行时提示也同步改成新编号
+- 辩论列表页新增终止按钮：`/debates` 的“进行中”卡片现在会为创建者显示“终止”按钮，直接调用现有停止接口终止辩论；公开辩论列表也会根据 `isOwner` 正确判断是否显示该按钮，非创建者不会看到也不能终止别人的辩论
+- 禁止首轮抢跑投票：把“Phase 1 与 Phase 1 之前严禁提前投票、严禁写‘我投谁’、严禁提前宣布主持人/监管者”补进默认 workflow、默认新建辩论配置、示例 workflow、民主集中制 seed 策略和母本提示词；同时给 Phase 1 新增显式 injected prompt，要求只能做候选建议，不能做正式表决
 - 辩论攻击性与阶段自由度升级：默认 workflow、默认新建辩论配置、示例 workflow 和民主集中制 seed 策略统一改成 `minRounds = null`，不再用阶段最少轮数硬卡流程；同时把“后发言者优先提出更强替代案、必要时可以直接推翻前案”写进开局提示词、Phase 3 强化提示词和主母本提示词，避免后续 AI 只会围着第一个方案做温和补充
 - 新增一次性迁移脚本：`npm run migrate:workflow-phase-1-5` 会批量扫描数据库里的 `debate_files.workflow.json` 与 `strategy_role_files.debate/workflow.json`，把旧的 `Phase 2 · 民主选举` 选举阶段改写成 canonical 的 `Phase 1.5` 配置，并补齐 `transitionRules.election.reopenUntilPassed / discussionRoundsBetweenVotes`
 - 旧 workflow 数据自动升级：读取旧 `Phase 2 · 民主选举` 配置时会自动按 `Phase 1.5` 解释；策略 workflow 保存、以及用策略创建辩论复制 `workflow.json` 时，也会自动写回 canonical 新格式，旧策略会随着正常使用逐步完成升级
