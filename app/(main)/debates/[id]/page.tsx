@@ -2648,6 +2648,7 @@ export default function DebateDetailPage() {
   const [liveStatus, setLiveStatus] = useState<string>("");
   const [liveText, setLiveText] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [activeLive, setActiveLive] = useState(false);
   const [activeTurnId, setActiveTurnId] = useState<string>("");
   const [activeVoteRound, setActiveVoteRound] = useState<number | null>(null);
   const [followLatest, setFollowLatest] = useState(false);
@@ -3029,6 +3030,7 @@ export default function DebateDetailPage() {
     setLiveAgentName("");
     setLiveStatus("");
     setLiveText("");
+    setActiveLive(false);
     setActiveTurnId("");
     setActiveVoteRound(null);
     setVotePathsByRound({});
@@ -3972,17 +3974,18 @@ export default function DebateDetailPage() {
       if (activeVote) return { kind: "vote" as const, vote: activeVote };
       return { kind: "vote_loading" as const, round: activeVoteRound };
     }
-    const shouldPreferLive = !activeTurnId && followLatest && liveAvailable;
+    const shouldPreferLive = !activeTurnId && liveAvailable && (followLatest || activeLive);
     if (shouldPreferLive) return { kind: "live" as const };
     if (selectedTurn) return { kind: "turn" as const, turn: selectedTurn };
     if (selectedTurnSummary) return { kind: "turn_loading" as const, turn: selectedTurnSummary };
     if (liveAvailable) return { kind: "live" as const };
     return null;
-  }, [activeVoteRound, activeVote, activeTurnId, followLatest, selectedTurn, selectedTurnSummary, liveAvailable]);
+  }, [activeVoteRound, activeVote, activeTurnId, activeLive, followLatest, selectedTurn, selectedTurnSummary, liveAvailable]);
 
   useEffect(() => {
     if (!followLatest) return;
     if (!activeTurnId && activeVoteRound === null) return;
+    setActiveLive(false);
     setActiveTurnId("");
     setActiveVoteRound(null);
   }, [followLatest, activeTurnId, activeVoteRound]);
@@ -4004,10 +4007,11 @@ export default function DebateDetailPage() {
 
   const selectedViewerKey = useMemo(() => {
     if (activeVoteRound !== null) return `__vote_round_${activeVoteRound}`;
+    if (activeLive && liveAvailable) return "__live__";
     if (activeTurnId) return activeTurnId;
     if (liveAvailable) return "__live__";
     return latestTurnSummary?.id ?? "";
-  }, [activeVoteRound, activeTurnId, liveAvailable, latestTurnSummary?.id]);
+  }, [activeVoteRound, activeLive, activeTurnId, liveAvailable, latestTurnSummary?.id]);
 
   useEffect(() => {
     if (followLatest && viewer?.kind === "live") return;
@@ -4037,6 +4041,7 @@ export default function DebateDetailPage() {
   }, []);
 
   function handleOpenVoteRound(round: number) {
+    setActiveLive(false);
     setFollowLatest(false);
     setActiveTurnId("");
     setActiveVoteRound(round);
@@ -4044,6 +4049,7 @@ export default function DebateDetailPage() {
   }
 
   const handleSelectDirectoryTurn = useCallback((turnId: string) => {
+    setActiveLive(false);
     setFollowLatest(false);
     setActiveVoteRound(null);
     setActiveTurnId(turnId);
@@ -4161,6 +4167,12 @@ export default function DebateDetailPage() {
     if (!votePathsByRound[currentDirectoryRound]) return;
     setActiveVoteRound((current) => (current === currentDirectoryRound ? current : currentDirectoryRound));
   }, [followLatest, liveAvailable, currentDirectoryRound, activeTurnId, votePathsByRound]);
+
+  useEffect(() => {
+    if (activeLive && !liveAvailable) {
+      setActiveLive(false);
+    }
+  }, [activeLive, liveAvailable]);
 
   const allFilesTreeModel = useMemo(
     () =>
@@ -4657,6 +4669,7 @@ export default function DebateDetailPage() {
         viewerScrollRef={viewerScrollRef}
         onToggleFollowLatest={() => setFollowLatest((current) => !current)}
         onReturnToCurrent={() => {
+          setActiveLive(true);
           setFollowLatest(true);
           setActiveTurnId("");
           setActiveVoteRound(null);
@@ -4701,6 +4714,7 @@ export default function DebateDetailPage() {
             type="button"
             className="btn"
             onClick={() => {
+              setActiveLive(true);
               setFollowLatest(true);
               setActiveVoteRound(null);
               setActiveTurnId("");

@@ -897,8 +897,29 @@ function parseResponse(raw: string): {
   return { content: raw, structuredOutput: null, parseStatus: "ok" as const };
 }
 
-function buildElectionVoteOnlyContent() {
-  return ["## 选举投票", "", "本轮为角色选举投票轮。本席位仅完成投票，不发表额外意见。"].join("\n");
+function buildElectionVoteOnlyContent(input?: {
+  selections?: Record<string, string>;
+  reason?: string | null;
+  voterSeat?: string | null;
+}) {
+  const lines = ["## 选举投票", ""];
+  if (input?.voterSeat) {
+    lines.push(`投票席位：${input.voterSeat}`);
+    lines.push("");
+  }
+  const pairs = Object.entries(input?.selections ?? {}).map(([role, seat]) => `- ${role}: ${seat}`);
+  if (pairs.length > 0) {
+    lines.push("本席位已提交正式票型：");
+    lines.push(...pairs);
+  } else {
+    lines.push("本轮为角色选举投票轮。本席位仅完成投票，不发表额外意见。");
+  }
+  const reason = typeof input?.reason === "string" ? input.reason.trim() : "";
+  if (reason) {
+    lines.push("");
+    lines.push(`投票理由：${reason}`);
+  }
+  return lines.join("\n");
 }
 
 function buildDemoResponse(debate: DebateRecord, agent: AgentRecord, turnNumber: number) {
@@ -3581,6 +3602,13 @@ async function callProvider(
   ].join("\n");
   const url = resolveChatUrl(agent);
   const overrideSystemPrompt = await loadDebateAgentSystemPrompt(userId, debateAgentId);
+  let electionBallotSummary:
+    | {
+        selections: Record<string, string>;
+        reason: string | null;
+        voterSeat: string | null;
+      }
+    | null = null;
 
   if (process.env.NODE_ENV !== "production" && apiKey.startsWith("demo-")) {
     const estimatedPromptTokens = estimatePromptTokensFromChars(prompt.length);
@@ -3588,6 +3616,7 @@ async function callProvider(
       raw: buildDemoResponse(debate, agent, messageNumber),
       usage: null,
       estimatedPromptTokens,
+      electionBallotSummary,
       diagnostics: {
         provider: agent.provider,
         model: agent.model,
@@ -3707,6 +3736,7 @@ async function callProvider(
             raw: retryText.length >= assistantContent.length ? retryText : assistantContent,
             usage: normalizeUsage(noToolRetry?.usage) ?? usage,
             estimatedPromptTokens,
+            electionBallotSummary,
             diagnostics: {
               provider: agent.provider,
               model: agent.model,
@@ -3724,6 +3754,7 @@ async function callProvider(
             raw: assistantContent,
             usage,
             estimatedPromptTokens,
+            electionBallotSummary,
             diagnostics: {
               provider: agent.provider,
               model: agent.model,
@@ -3737,6 +3768,7 @@ async function callProvider(
           raw: buildDemoResponse(debate, agent, messageNumber),
           usage,
           estimatedPromptTokens,
+          electionBallotSummary,
           diagnostics: {
             provider: agent.provider,
             model: agent.model,
@@ -3813,6 +3845,28 @@ async function callProvider(
             choice,
             reason
           });
+          if (result && typeof result === "object" && (result as { ok?: unknown }).ok) {
+            const ballot = (result as { ballot?: unknown }).ballot;
+            const rawSelections =
+              ballot && typeof ballot === "object" && (ballot as { selections?: unknown }).selections
+                ? ((ballot as { selections?: unknown }).selections as Record<string, unknown>)
+                : {};
+            electionBallotSummary = {
+              selections: Object.fromEntries(
+                Object.entries(rawSelections)
+                  .filter(([, value]) => typeof value === "string" && Boolean(String(value).trim()))
+                  .map(([role, value]) => [String(role), String(value).trim()])
+              ),
+              reason:
+                ballot && typeof ballot === "object" && typeof (ballot as { reason?: unknown }).reason === "string"
+                  ? String((ballot as { reason: string }).reason)
+                  : null,
+              voterSeat:
+                ballot && typeof ballot === "object" && typeof (ballot as { voterSeat?: unknown }).voterSeat === "string"
+                  ? String((ballot as { voterSeat: string }).voterSeat)
+                  : null
+            };
+          }
         } else if (call.function.name === "debate_vote_close") {
           result = await toolVoteClose({ userId, debateId: debate.id, participantCount });
           const closedVote =
@@ -3866,6 +3920,7 @@ async function callProvider(
         raw: fallback.content,
         usage,
         estimatedPromptTokens,
+        electionBallotSummary,
         diagnostics: {
           provider: agent.provider,
           model: agent.model,
@@ -3879,6 +3934,7 @@ async function callProvider(
       raw: buildDemoResponse(debate, agent, messageNumber),
       usage,
       estimatedPromptTokens,
+      electionBallotSummary,
       diagnostics: {
         provider: agent.provider,
         model: agent.model,
@@ -3977,6 +4033,7 @@ async function callProvider(
          raw: content,
          usage: normalizeAnthropicUsage(payload?.usage ?? null),
          estimatedPromptTokens,
+         electionBallotSummary,
          diagnostics: {
            provider: agent.provider,
            model: agent.model,
@@ -4059,6 +4116,28 @@ async function callProvider(
           choice,
           reason
         });
+        if (result && typeof result === "object" && (result as { ok?: unknown }).ok) {
+          const ballot = (result as { ballot?: unknown }).ballot;
+          const rawSelections =
+            ballot && typeof ballot === "object" && (ballot as { selections?: unknown }).selections
+              ? ((ballot as { selections?: unknown }).selections as Record<string, unknown>)
+              : {};
+          electionBallotSummary = {
+            selections: Object.fromEntries(
+              Object.entries(rawSelections)
+                .filter(([, value]) => typeof value === "string" && Boolean(String(value).trim()))
+                .map(([role, value]) => [String(role), String(value).trim()])
+            ),
+            reason:
+              ballot && typeof ballot === "object" && typeof (ballot as { reason?: unknown }).reason === "string"
+                ? String((ballot as { reason: string }).reason)
+                : null,
+            voterSeat:
+              ballot && typeof ballot === "object" && typeof (ballot as { voterSeat?: unknown }).voterSeat === "string"
+                ? String((ballot as { voterSeat: string }).voterSeat)
+                : null
+          };
+        }
       } else if (use.name === "debate_vote_close") {
         result = await toolVoteClose({ userId, debateId: debate.id, participantCount });
         const closedVote =
@@ -4118,6 +4197,7 @@ async function callProvider(
     raw: content,
     usage: normalizeAnthropicUsage(payload?.usage ?? null),
     estimatedPromptTokens,
+    electionBallotSummary,
     diagnostics: {
       provider: agent.provider,
       model: agent.model,
@@ -5327,6 +5407,13 @@ export async function runDebate(id: string, userId: string) {
             toolCallsCount: number;
           }
         | null = null;
+      let electionBallotSummary:
+        | {
+            selections: Record<string, string>;
+            reason: string | null;
+            voterSeat: string | null;
+          }
+        | null = null;
       let retryCount = 0;
       const messageNumber = debate.currentTurn + 1;
       const roundNumber = actualRoundNumber;
@@ -5348,6 +5435,16 @@ export async function runDebate(id: string, userId: string) {
           estimatedPromptTokens =
             typeof (result as { estimatedPromptTokens?: unknown }).estimatedPromptTokens === "number"
               ? Number((result as { estimatedPromptTokens: number }).estimatedPromptTokens)
+              : null;
+          electionBallotSummary =
+            result && typeof result === "object" && "electionBallotSummary" in result
+              ? ((result as {
+                  electionBallotSummary?: {
+                    selections: Record<string, string>;
+                    reason: string | null;
+                    voterSeat: string | null;
+                  } | null;
+                }).electionBallotSummary ?? null)
               : null;
           generationDiagnostics =
             result && typeof result === "object" && "diagnostics" in result
@@ -5383,7 +5480,11 @@ export async function runDebate(id: string, userId: string) {
       const parsed = parseResponse(raw);
       const persistedResponse =
         openVoteBeforeTurn?.status === "open" && openVoteBeforeTurn.kind === "election"
-          ? { ...parsed, content: buildElectionVoteOnlyContent(), structuredOutput: null as StructuredOutput | null }
+          ? {
+              ...parsed,
+              content: buildElectionVoteOnlyContent(electionBallotSummary ?? undefined),
+              structuredOutput: null as StructuredOutput | null
+            }
           : parsed;
       emitDebateLiveEvent(id, {
         type: "status",
