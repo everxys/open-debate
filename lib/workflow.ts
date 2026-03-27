@@ -1,3 +1,15 @@
+export type WorkflowPhaseKind = "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization";
+export type WorkflowContextAccessScope = "shared" | "seat";
+
+export type DebateWorkflowContextAccessRule = {
+  scope?: WorkflowContextAccessScope;
+  pathPrefix?: string;
+  label?: string | null;
+  maxFiles?: number | null;
+  maxCharsPerFile?: number | null;
+  recursive?: boolean;
+};
+
 export type DebateWorkflowConfig = {
   workflowVersion?: number;
   enabled?: boolean;
@@ -5,7 +17,7 @@ export type DebateWorkflowConfig = {
     phases?: Array<{
       id?: string;
       title?: string;
-      kind?: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization";
+      kind?: WorkflowPhaseKind;
       description?: string | null;
       minRounds?: number | null;
       injectedPrompt?: string | null;
@@ -112,6 +124,15 @@ export type DebateWorkflowConfig = {
       newlyInventedIdeasPath?: string | null;
     };
   };
+  contextAccess?: {
+    alwaysRead?: DebateWorkflowContextAccessRule[];
+    readWhenNeeded?: DebateWorkflowContextAccessRule[];
+    unlockAfterPhase?: Array<
+      DebateWorkflowContextAccessRule & {
+        phaseKind?: WorkflowPhaseKind;
+      }
+    >;
+  };
 };
 
 export type NormalizedDebateWorkflow = {
@@ -121,7 +142,7 @@ export type NormalizedDebateWorkflow = {
     phases: Array<{
       id: string;
       title: string;
-      kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization";
+      kind: WorkflowPhaseKind;
       description: string | null;
       minRounds: number | null;
       injectedPrompt: string | null;
@@ -211,9 +232,38 @@ export type NormalizedDebateWorkflow = {
       newlyInventedIdeasPath: string | null;
     };
   };
+  contextAccess: {
+    alwaysRead: Array<{
+      scope: WorkflowContextAccessScope;
+      pathPrefix: string;
+      label: string | null;
+      maxFiles: number;
+      maxCharsPerFile: number;
+      recursive: boolean;
+    }>;
+    readWhenNeeded: Array<{
+      scope: WorkflowContextAccessScope;
+      pathPrefix: string;
+      label: string | null;
+      maxFiles: number;
+      maxCharsPerFile: number;
+      recursive: boolean;
+    }>;
+    unlockAfterPhase: Array<{
+      phaseKind: WorkflowPhaseKind;
+      scope: WorkflowContextAccessScope;
+      pathPrefix: string;
+      label: string | null;
+      maxFiles: number;
+      maxCharsPerFile: number;
+      recursive: boolean;
+    }>;
+  };
 };
 
 export type NormalizedWorkflowRequiredFile = NormalizedDebateWorkflow["deliverables"]["requiredFiles"][number];
+export type NormalizedWorkflowContextAccessRule = NormalizedDebateWorkflow["contextAccess"]["alwaysRead"][number];
+export type NormalizedWorkflowPhaseGateRule = NormalizedDebateWorkflow["contextAccess"]["unlockAfterPhase"][number];
 
 export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
   return {
@@ -228,7 +278,7 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
           description: "前两轮先独立分析、归类、指出风险，并给出主持人/监管者候选建议。",
           minRounds: null,
           injectedPrompt:
-            "【Phase 1】当前仍处于主持人与监管者选举之前的分析阶段。本阶段只能做独立分析、提出候选建议、说明谁适合主持人或监管者以及理由，但禁止正式投票，禁止写“我投谁”，禁止提前宣布谁当选。所有席位现在都还只是议员，真正投票只能等进入 Phase 1.5 后再进行。"
+            "【Phase 1】当前仍处于主持人与监管者选举之前的分析阶段。本阶段只能做独立分析、提出候选建议、说明谁适合主持人或监管者以及理由，但禁止正式投票，禁止写“我投谁”，禁止提前宣布谁当选。所有席位现在都还只是议员，真正投票只能等进入 Phase 1.5 后再进行。表达是硬要求：默认必须用普通人能直接看懂的话来讲，禁止故意写得高深、文绉绉、术语堆叠。只有在前沿科学等内容里，确实没有更合适的日常说法时，才允许保留必要术语；一旦用了术语，必须立刻顺手解释它在这里到底是什么意思、会怎样起作用。"
         },
         {
           id: "phase-1-5",
@@ -237,7 +287,7 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
           description: "用一整轮完成主持人与监管者选举；若未能选出结果，则先回到 Phase 1 补充一轮发言，再重新进入本阶段投票。",
           minRounds: null,
           injectedPrompt:
-            "【Phase 1.5】当前是主持人与监管者的正式选举轮。你必须基于前面 Phase 1 已经出现的表现来判断谁适合做主持人、谁适合做监管者，并把判断依据讲清楚。禁止借投票继续推进新设定、新主线或新事件。若本轮无法形成明确结果，下一轮会先回到 Phase 1 继续补充发言，然后系统再发起下一次 Phase 1.5 选举。"
+            "【Phase 1.5】当前是主持人与监管者的正式选举轮。你必须基于前面 Phase 1 已经出现的表现来判断谁适合做主持人、谁适合做监管者，并把判断依据讲清楚。禁止借投票继续推进新设定、新主线或新事件。若本轮无法形成明确结果，下一轮会先回到 Phase 1 继续补充发言，然后系统再发起下一次 Phase 1.5 选举。表达同样是硬要求：投票理由必须让旁观者直接看懂，禁止拿腔拿调、禁止只丢高端术语。只有涉及确实绕不开的前沿科学名词时，才允许保留术语，但必须顺手解释成人话。"
         },
         {
           id: "phase-2",
@@ -246,7 +296,7 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
           description: "主持人宣布统一模式，全员围绕创意发散、逻辑审核与方案收敛循环推进。",
           minRounds: null,
           injectedPrompt:
-            "【Phase 2】本阶段每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子。禁止一口气平铺十几个点子名然后每个只讲一句。你必须主动做取舍，只挑当前最值得推进、最能说服对手的少数点子展开深打。对每个点子，都要尽量讲清：它具体是什么，你为什么优先选它，它如何运作，它比前案强在哪里，可能会被怎样反驳，你准备怎么回应。你的目标不是“多报几个灵感”，而是拿少数几个点子讲出足够完整的思考过程和说服力，让别的席位真的有可能被你说服。"
+            "【Phase 2】本阶段每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子。禁止一口气平铺十几个点子名然后每个只讲一句。你必须主动做取舍，只挑当前最值得推进、最能说服对手的少数点子展开深打。对每个点子，都要尽量讲清：它具体是什么，你为什么优先选它，它如何运作，它比前案强在哪里，可能会被怎样反驳，你准备怎么回应。你的目标不是“多报几个灵感”，而是拿少数几个点子讲出足够完整的思考过程和说服力，让别的席位真的有可能被你说服。表达是硬要求：默认必须用自然、直接、给人看的语言来写，禁止炫技式术语腔、论文腔、文绉绉的绕法。只有在前沿科学内容里确实绕不开时，才允许少量必要术语，但每个关键术语都要立刻翻成人话。"
         },
         {
           id: "phase-2-5",
@@ -305,7 +355,7 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
     consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true },
     promptPolicies: {
       openingPrompt:
-        "整场讨论都必须讲人话，禁止只丢简短结论、标签或速记句。更重要的是，后发言者的首要任务不是顺着前一个人做轻量补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应当直接提出新方案，必要时可以整体推翻前案并重建。每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子；禁止一口气铺开很多点子却每个只讲一句。只要提出一个方案、反驳或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响、你是怎么想到这一步的，让其他人一眼看懂你的判断依据。另外，在 Phase 1 和 Phase 1 之前严禁提前投票、严禁写“我投谁”、严禁提前宣布主持人或监管者；那只能在正式进入 Phase 1.5 后发生。",
+        "整场讨论都必须把“给人看得懂”当成硬要求。默认必须讲人话，禁止只丢简短结论、标签或速记句，禁止故意写得太高端、太文绉绉、太像术语表。只有在前沿科学等内容里，确实存在绕不开的专业术语时，才允许保留必要术语；一旦用了术语，必须立刻顺手解释它在当前方案里到底是什么意思、如何运作、为什么重要。更重要的是，后发言者的首要任务不是顺着前一个人做轻量补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应当直接提出新方案，必要时可以整体推翻前案并重建。每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子；禁止一口气铺开很多点子却每个只讲一句。只要提出一个方案、反驳或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响、你是怎么想到这一步的，让其他人一眼看懂你的判断依据。另外，在 Phase 1 和 Phase 1 之前严禁提前投票、严禁写“我投谁”、严禁提前宣布主持人或监管者；那只能在正式进入 Phase 1.5 后发生。",
       round1Fairness: true,
       responseFormat: {
         requireMarkdown: true,
@@ -386,6 +436,11 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         eventMappingsPath: "ideas/event-mappings.md",
         newlyInventedIdeasPath: "ideas/newly-invented-ideas.md"
       }
+    },
+    contextAccess: {
+      alwaysRead: [],
+      readWhenNeeded: [],
+      unlockAfterPhase: []
     }
   };
 }
@@ -839,6 +894,76 @@ function normalizeIdeaBank(value: unknown) {
   };
 }
 
+function normalizeContextAccessScope(value: unknown): WorkflowContextAccessScope | null {
+  return value === "shared" || value === "seat" ? value : null;
+}
+
+function normalizeContextAccessRule(
+  value: unknown
+): {
+  scope: WorkflowContextAccessScope;
+  pathPrefix: string;
+  label: string | null;
+  maxFiles: number;
+  maxCharsPerFile: number;
+  recursive: boolean;
+} | null {
+  const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+  const scope = normalizeContextAccessScope(obj?.scope);
+  const pathPrefix = normalizeWorkflowPathPrefix(obj?.pathPrefix);
+  if (!scope || !pathPrefix) return null;
+  return {
+    scope,
+    pathPrefix,
+    label: obj?.label === null ? null : toTrimmedString(obj?.label),
+    maxFiles: toPositiveInt(obj?.maxFiles) ?? 6,
+    maxCharsPerFile: toPositiveInt(obj?.maxCharsPerFile) ?? 4_000,
+    recursive: obj?.recursive === undefined ? true : Boolean(obj?.recursive)
+  };
+}
+
+function normalizeContextAccess(value: unknown): NormalizedDebateWorkflow["contextAccess"] {
+  const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+  const alwaysRead = Array.isArray(obj?.alwaysRead)
+    ? obj.alwaysRead
+        .map((item) => normalizeContextAccessRule(item))
+        .filter((item): item is NormalizedWorkflowContextAccessRule => Boolean(item))
+    : [];
+  const readWhenNeeded = Array.isArray(obj?.readWhenNeeded)
+    ? obj.readWhenNeeded
+        .map((item) => normalizeContextAccessRule(item))
+        .filter((item): item is NormalizedWorkflowContextAccessRule => Boolean(item))
+    : [];
+  const unlockAfterPhase = Array.isArray(obj?.unlockAfterPhase)
+    ? obj.unlockAfterPhase
+        .map((item) => {
+          const rule = normalizeContextAccessRule(item);
+          const phaseKind =
+            typeof item === "object" && item !== null
+              ? ((item as { phaseKind?: unknown }).phaseKind as WorkflowPhaseKind | undefined)
+              : undefined;
+          if (!rule || !phaseKind) return null;
+          if (!["analysis", "election", "deliberation", "finalization_vote", "finalization"].includes(phaseKind)) return null;
+          return { ...rule, phaseKind };
+        })
+        .filter((item): item is NormalizedWorkflowPhaseGateRule => Boolean(item))
+    : [];
+
+  const seen = new Set<string>();
+  const register = (scope: WorkflowContextAccessScope, pathPrefix: string) => {
+    const key = `${scope}:${pathPrefix.toLowerCase()}`;
+    if (seen.has(key)) {
+      throw new Error(`Duplicate contextAccess rule for ${key}`);
+    }
+    seen.add(key);
+  };
+  for (const rule of alwaysRead) register(rule.scope, rule.pathPrefix);
+  for (const rule of readWhenNeeded) register(rule.scope, rule.pathPrefix);
+  for (const rule of unlockAfterPhase) register(rule.scope, rule.pathPrefix);
+
+  return { alwaysRead, readWhenNeeded, unlockAfterPhase };
+}
+
 export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflow | null {
   if (typeof input !== "object" || input === null) return null;
   const anyInput = input as Record<string, unknown>;
@@ -915,6 +1040,12 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
   const promptPolicies = normalizePromptPolicies((anyInput as { promptPolicies?: unknown }).promptPolicies);
   const deliverables = normalizeDeliverables((anyInput as { deliverables?: unknown }).deliverables);
   const ideaBank = normalizeIdeaBank((anyInput as { ideaBank?: unknown }).ideaBank);
+  let contextAccess: NormalizedDebateWorkflow["contextAccess"];
+  try {
+    contextAccess = normalizeContextAccess((anyInput as { contextAccess?: unknown }).contextAccess);
+  } catch {
+    return null;
+  }
 
   return {
     workflowVersion: 1,
@@ -939,7 +1070,8 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
     consensus,
     promptPolicies,
     deliverables,
-    ideaBank
+    ideaBank,
+    contextAccess
   };
 }
 
@@ -1032,6 +1164,33 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
     ideaBank: {
       rawIdeaBankPath: normalized.ideaBank.rawIdeaBankPath,
       derivedFiles: normalized.ideaBank.derivedFiles
+    },
+    contextAccess: {
+      alwaysRead: normalized.contextAccess.alwaysRead.map((rule) => ({
+        scope: rule.scope,
+        pathPrefix: rule.pathPrefix,
+        label: rule.label,
+        maxFiles: rule.maxFiles,
+        maxCharsPerFile: rule.maxCharsPerFile,
+        recursive: rule.recursive
+      })),
+      readWhenNeeded: normalized.contextAccess.readWhenNeeded.map((rule) => ({
+        scope: rule.scope,
+        pathPrefix: rule.pathPrefix,
+        label: rule.label,
+        maxFiles: rule.maxFiles,
+        maxCharsPerFile: rule.maxCharsPerFile,
+        recursive: rule.recursive
+      })),
+      unlockAfterPhase: normalized.contextAccess.unlockAfterPhase.map((rule) => ({
+        phaseKind: rule.phaseKind,
+        scope: rule.scope,
+        pathPrefix: rule.pathPrefix,
+        label: rule.label,
+        maxFiles: rule.maxFiles,
+        maxCharsPerFile: rule.maxCharsPerFile,
+        recursive: rule.recursive
+      }))
     }
   };
 }

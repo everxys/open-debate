@@ -4,12 +4,16 @@ import { decryptSecret } from "@/lib/crypto";
 import { query } from "@/lib/db";
 import { emitDebateLiveEvent, setDebateLiveProgress, clearDebateLiveProgress } from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
+import { indexDebateContextChunk, retrieveRelevantHistory, splitTextIntoRetrievalChunks } from "@/lib/retrieval";
 import { appendServerLog } from "@/lib/server-log";
 import type { AgentRecord, DebateRecord, DebateTurnRecord, StructuredOutput } from "@/lib/types";
 import {
   formatRequiredDeliverableSummary,
   safeParseWorkflowJson,
-  type NormalizedDebateWorkflow
+  type NormalizedDebateWorkflow,
+  type NormalizedWorkflowContextAccessRule,
+  type WorkflowContextAccessScope,
+  type WorkflowPhaseKind
 } from "@/lib/workflow";
 
 const activeDebates = new Set<string>();
@@ -37,10 +41,147 @@ const SEATS_PENDING_REORDER_PATH = "seats/pending_reorder.json";
 const MEMORY_LOG_COMPACT_THRESHOLD_CHARS = 60_000;
 const MEMORY_LOG_KEEP_LAST_LINES = 120;
 const MEMORY_SUMMARY_REFRESH_EVERY_TURNS = 6;
+const PROMPT_HARD_MAX_CHARS_OPENAI = 180_000;
+const PROMPT_HARD_MAX_CHARS_ANTHROPIC = 220_000;
+
+type ResolvedContextAccessRule = {
+  category: "alwaysRead" | "readWhenNeeded" | "unlockAfterPhase";
+  scope: WorkflowContextAccessScope;
+  pathPrefix: string;
+  label: string | null;
+  maxFiles: number;
+  maxCharsPerFile: number;
+  recursive: boolean;
+  phaseKind?: WorkflowPhaseKind;
+};
 
 function isMemoryPath(path: string) {
   const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").trim().toLowerCase();
   return normalized.startsWith("memory/");
+}
+
+function normalizeContextPath(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\/+/, "").trim();
+}
+
+function isDirectChildPath(prefix: string, path: string) {
+  const normalizedPrefix = normalizeContextPath(prefix);
+  const normalizedPath = normalizeContextPath(path);
+  if (!normalizedPath.startsWith(normalizedPrefix)) return false;
+  const rest = normalizedPath.slice(normalizedPrefix.length);
+  return rest.length > 0 && !rest.includes("/");
+}
+
+function hasContextAccessRules(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return false;
+  return (
+    workflow.contextAccess.alwaysRead.length > 0 ||
+    workflow.contextAccess.readWhenNeeded.length > 0 ||
+    workflow.contextAccess.unlockAfterPhase.length > 0
+  );
+}
+
+function getPhaseRank(phaseKind: WorkflowPhaseKind | null | undefined) {
+  switch (phaseKind) {
+    case "analysis":
+      return 1;
+    case "election":
+      return 2;
+    case "deliberation":
+      return 3;
+    case "finalization_vote":
+      return 4;
+    case "finalization":
+      return 5;
+    default:
+      return 0;
+  }
+}
+
+function isPhaseUnlocked(currentPhaseKind: WorkflowPhaseKind | null | undefined, requiredPhaseKind: WorkflowPhaseKind) {
+  return getPhaseRank(currentPhaseKind) >= getPhaseRank(requiredPhaseKind);
+}
+
+function resolveContextAccessRules(
+  workflow: NormalizedDebateWorkflow | null,
+  currentPhaseKind: WorkflowPhaseKind | null | undefined
+) {
+  if (!hasContextAccessRules(workflow)) {
+    return {
+      autoRead: [] as ResolvedContextAccessRule[],
+      readable: [] as ResolvedContextAccessRule[],
+      locked: [] as ResolvedContextAccessRule[]
+    };
+  }
+
+  const autoRead: ResolvedContextAccessRule[] = workflow!.contextAccess.alwaysRead.map((rule) => ({
+    ...rule,
+    category: "alwaysRead"
+  }));
+  const readable: ResolvedContextAccessRule[] = workflow!.contextAccess.readWhenNeeded.map((rule) => ({
+    ...rule,
+    category: "readWhenNeeded"
+  }));
+  const locked: ResolvedContextAccessRule[] = [];
+
+  for (const rule of workflow!.contextAccess.unlockAfterPhase) {
+    if (isPhaseUnlocked(currentPhaseKind, rule.phaseKind)) {
+      autoRead.push({ ...rule, category: "unlockAfterPhase" });
+      readable.push({ ...rule, category: "unlockAfterPhase" });
+    } else {
+      locked.push({ ...rule, category: "unlockAfterPhase" });
+    }
+  }
+
+  return { autoRead, readable, locked };
+}
+
+function matchContextAccessRule(
+  rules: ResolvedContextAccessRule[],
+  scope: WorkflowContextAccessScope,
+  path: string
+) {
+  const normalizedPath = normalizeContextPath(path);
+  return (
+    rules.find((rule) => {
+      if (rule.scope !== scope) return false;
+      const normalizedPrefix = normalizeContextPath(rule.pathPrefix);
+      if (!normalizedPath.startsWith(normalizedPrefix)) return false;
+      return rule.recursive ? true : isDirectChildPath(normalizedPrefix, normalizedPath);
+    }) ?? null
+  );
+}
+
+function buildContextAccessSummaryLines(input: {
+  workflow: NormalizedDebateWorkflow | null;
+  currentPhaseKind: WorkflowPhaseKind | null | undefined;
+}) {
+  if (!hasContextAccessRules(input.workflow)) return [] as string[];
+  const resolved = resolveContextAccessRules(input.workflow, input.currentPhaseKind);
+  const lines = ["Context access policy:"];
+
+  if (resolved.autoRead.length > 0) {
+    lines.push("- Auto-read now:");
+    for (const rule of resolved.autoRead) {
+      lines.push(`  - [${rule.scope}] ${rule.pathPrefix}${rule.label ? ` · ${rule.label}` : ""}`);
+    }
+  }
+
+  if (resolved.readable.length > 0) {
+    lines.push("- Readable on demand:");
+    for (const rule of resolved.readable) {
+      lines.push(`  - [${rule.scope}] ${rule.pathPrefix}${rule.label ? ` · ${rule.label}` : ""}`);
+    }
+  }
+
+  if (resolved.locked.length > 0) {
+    lines.push("- Locked until phase:");
+    for (const rule of resolved.locked) {
+      lines.push(`  - [${rule.scope}] ${rule.pathPrefix} · unlock=${rule.phaseKind}${rule.label ? ` · ${rule.label}` : ""}`);
+    }
+  }
+
+  return lines;
 }
 
 function getPgErrorCode(error: unknown) {
@@ -151,6 +292,85 @@ function estimatePromptTokensFromChars(chars: number) {
   if (!Number.isFinite(chars) || chars <= 0) return null;
   // Heuristic: ~4 chars per token (rough; good enough for a % indicator).
   return Math.max(1, Math.ceil(chars / 4));
+}
+
+const DEFAULT_MAX_INPUT_CHARS = 200_000 * 4; // ~200k tokens default limit
+const OPENAI_COMPAT_MAX_INPUT_CHARS = 180_000;
+
+function clipMessagesToInputLimit(
+  messages: Array<Record<string, unknown>>,
+  maxInputTokens: number | null,
+  hardMaxChars?: number | null
+): Array<Record<string, unknown>> {
+  const tokenBasedMaxChars =
+    typeof maxInputTokens === "number" && maxInputTokens > 0
+      ? Math.floor(maxInputTokens * 4 * 0.9) // 90% of max, leave room for overhead
+      : DEFAULT_MAX_INPUT_CHARS;
+  const maxChars =
+    typeof hardMaxChars === "number" && hardMaxChars > 0
+      ? Math.min(tokenBasedMaxChars, Math.floor(hardMaxChars))
+      : tokenBasedMaxChars;
+
+  let totalChars = 0;
+  for (const msg of messages) {
+    const content = msg.content;
+    if (typeof content === "string") {
+      totalChars += content.length;
+    }
+  }
+
+  if (totalChars <= maxChars) {
+    return messages;
+  }
+
+  // Need to truncate - reduce recent turns inline content
+  const result: Array<Record<string, unknown>> = [];
+  let remainingChars = maxChars;
+
+  for (const msg of messages) {
+    const role = msg.role;
+    const content = msg.content;
+    const toolCalls = msg.tool_calls;
+
+    if (typeof content !== "string") {
+      result.push(msg);
+      continue;
+    }
+
+    if (role === "system") {
+      // Keep system prompt but truncate if needed
+      if (content.length <= remainingChars * 0.5) {
+        result.push(msg);
+        remainingChars -= content.length;
+      } else {
+        const truncated = content.slice(0, Math.floor(remainingChars * 0.5));
+        result.push({ ...msg, content: truncated + "\n\n[Truncated due to input limit]" });
+        remainingChars = 0;
+      }
+    } else if (role === "user") {
+      // Truncate user prompt (contains recent turns)
+      if (content.length <= remainingChars) {
+        result.push(msg);
+        remainingChars -= content.length;
+      } else {
+        const truncated = content.slice(0, remainingChars);
+        result.push({ ...msg, content: truncated + "\n\n[Truncated due to input limit]" });
+        remainingChars = 0;
+      }
+    } else if (role === "assistant") {
+      // Keep assistant messages shorter
+      const keepChars = Math.min(content.length, Math.floor(remainingChars * 0.3));
+      if (keepChars > 0) {
+        const truncated = content.slice(0, keepChars);
+        result.push({ ...msg, content: truncated + (keepChars < content.length ? "\n\n[Truncated]" : "") });
+        remainingChars -= keepChars;
+      }
+    } else {
+      result.push(msg);
+    }
+  }
+
+  return result;
 }
 
 async function loadUsageBaselineByDebateAgentId(userId: string, debateId: string) {
@@ -688,6 +908,26 @@ async function persistMemoryAfterTurn(input: {
       now: input.now
     });
   }
+
+  try {
+    const summary = (await readDebateAgentFile(input.userId, input.debateAgentId, MEMORY_SUMMARY_PATH)) ?? "";
+    if (summary.trim()) {
+      await indexDebateContextChunk({
+        userId: input.userId,
+        debateId: input.debateId,
+        debateAgentId: input.debateAgentId,
+        chunkKey: `memory:${input.debateAgentId}`,
+        sourceType: "memory_summary",
+        sourcePath: MEMORY_SUMMARY_PATH,
+        turnNumberStart: input.turnNumber,
+        turnNumberEnd: input.turnNumber,
+        content: summary,
+        now: input.now
+      });
+    }
+  } catch {
+    // retrieval indexing is best-effort
+  }
 }
 
 async function persistSharedFactsAfterTurn(input: {
@@ -720,6 +960,21 @@ async function persistSharedFactsAfterTurn(input: {
 
   const next = appendWithTrim(current, lines.join("\n"));
   await upsertDebateFile(input.debateId, SHARED_FACTS_PATH, next, input.now);
+  try {
+    await indexDebateContextChunk({
+      userId: input.userId,
+      debateId: input.debateId,
+      chunkKey: "shared_facts:board",
+      sourceType: "shared_facts",
+      sourcePath: SHARED_FACTS_PATH,
+      turnNumberStart: input.turnNumber,
+      turnNumberEnd: input.turnNumber,
+      content: next,
+      now: input.now
+    });
+  } catch {
+    // retrieval indexing is best-effort
+  }
 }
 
 async function persistAnswerAfterTurn(input: {
@@ -955,8 +1210,9 @@ function buildFileToolInstructions(input: {
     description: string | null;
     minChars: number | null;
     minMarkdownHeadings: number | null;
-    requiredSnippets: string[];
-  }>;
+      requiredSnippets: string[];
+    }>;
+  contextAccessLines?: string[];
 }) {
   const allowedPathsText = input.allowedOutputPaths.length > 0 ? input.allowedOutputPaths.join(", ") : "final/, outputs/";
   const lines = [
@@ -966,8 +1222,14 @@ function buildFileToolInstructions(input: {
     "",
     "You also have an output tool:",
     "- debate_files_write: write a debate-level file (use for final deliverables or shared working files).",
+    "- debate_files_read: read an allowed debate-level shared file when the current context policy permits it.",
     `  - Allowed paths: ${allowedPathsText} (Markdown preferred).`,
   ];
+
+  if ((input.contextAccessLines?.length ?? 0) > 0) {
+    lines.push("");
+    lines.push(...(input.contextAccessLines ?? []));
+  }
 
   if (input.requiredFiles.length > 0) {
     lines.push("  - Required deliverables:");
@@ -1039,6 +1301,21 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NormalizedDebateW
     for (const file of workflow.deliverables.requiredFiles) {
       lines.push(`  - ${formatRequiredDeliverableSummary(file, "plain")}`);
     }
+  }
+  if (
+    workflow.contextAccess.alwaysRead.length > 0 ||
+    workflow.contextAccess.readWhenNeeded.length > 0 ||
+    workflow.contextAccess.unlockAfterPhase.length > 0
+  ) {
+    lines.push(
+      `- contextAccess alwaysRead: ${workflow.contextAccess.alwaysRead.length ? workflow.contextAccess.alwaysRead.map((rule) => `[${rule.scope}] ${rule.pathPrefix}`).join(" / ") : "(none)"}`
+    );
+    lines.push(
+      `- contextAccess readWhenNeeded: ${workflow.contextAccess.readWhenNeeded.length ? workflow.contextAccess.readWhenNeeded.map((rule) => `[${rule.scope}] ${rule.pathPrefix}`).join(" / ") : "(none)"}`
+    );
+    lines.push(
+      `- contextAccess unlockAfterPhase: ${workflow.contextAccess.unlockAfterPhase.length ? workflow.contextAccess.unlockAfterPhase.map((rule) => `[${rule.scope}] ${rule.pathPrefix} @ ${rule.phaseKind}`).join(" / ") : "(none)"}`
+    );
   }
   if (workflow.seatOrderRules.length === 0) {
     lines.push("- seatOrderRules: (none)");
@@ -1235,7 +1512,7 @@ async function openAiUsageProbe(args: { url: string; apiKey: string; body: Recor
   return payload?.usage ?? null;
 }
 
-async function loadAgentFilesInline(userId: string, agentId: string) {
+async function loadAgentFilesInline(userId: string, agentId: string, maxChars?: number | null) {
   try {
     const result = await query<{ path: string; content: string }>(
       `
@@ -1258,7 +1535,7 @@ async function loadAgentFilesInline(userId: string, agentId: string) {
     }
 
     if (parts.length === 0) return null;
-    return `Agent files (read-only context):${parts.join("")}`;
+    return `Agent files (read-only context):${clipPromptInlineContent(parts.join(""), maxChars ?? 18_000)}`;
   } catch (error) {
     return null;
   }
@@ -1292,7 +1569,7 @@ async function loadDebateAgentSystemPrompt(userId: string, debateAgentId: string
   }
 }
 
-async function loadDebateAgentFilesInline(userId: string, debateAgentId: string, agentId: string) {
+async function loadDebateAgentFilesInline(userId: string, debateAgentId: string, agentId: string, maxChars?: number | null) {
   try {
     const result = await query<{ path: string; content: string }>(
       `
@@ -1307,7 +1584,7 @@ async function loadDebateAgentFilesInline(userId: string, debateAgentId: string,
     );
 
     if ((result.rowCount ?? 0) === 0) {
-      return loadAgentFilesInline(userId, agentId);
+      return loadAgentFilesInline(userId, agentId, maxChars);
     }
 
     const parts: string[] = [];
@@ -1320,40 +1597,143 @@ async function loadDebateAgentFilesInline(userId: string, debateAgentId: string,
     }
 
     if (parts.length === 0) {
-      return loadAgentFilesInline(userId, agentId);
+      return loadAgentFilesInline(userId, agentId, maxChars);
     }
-    return `Agent files (read-only context):${parts.join("")}`;
+    return `Agent files (read-only context):${clipPromptInlineContent(parts.join(""), maxChars ?? 18_000)}`;
   } catch (error) {
     if (isMissingTableError(error, "debate_agent_files")) {
-      return loadAgentFilesInline(userId, agentId);
+      return loadAgentFilesInline(userId, agentId, maxChars);
     }
-    return loadAgentFilesInline(userId, agentId);
+    return loadAgentFilesInline(userId, agentId, maxChars);
   }
 }
 
-async function loadDebateAgentMemoryInline(userId: string, debateAgentId: string) {
+async function listSeatContextFilesForRule(
+  userId: string,
+  debateAgentId: string,
+  agentId: string,
+  rule: ResolvedContextAccessRule
+) {
+  const prefixLike = `${rule.pathPrefix}%`;
+  const filterRows = (rows: Array<{ path: string; content: string }>) =>
+    rows.filter((row) => (rule.recursive ? true : isDirectChildPath(rule.pathPrefix, String(row.path ?? ""))));
+
+  try {
+    const result = await query<{ path: string; content: string }>(
+      `
+        select f.path, f.content
+          from debate_agent_files f
+          join debate_agents da on da.id = f.debate_agent_id
+          join debates d on d.id = da.debate_id
+         where f.debate_agent_id = $1 and d.user_id = $2 and f.path like $3
+         order by f.path asc
+      `,
+      [debateAgentId, userId, prefixLike]
+    );
+    if ((result.rowCount ?? 0) > 0) {
+      return filterRows(result.rows);
+    }
+  } catch (error) {
+    if (!isMissingTableError(error, "debate_agent_files")) {
+      throw error;
+    }
+  }
+
+  try {
+    const fallback = await query<{ path: string; content: string }>(
+      `
+        select f.path, f.content
+        from ai_agent_files f
+        join ai_agents a on a.id = f.ai_agent_id
+        where f.ai_agent_id = $1 and a.user_id = $2 and f.path like $3
+        order by f.path asc
+      `,
+      [agentId, userId, prefixLike]
+    );
+    return filterRows(fallback.rows);
+  } catch (error) {
+    if (getPgErrorCode(error) === "42P01") return [];
+    throw error;
+  }
+}
+
+async function listSharedContextFilesForRule(userId: string, debateId: string, rule: ResolvedContextAccessRule) {
+  const prefixLike = `${rule.pathPrefix}%`;
+  try {
+    const result = await query<{ path: string; content: string }>(
+      `
+        select f.path, f.content
+          from debate_files f
+          join debates d on d.id = f.debate_id
+         where f.debate_id = $1 and d.user_id = $2 and f.path like $3
+         order by f.path asc
+      `,
+      [debateId, userId, prefixLike]
+    );
+    return result.rows.filter((row) => (rule.recursive ? true : isDirectChildPath(rule.pathPrefix, String(row.path ?? ""))));
+  } catch (error) {
+    if (isMissingTableError(error, "debate_files")) return [];
+    throw error;
+  }
+}
+
+async function loadContextAccessAutoReadInline(input: {
+  userId: string;
+  debateId: string;
+  debateAgentId: string;
+  agentId: string;
+  workflow: NormalizedDebateWorkflow | null;
+  currentPhaseKind: WorkflowPhaseKind | null | undefined;
+}) {
+  if (!hasContextAccessRules(input.workflow)) return null;
+  const resolved = resolveContextAccessRules(input.workflow, input.currentPhaseKind);
+  if (resolved.autoRead.length <= 0) return null;
+
+  const blocks: string[] = ["Context access auto-read files (IMPORTANT):"];
+  for (const rule of resolved.autoRead) {
+    const rows =
+      rule.scope === "shared"
+        ? await listSharedContextFilesForRule(input.userId, input.debateId, rule)
+        : await listSeatContextFilesForRule(input.userId, input.debateAgentId, input.agentId, rule);
+    if (rows.length <= 0) continue;
+    const limitedRows = rows.slice(0, Math.max(1, rule.maxFiles));
+    blocks.push(`- [${rule.scope}] ${rule.pathPrefix}${rule.label ? ` · ${rule.label}` : ""}`);
+    for (const row of limitedRows) {
+      const path = normalizeContextPath(String(row.path ?? ""));
+      const content = clipPromptInlineContent(String(row.content ?? ""), Math.max(400, rule.maxCharsPerFile));
+      blocks.push(`\n---\nFILE: ${path}\n---\n${content}`);
+    }
+    if (rows.length > limitedRows.length) {
+      blocks.push(`[Truncated: ${rows.length - limitedRows.length} more files under ${rule.pathPrefix}]`);
+    }
+  }
+
+  return blocks.length > 1 ? blocks.join("\n") : null;
+}
+
+async function loadDebateAgentMemoryInline(userId: string, debateAgentId: string, maxChars?: number | null) {
   const content = await readDebateAgentFile(userId, debateAgentId, MEMORY_SUMMARY_PATH);
   if (!content) return null;
-  return `Long-term memory (this agent):\n\n${content}`;
+  return `Long-term memory (this agent):\n\n${clipPromptInlineContent(content, maxChars ?? 10_000)}`;
 }
 
-async function loadSharedFactsBoardInline(userId: string, debateId: string) {
+async function loadSharedFactsBoardInline(userId: string, debateId: string, maxChars?: number | null) {
   const content = await readDebateFile(userId, debateId, SHARED_FACTS_PATH);
   if (!content) return null;
-  return `Shared facts board (working notes):\n\n${content}`;
+  return `Shared facts board (working notes):\n\n${clipPromptInlineContent(content, maxChars ?? 10_000)}`;
 }
 
-async function loadDebateSegmentInline(userId: string, debateId: string) {
+async function loadDebateSegmentInline(userId: string, debateId: string, maxChars?: number | null) {
   const content = await readDebateFile(userId, debateId, CONTEXT_SEGMENT_PATH);
   if (!content) return null;
-  return `Segment checkpoint (read-only; summary for continuing the debate):\n\n${content}`;
+  return `Segment checkpoint (read-only; summary for continuing the debate):\n\n${clipPromptInlineContent(content, maxChars ?? 12_000)}`;
 }
 
-async function loadDebateAgentSegmentInline(userId: string, debateId: string, debateAgentId: string) {
+async function loadDebateAgentSegmentInline(userId: string, debateId: string, debateAgentId: string, maxChars?: number | null) {
   const agentContent = await readDebateAgentFile(userId, debateAgentId, CONTEXT_SEGMENT_PATH);
   const content = agentContent ?? (await readDebateFile(userId, debateId, CONTEXT_SEGMENT_PATH));
   if (!content) return null;
-  return `Segment checkpoint (read-only; this seat only):\n\n${content}`;
+  return `Segment checkpoint (read-only; this seat only):\n\n${clipPromptInlineContent(content, maxChars ?? 12_000)}`;
 }
 
 async function loadContextWindowMinTurnNumber(userId: string, debateId: string) {
@@ -1981,6 +2361,78 @@ function buildWorkflowOpeningInline(input: {
 function clipPromptInlineContent(content: string, maxChars = 18_000) {
   if (content.length <= maxChars) return content;
   return `${content.slice(0, maxChars)}\n\n[Truncated: total ${content.length} chars]`;
+}
+
+type PromptSection = {
+  key: string;
+  priority: 0 | 1 | 2 | 3;
+  content: string | null;
+  preferredMaxChars?: number | null;
+};
+
+function getPromptHardMaxChars(agent: Pick<AgentRecord, "provider" | "maxInputTokens" | "contextLength">) {
+  const tokenBudget =
+    typeof (agent.maxInputTokens ?? agent.contextLength) === "number" && Number.isFinite(agent.maxInputTokens ?? agent.contextLength)
+      ? Math.max(20_000, Math.floor(Number(agent.maxInputTokens ?? agent.contextLength) * 4 * 0.82))
+      : agent.provider === "openai"
+        ? PROMPT_HARD_MAX_CHARS_OPENAI
+        : PROMPT_HARD_MAX_CHARS_ANTHROPIC;
+  const providerHardCap = agent.provider === "openai" ? PROMPT_HARD_MAX_CHARS_OPENAI : PROMPT_HARD_MAX_CHARS_ANTHROPIC;
+  return Math.min(tokenBudget, providerHardCap);
+}
+
+function planPromptContext(sections: PromptSection[], hardMaxChars: number) {
+  const normalized = sections
+    .map((section) => ({
+      ...section,
+      content: section.content?.trim() || null
+    }))
+    .filter((section): section is PromptSection & { content: string } => Boolean(section.content));
+
+  let remaining = Math.max(2_000, hardMaxChars);
+  const chosen: string[] = [];
+  for (const priority of [0, 1, 2, 3] as const) {
+    const bucket = normalized.filter((section) => section.priority === priority);
+    for (const section of bucket) {
+      if (remaining <= 0) break;
+      const preferred =
+        typeof section.preferredMaxChars === "number" && Number.isFinite(section.preferredMaxChars) && section.preferredMaxChars > 0
+          ? Math.floor(section.preferredMaxChars)
+          : remaining;
+      const budget = Math.max(600, Math.min(preferred, remaining));
+      const clipped = clipPromptInlineContent(section.content, budget).trim();
+      if (!clipped) continue;
+      chosen.push(clipped);
+      remaining -= clipped.length + 2;
+    }
+  }
+  return chosen.join("\n\n").trim();
+}
+
+function buildRelevantHistoryInline(
+  items: Array<{
+    sourceType: string;
+    sourcePath: string | null;
+    turnNumberStart: number | null;
+    turnNumberEnd: number | null;
+    roundNumber: number | null;
+    content: string;
+    score: number;
+  }>
+) {
+  if (items.length <= 0) return null;
+  const lines = ["Relevant history (retrieved):"];
+  for (const item of items) {
+    const where =
+      item.turnNumberStart !== null
+        ? `turn ${item.turnNumberStart}${item.turnNumberEnd && item.turnNumberEnd !== item.turnNumberStart ? `-${item.turnNumberEnd}` : ""}`
+        : item.roundNumber !== null
+          ? `round ${item.roundNumber}`
+          : item.sourcePath ?? item.sourceType;
+    lines.push(`- ${item.sourceType} · ${where} · score=${item.score.toFixed(3)}`);
+    lines.push(clipPromptInlineContent(item.content, 2_400));
+  }
+  return lines.join("\n");
 }
 
 async function loadWorkflowIdeaBankInline(input: {
@@ -3078,14 +3530,52 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
   return { ok: true, closed, summary };
 }
 
+function describeContextAccessDenied(
+  workflow: NormalizedDebateWorkflow | null,
+  currentPhaseKind: WorkflowPhaseKind | null | undefined,
+  scope: WorkflowContextAccessScope,
+  path: string
+) {
+  if (!hasContextAccessRules(workflow)) return null;
+  const resolved = resolveContextAccessRules(workflow, currentPhaseKind);
+  const lockedRule = matchContextAccessRule(resolved.locked, scope, path);
+  if (lockedRule) {
+    return `LOCKED_UNTIL_PHASE: ${path} requires phase ${lockedRule.phaseKind}`;
+  }
+  return `ACCESS_DENIED: ${path} is not allowed by workflow.contextAccess`;
+}
+
+function isContextPathReadable(
+  workflow: NormalizedDebateWorkflow | null,
+  currentPhaseKind: WorkflowPhaseKind | null | undefined,
+  scope: WorkflowContextAccessScope,
+  path: string
+) {
+  if (!hasContextAccessRules(workflow)) return true;
+  const resolved = resolveContextAccessRules(workflow, currentPhaseKind);
+  return Boolean(matchContextAccessRule([...resolved.autoRead, ...resolved.readable], scope, path));
+}
+
 async function toolListFiles(
   userId: string,
   debateAgentId: string,
   agentId: string,
-  prefix?: string
+  prefix?: string,
+  policy:
+    | {
+        workflow: NormalizedDebateWorkflow | null;
+        currentPhaseKind: WorkflowPhaseKind | null | undefined;
+      }
+    | null = null
 ) {
+  const effectivePrefix = (prefix ?? "").trim();
+  if (policy && hasContextAccessRules(policy.workflow) && effectivePrefix) {
+    if (!isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", effectivePrefix)) {
+      return [describeContextAccessDenied(policy.workflow, policy.currentPhaseKind, "seat", effectivePrefix) ?? `ACCESS_DENIED: ${effectivePrefix}`];
+    }
+  }
   try {
-    const prefixLike = `${(prefix ?? "").trim()}%`;
+    const prefixLike = `${effectivePrefix}%`;
     const result = await query<{ path: string }>(
       `
         select f.path
@@ -3099,7 +3589,9 @@ async function toolListFiles(
       [debateAgentId, userId, prefixLike]
     );
     if ((result.rowCount ?? 0) > 0) {
-      return result.rows.map((row) => String(row.path));
+      return result.rows
+        .map((row) => String(row.path))
+        .filter((path) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", path) : true));
     }
   } catch (error) {
     if (!isMissingTableError(error, "debate_agent_files")) {
@@ -3107,10 +3599,20 @@ async function toolListFiles(
     }
   }
 
-  return toolListFilesFromAgent(userId, agentId, prefix);
+  return toolListFilesFromAgent(userId, agentId, prefix, policy);
 }
 
-async function toolListFilesFromAgent(userId: string, agentId: string, prefix?: string) {
+async function toolListFilesFromAgent(
+  userId: string,
+  agentId: string,
+  prefix?: string,
+  policy:
+    | {
+        workflow: NormalizedDebateWorkflow | null;
+        currentPhaseKind: WorkflowPhaseKind | null | undefined;
+      }
+    | null = null
+) {
   try {
     const prefixLike = `${(prefix ?? "").trim()}%`;
     const result = await query<{ path: string }>(
@@ -3124,14 +3626,30 @@ async function toolListFilesFromAgent(userId: string, agentId: string, prefix?: 
       `,
       [agentId, userId, prefixLike]
     );
-    return result.rows.map((row) => String(row.path));
+    return result.rows
+      .map((row) => String(row.path))
+      .filter((path) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", path) : true));
   } catch (error) {
     if (getPgErrorCode(error) === "42P01") return [];
     throw error;
   }
 }
 
-async function toolReadFile(userId: string, debateAgentId: string, agentId: string, path: string) {
+async function toolReadFile(
+  userId: string,
+  debateAgentId: string,
+  agentId: string,
+  path: string,
+  policy:
+    | {
+        workflow: NormalizedDebateWorkflow | null;
+        currentPhaseKind: WorkflowPhaseKind | null | undefined;
+      }
+    | null = null
+) {
+  if (policy && !isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", path)) {
+    return describeContextAccessDenied(policy.workflow, policy.currentPhaseKind, "seat", path) ?? `ACCESS_DENIED: ${path}`;
+  }
   try {
     const result = await query<{ content: string }>(
       `
@@ -3155,6 +3673,25 @@ async function toolReadFile(userId: string, debateAgentId: string, agentId: stri
   }
 
   return toolReadFileFromAgent(userId, agentId, path);
+}
+
+async function toolReadDebateFile(
+  userId: string,
+  debateId: string,
+  path: string,
+  policy: {
+    workflow: NormalizedDebateWorkflow | null;
+    currentPhaseKind: WorkflowPhaseKind | null | undefined;
+  }
+) {
+  if (!hasContextAccessRules(policy.workflow)) {
+    return `ACCESS_DENIED: ${path} requires workflow.contextAccess rule`;
+  }
+  if (!isContextPathReadable(policy.workflow, policy.currentPhaseKind, "shared", path)) {
+    return describeContextAccessDenied(policy.workflow, policy.currentPhaseKind, "shared", path) ?? `ACCESS_DENIED: ${path}`;
+  }
+  const content = await readDebateFile(userId, debateId, path);
+  return content ?? `NOT_FOUND: ${path}`;
 }
 
 async function toolReadFileFromAgent(userId: string, agentId: string, path: string) {
@@ -3186,7 +3723,13 @@ async function toolSearchFiles(
   userId: string,
   debateAgentId: string,
   agentId: string,
-  queryText: string
+  queryText: string,
+  policy:
+    | {
+        workflow: NormalizedDebateWorkflow | null;
+        currentPhaseKind: WorkflowPhaseKind | null | undefined;
+      }
+    | null = null
 ) {
   const searchQuery = queryText.trim();
   if (!searchQuery) return [];
@@ -3206,15 +3749,17 @@ async function toolSearchFiles(
     );
 
     if ((result.rowCount ?? 0) > 0) {
-      return result.rows.map((row) => {
-        const content = String(row.content ?? "");
-        const lower = content.toLowerCase();
-        const idx = lower.indexOf(searchQuery.toLowerCase());
-        const start = Math.max(0, idx - 120);
-        const end = Math.min(content.length, idx + searchQuery.length + 120);
-        const snippet = content.slice(start, end);
-        return { path: String(row.path), snippet };
-      });
+      return result.rows
+        .filter((row) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", String(row.path ?? "")) : true))
+        .map((row) => {
+          const content = String(row.content ?? "");
+          const lower = content.toLowerCase();
+          const idx = lower.indexOf(searchQuery.toLowerCase());
+          const start = Math.max(0, idx - 120);
+          const end = Math.min(content.length, idx + searchQuery.length + 120);
+          const snippet = content.slice(start, end);
+          return { path: String(row.path), snippet };
+        });
     }
   } catch (error) {
     if (!isMissingTableError(error, "debate_agent_files")) {
@@ -3222,10 +3767,20 @@ async function toolSearchFiles(
     }
   }
 
-  return toolSearchFilesFromAgent(userId, agentId, queryText);
+  return toolSearchFilesFromAgent(userId, agentId, queryText, policy);
 }
 
-async function toolSearchFilesFromAgent(userId: string, agentId: string, queryText: string) {
+async function toolSearchFilesFromAgent(
+  userId: string,
+  agentId: string,
+  queryText: string,
+  policy:
+    | {
+        workflow: NormalizedDebateWorkflow | null;
+        currentPhaseKind: WorkflowPhaseKind | null | undefined;
+      }
+    | null = null
+) {
   const searchQuery = queryText.trim();
   if (!searchQuery) return [];
   try {
@@ -3241,15 +3796,17 @@ async function toolSearchFilesFromAgent(userId: string, agentId: string, queryTe
       [agentId, userId, searchQuery]
     );
 
-    return result.rows.map((row) => {
-      const content = String(row.content ?? "");
-      const lower = content.toLowerCase();
-      const idx = lower.indexOf(searchQuery.toLowerCase());
-      const start = Math.max(0, idx - 120);
-      const end = Math.min(content.length, idx + searchQuery.length + 120);
-      const snippet = content.slice(start, end);
-      return { path: String(row.path), snippet };
-    });
+    return result.rows
+      .filter((row) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", String(row.path ?? "")) : true))
+      .map((row) => {
+        const content = String(row.content ?? "");
+        const lower = content.toLowerCase();
+        const idx = lower.indexOf(searchQuery.toLowerCase());
+        const start = Math.max(0, idx - 120);
+        const end = Math.min(content.length, idx + searchQuery.length + 120);
+        const snippet = content.slice(start, end);
+        return { path: String(row.path), snippet };
+      });
   } catch (error) {
     if (getPgErrorCode(error) === "42P01") return [];
     throw error;
@@ -3266,6 +3823,7 @@ function normalizeDebateOutputPath(rawPath: string, allowedPrefixes?: string[]) 
 }
 
 async function toolDebateFilesWrite(input: {
+  userId: string;
   debateId: string;
   path: string;
   content: string;
@@ -3280,6 +3838,23 @@ async function toolDebateFilesWrite(input: {
   }
   const content = String(input.content ?? "");
   await upsertDebateFile(input.debateId, safePath, content, input.now);
+  try {
+    const chunks = splitTextIntoRetrievalChunks(content, 1_500, 220);
+    for (let index = 0; index < chunks.length; index += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await indexDebateContextChunk({
+        userId: input.userId,
+        debateId: input.debateId,
+        chunkKey: `deliverable:${safePath}:chunk:${index + 1}`,
+        sourceType: "deliverable_file",
+        sourcePath: safePath,
+        content: chunks[index],
+        now: input.now
+      });
+    }
+  } catch {
+    // retrieval indexing is best-effort
+  }
   return { ok: true, path: safePath, size: content.length };
 }
 
@@ -3315,6 +3890,18 @@ function buildOpenAiTools(input: { enableVoting: boolean; allowedOutputPaths: st
           type: "object",
           properties: { query: { type: "string" } },
           required: ["query"]
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "debate_files_read",
+        description: "Read an allowed shared debate file by path.",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"]
         }
       }
     }
@@ -3406,6 +3993,15 @@ function buildAnthropicTools(input: { enableVoting: boolean; allowedOutputPaths:
         properties: { query: { type: "string" } },
         required: ["query"]
       }
+    },
+    {
+      name: "debate_files_read",
+      description: "Read an allowed shared debate file by path.",
+      input_schema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"]
+      }
     }
     ,
     {
@@ -3491,6 +4087,7 @@ async function callProvider(
 
   updateLiveStage("calling_model", `整理上下文：${eventAgentName}`);
   const apiKey = decryptSecret(agent.apiKeyEncrypted);
+  const promptHardMaxChars = getPromptHardMaxChars(agent);
   const recentTurnsInline = await loadRecentTurnsInline(
     userId,
     debate.id,
@@ -3522,6 +4119,10 @@ async function callProvider(
     currentPhase?.kind ?? null,
     agent.maxOutputTokens
   );
+  const contextAccessLines = buildContextAccessSummaryLines({
+    workflow,
+    currentPhaseKind: currentPhase?.kind ?? null
+  });
   const requestedMaxTokens = resolveRequestedMaxTokens(currentOutputMaxTokens);
   const workflowPhaseInline = buildWorkflowPhaseInline({ workflow, debate, roundNumber, openVote, latestVote });
   const workflowOpeningInline = buildWorkflowOpeningInline({ workflow, roundNumber });
@@ -3535,7 +4136,7 @@ async function callProvider(
   const directiveInline = await loadOfficialDirectiveInline(userId, debate.id);
   const announcementInline = await loadVoteAnnouncementInline(userId, debate.id);
   const questionDiffInline = await loadQuestionDiffInline(userId, debate.id);
-  const segmentInline = await loadDebateAgentSegmentInline(userId, debate.id, debateAgentId);
+  const segmentInline = await loadDebateAgentSegmentInline(userId, debate.id, debateAgentId, 12_000);
   const turnInRound = ((messageNumber - 1) % Math.max(1, participantCount)) + 1;
   const roundStart = (roundNumber - 1) * Math.max(1, participantCount) + 1;
   const roundEnd = roundNumber * Math.max(1, participantCount);
@@ -3564,42 +4165,115 @@ async function callProvider(
           ].join("\n")
       : null;
 
+  let relevantHistoryInline: string | null = null;
+  try {
+    const retrievalQuery = [
+      debate.question,
+      currentPhase?.title ?? "",
+      currentPhase?.description ?? "",
+      openVote?.title ?? "",
+      summarizeOptionText(recentTurnsInline ?? "", 4_000)
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    const retrieved = await retrieveRelevantHistory({
+      userId,
+      debateId: debate.id,
+      queryText: retrievalQuery,
+      limit: 6,
+      minTurnNumber: await loadContextWindowMinTurnNumberForDebateAgent(userId, debate.id, debateAgentId),
+      maxChars: 12_000
+    });
+    const gatedRetrieved = retrieved.filter((item) => {
+      if (!hasContextAccessRules(workflow)) return true;
+      if (!item.sourcePath) return true;
+      if (
+        item.sourceType === "deliverable_file" ||
+        item.sourceType === "shared_file" ||
+        item.sourceType === "idea_bank_file"
+      ) {
+        return isContextPathReadable(workflow, currentPhase?.kind ?? null, "shared", item.sourcePath);
+      }
+      if (item.sourceType === "agent_file") {
+        return isContextPathReadable(workflow, currentPhase?.kind ?? null, "seat", item.sourcePath);
+      }
+      return true;
+    });
+    relevantHistoryInline = buildRelevantHistoryInline(gatedRetrieved);
+  } catch (error) {
+    await logRuntimeEvent("warn", "retrieval history failed", {
+      debateId: debate.id,
+      error: describeRuntimeError(error)
+    });
+    relevantHistoryInline = null;
+  }
+
   updateLiveStage("calling_model", `组装提示词：${eventAgentName}`);
-  const prompt = [
-    `Question:\n${debate.question}`,
-    "",
-    ...(questionDiffInline ? [questionDiffInline, ""] : []),
-    ...(seatInline ? [seatInline, ""] : []),
-    "Round semantics (IMPORTANT):",
-    `- Seats: ${participantCount}`,
-    `- 1 round = ${participantCount} messages (each seat speaks once in order).`,
-    `- You are generating: Round ${roundNumber} · Turn ${turnInRound}/${participantCount} (global message #${messageNumber}).`,
-    `- Round ${roundNumber} covers message #${roundStart} ~ #${roundEnd}.`,
-    "- IMPORTANT: Do NOT treat global message # as a seat index (e.g., Round 2 Turn 1 is global #21 when Seats=20).",
-    ...(workflowOpeningInline ? ["", workflowOpeningInline] : []),
-    ...(workflowPhaseInline ? ["", workflowPhaseInline] : []),
-    ...(workflowIdeaBankInline ? ["", workflowIdeaBankInline] : []),
-    ...(votingRuleInline ? [votingRuleInline] : []),
-    ...(messageNumber <= participantCount && (workflow?.promptPolicies.round1Fairness ?? true)
-      ? [
-          "",
-          "Fairness (Round 1): You do not yet have full information about other seats. Do not pre-judge or claim you know other seats' views/roles before they speak."
-        ]
-      : []),
-    "",
-    ...(participantsInline ? [participantsInline, ""] : []),
-    ...(segmentInline ? [segmentInline, ""] : []),
-    ...(directiveInline ? [directiveInline, ""] : []),
-    ...(announcementInline ? [announcementInline, ""] : []),
-    ...(votingActionInline ? [votingActionInline, ""] : []),
-    ...(openVoteInline ? [openVoteInline, ""] : []),
-    ...(recentTurnsInline ? [recentTurnsInline, ""] : []),
-    ...(openVote?.kind === "election"
-      ? ["Election silence rule: this round is vote-only. Do not provide extra discussion content beyond casting your ballot.", ""]
-      : []),
-    "Please respond in Markdown for humans. You may use headings, lists, and code blocks when helpful.",
-    "Do not output a raw JSON object. If you were about to output JSON, convert it to readable Markdown instead."
-  ].join("\n");
+  const prompt = planPromptContext(
+    [
+      {
+        key: "question",
+        priority: 0,
+        preferredMaxChars: 24_000,
+        content: `Question:\n${debate.question}`
+      },
+      { key: "questionDiff", priority: 1, preferredMaxChars: 8_000, content: questionDiffInline },
+      { key: "seat", priority: 0, preferredMaxChars: 3_000, content: seatInline },
+      {
+        key: "roundSemantics",
+        priority: 0,
+        preferredMaxChars: 2_500,
+        content: [
+          "Round semantics (IMPORTANT):",
+          `- Seats: ${participantCount}`,
+          `- 1 round = ${participantCount} messages (each seat speaks once in order).`,
+          `- You are generating: Round ${roundNumber} · Turn ${turnInRound}/${participantCount} (global message #${messageNumber}).`,
+          `- Round ${roundNumber} covers message #${roundStart} ~ #${roundEnd}.`,
+          "- IMPORTANT: Do NOT treat global message # as a seat index."
+        ].join("\n")
+      },
+      { key: "workflowOpening", priority: 0, preferredMaxChars: 12_000, content: workflowOpeningInline },
+      { key: "workflowPhase", priority: 0, preferredMaxChars: 14_000, content: workflowPhaseInline },
+      { key: "workflowIdeaBank", priority: 2, preferredMaxChars: 12_000, content: workflowIdeaBankInline },
+      { key: "votingRule", priority: 0, preferredMaxChars: 1_500, content: votingRuleInline },
+      {
+        key: "round1Fairness",
+        priority: 0,
+        preferredMaxChars: 1_200,
+        content:
+          messageNumber <= participantCount && (workflow?.promptPolicies.round1Fairness ?? true)
+            ? "Fairness (Round 1): You do not yet have full information about other seats. Do not pre-judge or claim you know other seats' views/roles before they speak."
+            : null
+      },
+      { key: "participants", priority: 1, preferredMaxChars: 4_000, content: participantsInline },
+      { key: "segment", priority: 1, preferredMaxChars: 12_000, content: segmentInline },
+      { key: "directive", priority: 0, preferredMaxChars: 8_000, content: directiveInline },
+      { key: "announcement", priority: 1, preferredMaxChars: 6_000, content: announcementInline },
+      { key: "votingAction", priority: 0, preferredMaxChars: 1_500, content: votingActionInline },
+      { key: "openVote", priority: 0, preferredMaxChars: 12_000, content: openVoteInline },
+      { key: "relevantHistory", priority: 3, preferredMaxChars: 12_000, content: relevantHistoryInline },
+      { key: "recentTurns", priority: 1, preferredMaxChars: 28_000, content: recentTurnsInline },
+      {
+        key: "electionSilence",
+        priority: 0,
+        preferredMaxChars: 800,
+        content:
+          openVote?.kind === "election"
+            ? "Election silence rule: this round is vote-only. Do not provide extra discussion content beyond casting your ballot."
+            : null
+      },
+      {
+        key: "responseRules",
+        priority: 0,
+        preferredMaxChars: 700,
+        content: [
+          "Please respond in Markdown for humans. You may use headings, lists, and code blocks when helpful.",
+          "Do not output a raw JSON object. If you were about to output JSON, convert it to readable Markdown instead."
+        ].join("\n")
+      }
+    ],
+    Math.max(24_000, promptHardMaxChars - 28_000)
+  );
   const url = resolveChatUrl(agent);
   const overrideSystemPrompt = await loadDebateAgentSystemPrompt(userId, debateAgentId);
   let electionBallotSummary:
@@ -3615,6 +4289,7 @@ async function callProvider(
     return {
       raw: buildDemoResponse(debate, agent, messageNumber),
       usage: null,
+      promptChars: prompt.length,
       estimatedPromptTokens,
       electionBallotSummary,
       diagnostics: {
@@ -3634,27 +4309,44 @@ async function callProvider(
       buildFileToolInstructions({
         enableVoting: enableVotingTools,
         allowedOutputPaths,
-        requiredFiles: requiredDeliverables
+        requiredFiles: requiredDeliverables,
+        contextAccessLines
       })
     ];
-    const inline = await loadDebateAgentFilesInline(userId, debateAgentId, agent.id);
+    const inline = hasContextAccessRules(workflow)
+      ? await loadContextAccessAutoReadInline({
+          userId,
+          debateId: debate.id,
+          debateAgentId,
+          agentId: agent.id,
+          workflow,
+          currentPhaseKind: currentPhase?.kind ?? null
+        })
+      : await loadDebateAgentFilesInline(userId, debateAgentId, agent.id, 18_000);
     if (inline) systemParts.push(inline);
     const allowLongTermContext = messageNumber > participantCount;
     if (allowLongTermContext) {
-      const memoryInline = await loadDebateAgentMemoryInline(userId, debateAgentId);
+      const memoryInline = await loadDebateAgentMemoryInline(userId, debateAgentId, 10_000);
       if (memoryInline) systemParts.push(memoryInline);
       if (debate.enableSharedFacts) {
-        const sharedInline = await loadSharedFactsBoardInline(userId, debate.id);
+        const sharedInline = await loadSharedFactsBoardInline(userId, debate.id, 10_000);
         if (sharedInline) systemParts.push(sharedInline);
       }
     }
     systemParts.push(buildResponseFormatInstructions(responseFormatPolicy));
-    const estimatedPromptTokens = estimatePromptTokensFromChars(systemParts.join("\n\n").length + prompt.length);
+    const promptChars = systemParts.join("\n\n").length + prompt.length;
+    const estimatedPromptTokens = estimatePromptTokensFromChars(promptChars);
 
-    const messages: Array<Record<string, unknown>> = [
+    const rawMessages: Array<Record<string, unknown>> = [
       { role: "system", content: systemParts.join("\n\n") },
       { role: "user", content: prompt }
     ];
+    const effectiveMaxInputTokens = agent.maxInputTokens ?? agent.contextLength;
+    const messages = clipMessagesToInputLimit(
+      rawMessages,
+      effectiveMaxInputTokens,
+      OPENAI_COMPAT_MAX_INPUT_CHARS
+    );
 
     const normalizeUsage = (usage: unknown) => {
       if (!usage || typeof usage !== "object") return null;
@@ -3735,6 +4427,7 @@ async function callProvider(
           return {
             raw: retryText.length >= assistantContent.length ? retryText : assistantContent,
             usage: normalizeUsage(noToolRetry?.usage) ?? usage,
+            promptChars,
             estimatedPromptTokens,
             electionBallotSummary,
             diagnostics: {
@@ -3753,6 +4446,7 @@ async function callProvider(
           return {
             raw: assistantContent,
             usage,
+            promptChars,
             estimatedPromptTokens,
             electionBallotSummary,
             diagnostics: {
@@ -3767,6 +4461,7 @@ async function callProvider(
         return {
           raw: buildDemoResponse(debate, agent, messageNumber),
           usage,
+          promptChars,
           estimatedPromptTokens,
           electionBallotSummary,
           diagnostics: {
@@ -3795,17 +4490,33 @@ async function callProvider(
             typeof (args as { prefix?: unknown }).prefix === "string"
               ? ((args as { prefix: string }).prefix as string)
               : undefined;
-          result = await toolListFiles(userId, debateAgentId, agent.id, prefix);
+          result = await toolListFiles(userId, debateAgentId, agent.id, prefix, {
+            workflow,
+            currentPhaseKind: currentPhase?.kind ?? null
+          });
         } else if (call.function.name === "agent_files_read") {
           const path = String((args as { path?: unknown }).path ?? "");
-          result = await toolReadFile(userId, debateAgentId, agent.id, path);
+          result = await toolReadFile(userId, debateAgentId, agent.id, path, {
+            workflow,
+            currentPhaseKind: currentPhase?.kind ?? null
+          });
         } else if (call.function.name === "agent_files_search") {
           const queryText = String((args as { query?: unknown }).query ?? "");
-          result = await toolSearchFiles(userId, debateAgentId, agent.id, queryText);
+          result = await toolSearchFiles(userId, debateAgentId, agent.id, queryText, {
+            workflow,
+            currentPhaseKind: currentPhase?.kind ?? null
+          });
+        } else if (call.function.name === "debate_files_read") {
+          const path = String((args as { path?: unknown }).path ?? "");
+          result = await toolReadDebateFile(userId, debate.id, path, {
+            workflow,
+            currentPhaseKind: currentPhase?.kind ?? null
+          });
         } else if (call.function.name === "debate_files_write") {
           const path = String((args as { path?: unknown }).path ?? "");
           const content = String((args as { content?: unknown }).content ?? "");
           result = await toolDebateFilesWrite({
+            userId,
             debateId: debate.id,
             path,
             content,
@@ -3919,6 +4630,7 @@ async function callProvider(
       return {
         raw: fallback.content,
         usage,
+        promptChars,
         estimatedPromptTokens,
         electionBallotSummary,
         diagnostics: {
@@ -3933,6 +4645,7 @@ async function callProvider(
     return {
       raw: buildDemoResponse(debate, agent, messageNumber),
       usage,
+      promptChars,
       estimatedPromptTokens,
       electionBallotSummary,
       diagnostics: {
@@ -3951,24 +4664,37 @@ async function callProvider(
     buildFileToolInstructions({
       enableVoting: enableVotingTools,
       allowedOutputPaths,
-      requiredFiles: requiredDeliverables
+      requiredFiles: requiredDeliverables,
+      contextAccessLines
     })
   ];
-  const inline = await loadDebateAgentFilesInline(userId, debateAgentId, agent.id);
+  const inline = hasContextAccessRules(workflow)
+    ? await loadContextAccessAutoReadInline({
+        userId,
+        debateId: debate.id,
+        debateAgentId,
+        agentId: agent.id,
+        workflow,
+        currentPhaseKind: currentPhase?.kind ?? null
+      })
+    : await loadDebateAgentFilesInline(userId, debateAgentId, agent.id, 18_000);
   if (inline) systemParts.push(inline);
   const allowLongTermContext = messageNumber > participantCount;
   if (allowLongTermContext) {
-    const memoryInline = await loadDebateAgentMemoryInline(userId, debateAgentId);
+    const memoryInline = await loadDebateAgentMemoryInline(userId, debateAgentId, 10_000);
     if (memoryInline) systemParts.push(memoryInline);
     if (debate.enableSharedFacts) {
-      const sharedInline = await loadSharedFactsBoardInline(userId, debate.id);
+      const sharedInline = await loadSharedFactsBoardInline(userId, debate.id, 10_000);
       if (sharedInline) systemParts.push(sharedInline);
     }
   }
   systemParts.push(buildResponseFormatInstructions(responseFormatPolicy));
-  const estimatedPromptTokens = estimatePromptTokensFromChars(systemParts.join("\n\n").length + prompt.length);
+  const promptChars = systemParts.join("\n\n").length + prompt.length;
+  const estimatedPromptTokens = estimatePromptTokensFromChars(promptChars);
 
-  const messages: Array<Record<string, unknown>> = [{ role: "user", content: prompt }];
+  const rawMessages: Array<Record<string, unknown>> = [{ role: "user", content: prompt }];
+  const effectiveMaxInputTokens = agent.maxInputTokens ?? agent.contextLength;
+  const messages = clipMessagesToInputLimit(rawMessages, effectiveMaxInputTokens, PROMPT_HARD_MAX_CHARS_ANTHROPIC);
 
   const normalizeAnthropicUsage = (usage: unknown) => {
     if (!usage || typeof usage !== "object") return null;
@@ -4032,6 +4758,7 @@ async function callProvider(
        return {
          raw: content,
          usage: normalizeAnthropicUsage(payload?.usage ?? null),
+         promptChars,
          estimatedPromptTokens,
          electionBallotSummary,
          diagnostics: {
@@ -4055,17 +4782,33 @@ async function callProvider(
           typeof (use.input as { prefix?: unknown }).prefix === "string"
             ? ((use.input as { prefix: string }).prefix as string)
             : undefined;
-        result = await toolListFiles(userId, debateAgentId, agent.id, prefix);
+        result = await toolListFiles(userId, debateAgentId, agent.id, prefix, {
+          workflow,
+          currentPhaseKind: currentPhase?.kind ?? null
+        });
       } else if (use.name === "agent_files_read") {
         const path = String((use.input as { path?: unknown }).path ?? "");
-        result = await toolReadFile(userId, debateAgentId, agent.id, path);
+        result = await toolReadFile(userId, debateAgentId, agent.id, path, {
+          workflow,
+          currentPhaseKind: currentPhase?.kind ?? null
+        });
       } else if (use.name === "agent_files_search") {
         const queryText = String((use.input as { query?: unknown }).query ?? "");
-        result = await toolSearchFiles(userId, debateAgentId, agent.id, queryText);
+        result = await toolSearchFiles(userId, debateAgentId, agent.id, queryText, {
+          workflow,
+          currentPhaseKind: currentPhase?.kind ?? null
+        });
+      } else if (use.name === "debate_files_read") {
+        const path = String((use.input as { path?: unknown }).path ?? "");
+        result = await toolReadDebateFile(userId, debate.id, path, {
+          workflow,
+          currentPhaseKind: currentPhase?.kind ?? null
+        });
       } else if (use.name === "debate_files_write") {
         const path = String((use.input as { path?: unknown }).path ?? "");
         const content = String((use.input as { content?: unknown }).content ?? "");
         result = await toolDebateFilesWrite({
+          userId,
           debateId: debate.id,
           path,
           content,
@@ -4196,6 +4939,7 @@ async function callProvider(
   return {
     raw: content,
     usage: normalizeAnthropicUsage(payload?.usage ?? null),
+    promptChars,
     estimatedPromptTokens,
     electionBallotSummary,
     diagnostics: {
@@ -4443,6 +5187,20 @@ async function startAutoSegmentAtBoundary(input: {
   );
   await upsertDebateFile(input.debateId, CONTEXT_SEGMENT_PATH, checkpointContent, input.now);
   await upsertDebateFile(input.debateId, checkpointPath, checkpointContent, input.now);
+  try {
+    await indexDebateContextChunk({
+      userId: input.userId,
+      debateId: input.debateId,
+      chunkKey: `segment:shared:${seg}`,
+      sourceType: "segment",
+      sourcePath: CONTEXT_SEGMENT_PATH,
+      segmentTag: seg,
+      content: checkpointContent,
+      now: input.now
+    });
+  } catch {
+    // retrieval indexing is best-effort
+  }
 }
 
 async function startAutoSegmentForDebateAgentAtBoundary(input: {
@@ -4543,6 +5301,21 @@ async function startAutoSegmentForDebateAgentAtBoundary(input: {
   );
   await upsertDebateAgentFile(input.debateAgentId, CONTEXT_SEGMENT_PATH, checkpointContent, input.now);
   await upsertDebateAgentFile(input.debateAgentId, checkpointPath, checkpointContent, input.now);
+  try {
+    await indexDebateContextChunk({
+      userId: input.userId,
+      debateId: input.debateId,
+      debateAgentId: input.debateAgentId,
+      chunkKey: `segment:${input.debateAgentId}:${seg}`,
+      sourceType: "segment",
+      sourcePath: CONTEXT_SEGMENT_PATH,
+      segmentTag: seg,
+      content: checkpointContent,
+      now: input.now
+    });
+  } catch {
+    // retrieval indexing is best-effort
+  }
 }
 
 async function maybeAutoCloseOpenVoteAtBoundary(input: {
@@ -5215,6 +5988,20 @@ async function generateRoundSummary(input: {
     const next = appendWithTrim(existing, lines.join("\n"));
     
     await upsertDebateFile(input.debate.id, roundPath, next, now);
+    try {
+      await indexDebateContextChunk({
+        userId: input.userId,
+        debateId: input.debate.id,
+        chunkKey: `round_summary:${input.endedRound}`,
+        sourceType: "round_summary",
+        sourcePath: roundPath,
+        roundNumber: input.endedRound,
+        content,
+        now
+      });
+    } catch {
+      // retrieval indexing is best-effort
+    }
   }
   
   return { ok: true };
@@ -5398,6 +6185,7 @@ export async function runDebate(id: string, userId: string) {
       let raw = "";
       let usage: { promptTokens: number | null; completionTokens: number | null; totalTokens: number | null } | null = null;
       let estimatedPromptTokens: number | null = null;
+      let promptChars: number | null = null;
       let generationDiagnostics:
         | {
             provider: string;
@@ -5435,6 +6223,10 @@ export async function runDebate(id: string, userId: string) {
           estimatedPromptTokens =
             typeof (result as { estimatedPromptTokens?: unknown }).estimatedPromptTokens === "number"
               ? Number((result as { estimatedPromptTokens: number }).estimatedPromptTokens)
+              : null;
+          promptChars =
+            typeof (result as { promptChars?: unknown }).promptChars === "number"
+              ? Number((result as { promptChars: number }).promptChars)
               : null;
           electionBallotSummary =
             result && typeof result === "object" && "electionBallotSummary" in result
@@ -5534,6 +6326,30 @@ export async function runDebate(id: string, userId: string) {
       );
 
       try {
+        const turnChunks = splitTextIntoRetrievalChunks(persistedResponse.content, 1_200, 180);
+        for (let chunkIndex = 0; chunkIndex < turnChunks.length; chunkIndex += 1) {
+          // eslint-disable-next-line no-await-in-loop
+          await indexDebateContextChunk({
+            userId,
+            debateId: id,
+            debateAgentId: String(currentParticipant.id),
+            chunkKey: `turn:${messageNumber}:chunk:${chunkIndex + 1}`,
+            sourceType: "turn",
+            turnNumberStart: messageNumber,
+            turnNumberEnd: messageNumber,
+            roundNumber,
+            content: turnChunks[chunkIndex],
+            now: createdAt
+          });
+        }
+      } catch (error) {
+        await logRuntimeEvent("warn", "turn retrieval indexing failed", {
+          debateId: id,
+          error: describeRuntimeError(error)
+        });
+      }
+
+      try {
         await appendGenerationDiagnostics({
           userId,
           debateId: id,
@@ -5609,6 +6425,16 @@ export async function runDebate(id: string, userId: string) {
               reason: `auto: session_prompt_tokens=${totals.sessionPromptTokens}; context_length=${totals.contextLength}; ratio=${totals.ratio.toFixed(4)}; agent=${agent.name}`
             });
           }
+        }
+
+        const promptCharRatio =
+          promptChars !== null && promptChars > 0
+            ? promptChars / getPromptHardMaxChars(agent)
+            : null;
+        if (promptCharRatio !== null && Number.isFinite(promptCharRatio) && promptCharRatio >= 0.82) {
+          pendingAutoSegmentByDebateAgentId.set(String(currentParticipant.id), {
+            reason: `auto: prompt_chars=${promptChars}; hard_cap=${getPromptHardMaxChars(agent)}; ratio=${promptCharRatio.toFixed(4)}; agent=${agent.name}`
+          });
         }
 
         await updateContextUsageFile({

@@ -8,6 +8,8 @@ export type DebateStatus =
 
 export type Provider = "openai" | "anthropic";
 
+export type RetrievalProvider = "openai";
+
 export type StructuredArgument = {
   type: "support" | "rebuttal";
   content: string;
@@ -99,4 +101,19 @@ export type AppDb = {
   debates: DebateRecord[];
   debateAgents: DebateAgentRecord[];
   turns: DebateTurnRecord[];
+};
+
+export type RetrievalConfigRecord = {
+  id: string;
+  userId: string;
+  provider: RetrievalProvider;
+  name: string;
+  model: string;
+  dimensions: number | null;
+  baseUrl: string;
+  apiKeyEncrypted: string;
+  apiKeyMasked: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
 };

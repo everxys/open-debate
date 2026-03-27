@@ -1,3 +1,14 @@
+## 2026-03-25
+
+- 会话必读目录与阶段门禁上线：`workflow.json` 新增 `contextAccess.alwaysRead / readWhenNeeded / unlockAfterPhase`，可把 shared 与 seat 目录配置成“每会话自动读取 / 仅按需读取 / 到指定 phase 后才允许读取”；runtime 不再只能整包塞 agent files，而是按目录规则自动注入，并在新会话里重新带上必读内容
+- 共享文件读取能力补齐：运行时新增 `debate_files_read` 工具，并把 `agent_files_read / list / search` 一起接入 `contextAccess` 门禁；未解锁目录会返回 `LOCKED_UNTIL_PHASE`，不在清单内的目录会被明确拒绝；检索注入也会避开未授权文件路径
+- 策略页新增“上下文读取策略”GUI 和完整 workflow 配置接口：`/strategies/[id]` 现在可直接配置每会话必读目录、按需可读目录、阶段后解锁目录；后端新增 `/api/strategies/[id]/workflow-config`，并在辩论详情的 workflow 摘要里显示当前读取策略
+- 收紧 AI 表达风格为硬约束：默认 workflow、seed 策略和 `docs/NOVEL_GODMODE_MASTER_PROMPT.md` 现在统一要求“输出是给人看的”，默认必须用普通人能直接看懂的话来讲，禁止故意写得太高端、太文绉绉、太像术语表；只有在前沿科学内容里确实绕不开时，才允许保留必要术语，而且必须顺手翻成人话解释
+- 长辩论上下文治理第一版落地：runtime 新增统一 prompt 预算规划器，按优先级分别裁剪 question / workflow / segment / recent turns / memory / facts / agent files，并在 `maxInputTokens` 缺失时回退使用 `contextLength`；自动新 segment 触发条件也补上 prompt 字符占比阈值，不再只盯 usage 比例
+- 新增长辩论检索层：新增独立检索配置页 `/settings/retrieval` 与对应 API，可单独配置 OpenAI 兼容 embedding 模型；数据库新增 `retrieval_configs`、`debate_context_chunks`、`debate_context_embeddings`，运行时会把 turn、memory summary、shared facts、round summary、segment checkpoint 索引成 chunk，并在生成 prompt 时按当前问题/阶段/近期讨论检索相关旧历史注入 `Relevant history`
+- 把 `debate_files_write` 写出的关键交付文件纳入检索索引：运行时写入 `final/*`、`outputs/*` 等允许的交付文件后，会立即按 chunk 切块并写入 retrieval chunk/embedding，后续 `Relevant history` 可以直接召回这些交付文件内容
+- 修复 OpenAI 兼容 provider 的超长输入崩溃：runtime 之前只按 `maxInputTokens` 粗略裁剪消息，遇到某些 provider 额外施加的字符长度硬上限时，仍会因为 prompt 过长直接报 `Range of input length should be [1, 202752]`。现在 `openai` 链路会额外套一层保守字符上限裁剪，并在 `maxInputTokens` 未配置时回退使用 `contextLength`，减少长 system prompt / 大文件内联 / 长记忆导致的直接失败
+
 ## 2026-03-23
 
 - 修复选举轮落库正文丢失真实票型：之前所有席位在 `Phase 1.5` 投票成功后，turn 正文都会被统一替换成“本席位仅完成投票”，导致后续 AI 从历史发言读取时误以为没人写明 `Host / Supervisor` 选择。现在运行时会把真实 `selections` 与投票理由摘要写回该席位的投票正文，后续席位和人工复盘都能直接看到实际票型

@@ -285,6 +285,21 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<Retur
         .join(" / ")}`
     );
   }
+  if (
+    workflow.contextAccess.alwaysRead.length > 0 ||
+    workflow.contextAccess.readWhenNeeded.length > 0 ||
+    workflow.contextAccess.unlockAfterPhase.length > 0
+  ) {
+    lines.push(
+      `- contextAccess alwaysRead: ${workflow.contextAccess.alwaysRead.length ? workflow.contextAccess.alwaysRead.map((rule) => `[${rule.scope}] ${rule.pathPrefix}`).join(" / ") : "(none)"}`
+    );
+    lines.push(
+      `- contextAccess readWhenNeeded: ${workflow.contextAccess.readWhenNeeded.length ? workflow.contextAccess.readWhenNeeded.map((rule) => `[${rule.scope}] ${rule.pathPrefix}`).join(" / ") : "(none)"}`
+    );
+    lines.push(
+      `- contextAccess unlockAfterPhase: ${workflow.contextAccess.unlockAfterPhase.length ? workflow.contextAccess.unlockAfterPhase.map((rule) => `[${rule.scope}] ${rule.pathPrefix} @ ${rule.phaseKind}`).join(" / ") : "(none)"}`
+    );
+  }
   if (workflow.deliverables.requiredFiles.length > 0) {
     lines.push("- required deliverables:");
     for (const file of workflow.deliverables.requiredFiles) {

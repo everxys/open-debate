@@ -372,6 +372,21 @@ function formatWorkflowRulesMarkdown(raw: string) {
         .join(" / ") || "（无）"}`
     );
   }
+  if (
+    parsed.contextAccess.alwaysRead.length > 0 ||
+    parsed.contextAccess.readWhenNeeded.length > 0 ||
+    parsed.contextAccess.unlockAfterPhase.length > 0
+  ) {
+    rules.push(
+      `- 每会话必读目录：${parsed.contextAccess.alwaysRead.length ? parsed.contextAccess.alwaysRead.map((rule) => `[${rule.scope}] ${rule.pathPrefix}`).join(" / ") : "（无）"}`
+    );
+    rules.push(
+      `- 按需可读目录：${parsed.contextAccess.readWhenNeeded.length ? parsed.contextAccess.readWhenNeeded.map((rule) => `[${rule.scope}] ${rule.pathPrefix}`).join(" / ") : "（无）"}`
+    );
+    rules.push(
+      `- 阶段后解锁目录：${parsed.contextAccess.unlockAfterPhase.length ? parsed.contextAccess.unlockAfterPhase.map((rule) => `[${rule.scope}] ${rule.pathPrefix} @ ${rule.phaseKind}`).join(" / ") : "（无）"}`
+    );
+  }
   rules.push(
     `- 必交文件：${
       parsed.deliverables.requiredFiles.length

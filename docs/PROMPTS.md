@@ -40,5 +40,9 @@ Rules:
 - 参与者文件（来自 AI 配置文件，或辩论级覆盖文件）
 - 参与者长时记忆摘要：`memory/summary.md`
 - 全场共享事实板（可选）：`facts/board.md`
+- 若 workflow 配置了 `contextAccess`，则会按目录规则区分：
+  - `alwaysRead`：每次生成、每个新会话都会自动重新注入
+  - `readWhenNeeded`：不会自动注入，但模型可通过文件读取工具按需读取
+  - `unlockAfterPhase`：到指定 phase 之前既不会自动注入，也不允许工具读取；解锁后会自动注入
 
 这些注入内容用于“长时辩论上下文恢复”，不要求你在 prompt 中固定引用格式。

@@ -107,6 +107,57 @@ async function ensureSchema(pool: Pool) {
   await pool.query("alter table debates add column if not exists runtime_notice_kind text null");
   await pool.query("alter table debates add column if not exists runtime_notice_message text null");
   await pool.query("alter table debates add column if not exists runtime_notice_at timestamptz null");
+  await pool.query(`
+    create table if not exists retrieval_configs (
+      id uuid primary key,
+      user_id uuid not null unique,
+      provider text not null,
+      name text not null,
+      model text not null,
+      dimensions int null,
+      base_url text not null,
+      api_key_encrypted text not null,
+      api_key_masked text not null,
+      is_active boolean not null default true,
+      created_at timestamptz not null,
+      updated_at timestamptz not null
+    )
+  `);
+  await pool.query(`
+    create table if not exists debate_context_chunks (
+      id uuid primary key,
+      debate_id uuid not null,
+      debate_agent_id uuid null,
+      chunk_key text not null,
+      source_type text not null,
+      source_path text null,
+      turn_number_start int null,
+      turn_number_end int null,
+      round_number int null,
+      phase_kind text null,
+      segment_tag text null,
+      content text not null,
+      content_hash text not null,
+      created_at timestamptz not null,
+      updated_at timestamptz not null,
+      unique (debate_id, chunk_key)
+    )
+  `);
+  await pool.query(`
+    create table if not exists debate_context_embeddings (
+      id uuid primary key,
+      debate_id uuid not null,
+      chunk_id uuid not null unique,
+      model text not null,
+      dimensions int null,
+      embedding_json jsonb not null,
+      created_at timestamptz not null,
+      updated_at timestamptz not null
+    )
+  `);
+  await pool.query("create index if not exists idx_debate_context_chunks_debate_id on debate_context_chunks (debate_id)");
+  await pool.query("create index if not exists idx_debate_context_chunks_source_type on debate_context_chunks (source_type)");
+  await pool.query("create index if not exists idx_debate_context_embeddings_debate_id on debate_context_embeddings (debate_id)");
   // Per-seat identity (cannot rely on ai_agents.name because same config can be reused).
   await pool.query("alter table debate_agents add column if not exists display_name text null");
   await pool.query(`

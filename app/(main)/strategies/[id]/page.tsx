@@ -33,6 +33,32 @@ type WorkflowPhasePrompt = {
   description: string | null;
   minRounds: number | null;
   injectedPrompt: string;
+    };
+
+type WorkflowContextAccessRule = {
+  scope: "shared" | "seat";
+  pathPrefix: string;
+  label: string;
+  maxFiles: number;
+  maxCharsPerFile: number;
+  recursive: boolean;
+};
+
+type WorkflowPhaseGateRule = WorkflowContextAccessRule & {
+  phaseKind: WorkflowPhasePrompt["kind"];
+};
+
+type WorkflowContextAccess = {
+  alwaysRead: WorkflowContextAccessRule[];
+  readWhenNeeded: WorkflowContextAccessRule[];
+  unlockAfterPhase: WorkflowPhaseGateRule[];
+};
+
+type WorkflowConfigPayload = {
+  workflowVersion?: number;
+  enabled?: boolean;
+  contextAccess?: WorkflowContextAccess;
+  [key: string]: unknown;
 };
 
 type WorkflowPromptDialogState =
@@ -53,6 +79,65 @@ function summarizePrompt(value: string) {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (!normalized) return "未配置";
   return normalized.length > 90 ? `${normalized.slice(0, 90)}...` : normalized;
+}
+
+function createContextAccessRule(): WorkflowContextAccessRule {
+  return {
+    scope: "shared",
+    pathPrefix: "",
+    label: "",
+    maxFiles: 6,
+    maxCharsPerFile: 4000,
+    recursive: true
+  };
+}
+
+function createPhaseGateRule(): WorkflowPhaseGateRule {
+  return {
+    ...createContextAccessRule(),
+    phaseKind: "deliberation"
+  };
+}
+
+function normalizeContextAccessPayload(value: unknown): WorkflowContextAccess {
+  const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+  const normalizeRule = (item: unknown): WorkflowContextAccessRule => {
+    const rule = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : null;
+    return {
+      scope: rule?.scope === "seat" ? "seat" : "shared",
+      pathPrefix: typeof rule?.pathPrefix === "string" ? rule.pathPrefix : "",
+      label: typeof rule?.label === "string" ? rule.label : "",
+      maxFiles:
+        typeof rule?.maxFiles === "number" && Number.isFinite(rule.maxFiles) && rule.maxFiles > 0
+          ? Math.floor(rule.maxFiles)
+          : 6,
+      maxCharsPerFile:
+        typeof rule?.maxCharsPerFile === "number" && Number.isFinite(rule.maxCharsPerFile) && rule.maxCharsPerFile > 0
+          ? Math.floor(rule.maxCharsPerFile)
+          : 4000,
+      recursive: rule?.recursive === undefined ? true : Boolean(rule.recursive)
+    };
+  };
+
+  const alwaysRead = Array.isArray(obj?.alwaysRead) ? obj.alwaysRead.map((item) => normalizeRule(item)) : [];
+  const readWhenNeeded = Array.isArray(obj?.readWhenNeeded) ? obj.readWhenNeeded.map((item) => normalizeRule(item)) : [];
+  const unlockAfterPhase = Array.isArray(obj?.unlockAfterPhase)
+    ? obj.unlockAfterPhase.map((item) => {
+        const rule = normalizeRule(item);
+        const raw = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : null;
+        const phaseKind =
+          raw?.phaseKind === "analysis" ||
+          raw?.phaseKind === "election" ||
+          raw?.phaseKind === "deliberation" ||
+          raw?.phaseKind === "finalization_vote" ||
+          raw?.phaseKind === "finalization"
+            ? raw.phaseKind
+            : "deliberation";
+        return { ...rule, phaseKind };
+      })
+    : [];
+
+  return { alwaysRead, readWhenNeeded, unlockAfterPhase };
 }
 
 async function readPayload(response: Response) {
@@ -100,6 +185,14 @@ export default function StrategyDetailPage() {
   const [workflowPhasePromptsLoading, setWorkflowPhasePromptsLoading] = useState(false);
   const [workflowPhasePromptsSaving, setWorkflowPhasePromptsSaving] = useState(false);
   const [workflowPromptDialog, setWorkflowPromptDialog] = useState<WorkflowPromptDialogState>(null);
+  const [workflowConfig, setWorkflowConfig] = useState<WorkflowConfigPayload | null>(null);
+  const [workflowContextAccess, setWorkflowContextAccess] = useState<WorkflowContextAccess>({
+    alwaysRead: [],
+    readWhenNeeded: [],
+    unlockAfterPhase: []
+  });
+  const [workflowContextAccessLoading, setWorkflowContextAccessLoading] = useState(false);
+  const [workflowContextAccessSaving, setWorkflowContextAccessSaving] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -127,9 +220,14 @@ export default function StrategyDetailPage() {
     roleSelectionAnchorIndexRef.current = null;
 
     setWorkflowPhasePromptsLoading(true);
+    setWorkflowContextAccessLoading(true);
     try {
-      const workflowResponse = await fetch(`/api/strategies/${id}/workflow-phase-prompts`);
+      const [workflowResponse, workflowConfigResponse] = await Promise.all([
+        fetch(`/api/strategies/${id}/workflow-phase-prompts`),
+        fetch(`/api/strategies/${id}/workflow-config`)
+      ]);
       const workflowPayload = await readPayload(workflowResponse);
+      const workflowConfigPayload = await readPayload(workflowConfigResponse);
       if (!workflowResponse.ok) {
         showToast("error", workflowPayload.error?.message ?? "加载阶段注入提示词失败");
       } else {
@@ -153,8 +251,19 @@ export default function StrategyDetailPage() {
           }))
         );
       }
+      if (!workflowConfigResponse.ok) {
+        showToast("error", workflowConfigPayload.error?.message ?? "加载上下文读取策略失败");
+      } else {
+        const nextWorkflowConfig =
+          workflowConfigPayload.data?.workflowConfig && typeof workflowConfigPayload.data.workflowConfig === "object"
+            ? (workflowConfigPayload.data.workflowConfig as WorkflowConfigPayload)
+            : null;
+        setWorkflowConfig(nextWorkflowConfig);
+        setWorkflowContextAccess(normalizeContextAccessPayload(nextWorkflowConfig?.contextAccess));
+      }
     } finally {
       setWorkflowPhasePromptsLoading(false);
+      setWorkflowContextAccessLoading(false);
     }
   }, [id, showToast]);
 
@@ -518,9 +627,131 @@ export default function StrategyDetailPage() {
           injectedPrompt: typeof phase.injectedPrompt === "string" ? phase.injectedPrompt : ""
         }))
       );
+      setWorkflowConfig((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          promptPolicies: {
+            ...(typeof current.promptPolicies === "object" && current.promptPolicies !== null ? (current.promptPolicies as Record<string, unknown>) : {}),
+            openingPrompt: typeof payload.data?.openingPrompt === "string" ? payload.data.openingPrompt : workflowOpeningPrompt
+          },
+          phaseMachine: {
+            ...(typeof current.phaseMachine === "object" && current.phaseMachine !== null ? (current.phaseMachine as Record<string, unknown>) : {}),
+            phases
+          }
+        };
+      });
       showToast("success", "已保存阶段注入提示词");
     } finally {
       setWorkflowPhasePromptsSaving(false);
+    }
+  }
+
+  function updateContextAccessRule(
+    category: "alwaysRead" | "readWhenNeeded",
+    index: number,
+    next: Partial<WorkflowContextAccessRule>
+  ) {
+    setWorkflowContextAccess((current) => ({
+      ...current,
+      [category]: current[category].map((rule, ruleIndex) => (ruleIndex === index ? { ...rule, ...next } : rule))
+    }));
+  }
+
+  function updatePhaseGateRule(index: number, next: Partial<WorkflowPhaseGateRule>) {
+    setWorkflowContextAccess((current) => ({
+      ...current,
+      unlockAfterPhase: current.unlockAfterPhase.map((rule, ruleIndex) => (ruleIndex === index ? { ...rule, ...next } : rule))
+    }));
+  }
+
+  function addContextAccessRule(category: "alwaysRead" | "readWhenNeeded") {
+    setWorkflowContextAccess((current) => ({
+      ...current,
+      [category]: [...current[category], createContextAccessRule()]
+    }));
+  }
+
+  function addPhaseGateRule() {
+    setWorkflowContextAccess((current) => ({
+      ...current,
+      unlockAfterPhase: [...current.unlockAfterPhase, createPhaseGateRule()]
+    }));
+  }
+
+  function removeContextAccessRule(category: "alwaysRead" | "readWhenNeeded", index: number) {
+    setWorkflowContextAccess((current) => ({
+      ...current,
+      [category]: current[category].filter((_, ruleIndex) => ruleIndex !== index)
+    }));
+  }
+
+  function removePhaseGateRule(index: number) {
+    setWorkflowContextAccess((current) => ({
+      ...current,
+      unlockAfterPhase: current.unlockAfterPhase.filter((_, ruleIndex) => ruleIndex !== index)
+    }));
+  }
+
+  async function saveWorkflowContextAccess() {
+    if (!id || !detail?.canEdit || workflowContextAccessSaving) return;
+    if (!workflowConfig) {
+      showToast("error", "workflow 配置尚未加载完成");
+      return;
+    }
+
+    setWorkflowContextAccessSaving(true);
+    try {
+      const response = await fetch(`/api/strategies/${id}/workflow-config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workflowConfig: {
+            ...workflowConfig,
+            contextAccess: {
+              alwaysRead: workflowContextAccess.alwaysRead.map((rule) => ({
+                scope: rule.scope,
+                pathPrefix: rule.pathPrefix.trim(),
+                label: rule.label.trim() || null,
+                maxFiles: Math.max(1, Math.floor(rule.maxFiles || 1)),
+                maxCharsPerFile: Math.max(200, Math.floor(rule.maxCharsPerFile || 200)),
+                recursive: rule.recursive
+              })),
+              readWhenNeeded: workflowContextAccess.readWhenNeeded.map((rule) => ({
+                scope: rule.scope,
+                pathPrefix: rule.pathPrefix.trim(),
+                label: rule.label.trim() || null,
+                maxFiles: Math.max(1, Math.floor(rule.maxFiles || 1)),
+                maxCharsPerFile: Math.max(200, Math.floor(rule.maxCharsPerFile || 200)),
+                recursive: rule.recursive
+              })),
+              unlockAfterPhase: workflowContextAccess.unlockAfterPhase.map((rule) => ({
+                phaseKind: rule.phaseKind,
+                scope: rule.scope,
+                pathPrefix: rule.pathPrefix.trim(),
+                label: rule.label.trim() || null,
+                maxFiles: Math.max(1, Math.floor(rule.maxFiles || 1)),
+                maxCharsPerFile: Math.max(200, Math.floor(rule.maxCharsPerFile || 200)),
+                recursive: rule.recursive
+              }))
+            }
+          }
+        })
+      });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "保存上下文读取策略失败");
+        return;
+      }
+      const nextWorkflowConfig =
+        payload.data?.workflowConfig && typeof payload.data.workflowConfig === "object"
+          ? (payload.data.workflowConfig as WorkflowConfigPayload)
+          : workflowConfig;
+      setWorkflowConfig(nextWorkflowConfig);
+      setWorkflowContextAccess(normalizeContextAccessPayload(nextWorkflowConfig.contextAccess));
+      showToast("success", "已保存上下文读取策略");
+    } finally {
+      setWorkflowContextAccessSaving(false);
     }
   }
 
@@ -736,6 +967,202 @@ export default function StrategyDetailPage() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel stack">
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div>
+            <strong>上下文读取策略</strong>
+            <div className="muted">把 AGENTS 风格规则产品化：哪些目录每个新会话都必须自动读，哪些只能按需读，哪些要到特定阶段后才解锁。</div>
+          </div>
+          {detail.canEdit ? (
+            <button
+              className="btn btn-primary"
+              disabled={workflowContextAccessLoading || workflowContextAccessSaving}
+              onClick={() => void saveWorkflowContextAccess()}
+            >
+              {workflowContextAccessSaving ? "保存中..." : "保存读取策略"}
+            </button>
+          ) : null}
+        </div>
+
+        {workflowContextAccessLoading ? (
+          <div className="muted">加载中...</div>
+        ) : (
+          <div className="grid" style={{ gap: 16 }}>
+            <div className="softBox stack">
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <strong>每会话必读目录</strong>
+                {detail.canEdit ? (
+                  <button className="btn" type="button" onClick={() => addContextAccessRule("alwaysRead")}>
+                    新增目录
+                  </button>
+                ) : null}
+              </div>
+              <div className="muted">这些目录会在每次生成时自动注入，所以切新会话后模型也能重新看到。</div>
+              {workflowContextAccess.alwaysRead.length <= 0 ? <div className="muted">未配置</div> : null}
+              {workflowContextAccess.alwaysRead.map((rule, index) => (
+                <div key={`always-${index}`} className="softBox stack">
+                  <div className="row" style={{ justifyContent: "space-between" }}>
+                    <strong>目录 #{index + 1}</strong>
+                    {detail.canEdit ? (
+                      <button className="btn btn-danger" type="button" onClick={() => removeContextAccessRule("alwaysRead", index)}>
+                        删除
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="grid grid-2" style={{ gap: 12 }}>
+                    <div className="field">
+                      <label>范围</label>
+                      <select value={rule.scope} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { scope: event.target.value === "seat" ? "seat" : "shared" })}>
+                        <option value="shared">shared</option>
+                        <option value="seat">seat</option>
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label>目录前缀</label>
+                      <input value={rule.pathPrefix} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { pathPrefix: event.target.value })} placeholder="例如 prompts/ 或 final/" />
+                    </div>
+                    <div className="field">
+                      <label>说明（可选）</label>
+                      <input value={rule.label} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { label: event.target.value })} placeholder="这批文件是做什么的" />
+                    </div>
+                    <div className="field">
+                      <label>单目录最多自动读几个文件</label>
+                      <input type="number" min={1} value={rule.maxFiles} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { maxFiles: Number(event.target.value) || 1 })} />
+                    </div>
+                    <div className="field">
+                      <label>单文件最大字符</label>
+                      <input type="number" min={200} value={rule.maxCharsPerFile} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { maxCharsPerFile: Number(event.target.value) || 200 })} />
+                    </div>
+                    <label className="row" style={{ alignItems: "center", gap: 8, marginTop: 22 }}>
+                      <input type="checkbox" checked={rule.recursive} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { recursive: event.target.checked })} />
+                      <span>递归子目录</span>
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="softBox stack">
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <strong>按需可读目录</strong>
+                {detail.canEdit ? (
+                  <button className="btn" type="button" onClick={() => addContextAccessRule("readWhenNeeded")}>
+                    新增目录
+                  </button>
+                ) : null}
+              </div>
+              <div className="muted">这些目录不会自动进 prompt，但模型可以通过 `agent_files_read` / `debate_files_read` 在需要时读取。</div>
+              {workflowContextAccess.readWhenNeeded.length <= 0 ? <div className="muted">未配置</div> : null}
+              {workflowContextAccess.readWhenNeeded.map((rule, index) => (
+                <div key={`optional-${index}`} className="softBox stack">
+                  <div className="row" style={{ justifyContent: "space-between" }}>
+                    <strong>目录 #{index + 1}</strong>
+                    {detail.canEdit ? (
+                      <button className="btn btn-danger" type="button" onClick={() => removeContextAccessRule("readWhenNeeded", index)}>
+                        删除
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="grid grid-2" style={{ gap: 12 }}>
+                    <div className="field">
+                      <label>范围</label>
+                      <select value={rule.scope} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { scope: event.target.value === "seat" ? "seat" : "shared" })}>
+                        <option value="shared">shared</option>
+                        <option value="seat">seat</option>
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label>目录前缀</label>
+                      <input value={rule.pathPrefix} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { pathPrefix: event.target.value })} placeholder="例如 references/ 或 facts/" />
+                    </div>
+                    <div className="field">
+                      <label>说明（可选）</label>
+                      <input value={rule.label} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { label: event.target.value })} />
+                    </div>
+                    <div className="field">
+                      <label>单目录最多自动读几个文件</label>
+                      <input type="number" min={1} value={rule.maxFiles} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { maxFiles: Number(event.target.value) || 1 })} />
+                    </div>
+                    <div className="field">
+                      <label>单文件最大字符</label>
+                      <input type="number" min={200} value={rule.maxCharsPerFile} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { maxCharsPerFile: Number(event.target.value) || 200 })} />
+                    </div>
+                    <label className="row" style={{ alignItems: "center", gap: 8, marginTop: 22 }}>
+                      <input type="checkbox" checked={rule.recursive} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { recursive: event.target.checked })} />
+                      <span>递归子目录</span>
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="softBox stack">
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <strong>阶段后解锁目录</strong>
+                {detail.canEdit ? (
+                  <button className="btn" type="button" onClick={addPhaseGateRule}>
+                    新增目录
+                  </button>
+                ) : null}
+              </div>
+              <div className="muted">这些目录在指定阶段之前既不会自动注入，也不允许工具读取；一旦到达该阶段，就会自动解锁并自动注入。</div>
+              {workflowContextAccess.unlockAfterPhase.length <= 0 ? <div className="muted">未配置</div> : null}
+              {workflowContextAccess.unlockAfterPhase.map((rule, index) => (
+                <div key={`gate-${index}`} className="softBox stack">
+                  <div className="row" style={{ justifyContent: "space-between" }}>
+                    <strong>目录 #{index + 1}</strong>
+                    {detail.canEdit ? (
+                      <button className="btn btn-danger" type="button" onClick={() => removePhaseGateRule(index)}>
+                        删除
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="grid grid-2" style={{ gap: 12 }}>
+                    <div className="field">
+                      <label>解锁阶段</label>
+                      <select value={rule.phaseKind} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { phaseKind: event.target.value as WorkflowPhasePrompt["kind"] })}>
+                        <option value="analysis">analysis</option>
+                        <option value="election">election</option>
+                        <option value="deliberation">deliberation</option>
+                        <option value="finalization_vote">finalization_vote</option>
+                        <option value="finalization">finalization</option>
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label>范围</label>
+                      <select value={rule.scope} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { scope: event.target.value === "seat" ? "seat" : "shared" })}>
+                        <option value="shared">shared</option>
+                        <option value="seat">seat</option>
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label>目录前缀</label>
+                      <input value={rule.pathPrefix} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { pathPrefix: event.target.value })} placeholder="例如 final/ 或 playbook/" />
+                    </div>
+                    <div className="field">
+                      <label>说明（可选）</label>
+                      <input value={rule.label} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { label: event.target.value })} />
+                    </div>
+                    <div className="field">
+                      <label>单目录最多自动读几个文件</label>
+                      <input type="number" min={1} value={rule.maxFiles} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { maxFiles: Number(event.target.value) || 1 })} />
+                    </div>
+                    <div className="field">
+                      <label>单文件最大字符</label>
+                      <input type="number" min={200} value={rule.maxCharsPerFile} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { maxCharsPerFile: Number(event.target.value) || 200 })} />
+                    </div>
+                    <label className="row" style={{ alignItems: "center", gap: 8, marginTop: 22 }}>
+                      <input type="checkbox" checked={rule.recursive} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { recursive: event.target.checked })} />
+                      <span>递归子目录</span>
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </section>

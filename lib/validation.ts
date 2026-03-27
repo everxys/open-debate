@@ -18,6 +18,26 @@ export const testAgentConfigSchema = createAgentSchema.pick({
   apiKey: true
 });
 
+export const createRetrievalConfigSchema = z.object({
+  name: z.string().min(1).max(50),
+  provider: z.literal("openai"),
+  model: z.string().min(1).max(100),
+  dimensions: z.number().int().min(1).max(10_000).nullable().optional(),
+  baseUrl: z.string().url().min(1),
+  apiKey: z.string().min(1)
+});
+
+export const updateRetrievalConfigSchema = createRetrievalConfigSchema.partial();
+
+export const testRetrievalConfigSchema = createRetrievalConfigSchema.pick({
+  provider: true,
+  model: true,
+  dimensions: true,
+  baseUrl: true
+}).extend({
+  apiKey: z.string().min(1).optional()
+});
+
 export const updateAgentSchema = createAgentSchema.partial();
 
 export const relativeFilePathSchema = z
@@ -133,4 +153,8 @@ export const updateStrategyWorkflowPhasePromptsSchema = z.object({
     )
     .min(1)
     .max(16)
+});
+
+export const updateStrategyWorkflowConfigSchema = z.object({
+  workflowConfig: z.unknown()
 });

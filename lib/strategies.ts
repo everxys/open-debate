@@ -9,6 +9,7 @@ import {
   agentFileUpsertSchema,
   createStrategySchema,
   updateStrategySchema,
+  updateStrategyWorkflowConfigSchema,
   updateStrategyWorkflowPhasePromptsSchema
 } from "@/lib/validation";
 import {
@@ -820,6 +821,70 @@ export async function getStrategyWorkflowPhasePrompts(strategyId: string) {
     state.canEdit,
     state.hasExistingWorkflow
   );
+}
+
+export async function getStrategyWorkflowConfig(strategyId: string) {
+  const state = await loadStrategyWorkflowPhasePromptState(strategyId);
+  return {
+    ownerRoleId: state.ownerRoleId,
+    canEdit: state.canEdit,
+    hasExistingWorkflow: state.hasExistingWorkflow,
+    workflowConfig: state.workflowConfig
+  };
+}
+
+export async function updateStrategyWorkflowConfig(strategyId: string, input: unknown) {
+  const data = updateStrategyWorkflowConfigSchema.parse(input);
+  const state = await loadStrategyWorkflowPhasePromptState(strategyId);
+  if (!state.canEdit) {
+    throw new AppError("FORBIDDEN", 403, "Permission denied");
+  }
+
+  const canonicalWorkflow = toCanonicalWorkflowConfig(data.workflowConfig);
+  if (!canonicalWorkflow) {
+    throw new AppError("VALIDATION_ERROR", 400, "Invalid workflow config");
+  }
+
+  const now = new Date().toISOString();
+  const content = JSON.stringify(canonicalWorkflow, null, 2);
+  const client = await getTransactionClient();
+  try {
+    await client.query("begin");
+    await client.query(
+      `
+        insert into strategy_role_files (strategy_role_id, path, content, created_at, updated_at)
+        values ($1, $2, $3, $4, $4)
+        on conflict (strategy_role_id, path)
+        do update set content = excluded.content, updated_at = excluded.updated_at
+      `,
+      [state.ownerRoleId, STRATEGY_WORKFLOW_PATH, content, now]
+    );
+    await client.query(
+      `
+        delete from strategy_role_files
+         where path = $2
+           and strategy_role_id = any($3::uuid[])
+           and strategy_role_id <> $1
+      `,
+      [state.ownerRoleId, STRATEGY_WORKFLOW_PATH, state.roleIds]
+    );
+    await client.query("commit");
+  } catch (error) {
+    await safeRollback(client);
+    if (isMissingTableError(error, "strategy_role_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  return {
+    ownerRoleId: state.ownerRoleId,
+    canEdit: true,
+    hasExistingWorkflow: true,
+    workflowConfig: canonicalWorkflow
+  };
 }
 
 export async function updateStrategyWorkflowPhasePrompts(strategyId: string, input: unknown) {
