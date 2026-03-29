@@ -62,7 +62,7 @@ type Debate = {
   workflowPhaseKind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization" | null;
   workflowPhaseTitle: string | null;
   workflowPhaseRound: number | null;
-  runtimeNoticeKind: "recovering" | "recovered" | null;
+  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | null;
   runtimeNoticeMessage: string | null;
   runtimeNoticeAt: string | null;
   lastErrorCode: string | null;
@@ -252,6 +252,13 @@ function buildTurnWindowState(summaries: TurnSummary[]): TurnWindowState {
     .map(([roundNumber, turns]) => ({ roundNumber, turns }));
   const latest = summaries.length ? summaries[summaries.length - 1] : null;
   return { summaries, byId, roundGroups, latest };
+}
+
+function shouldKeepOlderTurnsButton(oldestTurnNumber: number | null, apiHasMore?: unknown) {
+  if (typeof oldestTurnNumber === "number" && Number.isFinite(oldestTurnNumber) && oldestTurnNumber > 1) {
+    return true;
+  }
+  return Boolean(apiHasMore);
 }
 
 function touchTurnDetailCacheOrder(current: string[], id: string) {
@@ -481,12 +488,24 @@ function buildDirectoryRoundSequence(input: {
   currentRound: number | null;
 }) {
   const rounds = new Set<number>();
+  const loadedRounds = input.roundGroups
+    .map((group) => group.roundNumber)
+    .filter((round) => Number.isFinite(round) && round > 0)
+    .map((round) => Math.floor(round));
+  const loadedMinRound = loadedRounds.length > 0 ? Math.min(...loadedRounds) : null;
+  const loadedMaxRound = loadedRounds.length > 0 ? Math.max(...loadedRounds) : null;
   for (const group of input.roundGroups) {
     if (Number.isFinite(group.roundNumber) && group.roundNumber > 0) rounds.add(group.roundNumber);
   }
   for (const key of Object.keys(input.votePathsByRound)) {
     const round = Number(key);
-    if (Number.isFinite(round) && round > 0) rounds.add(Math.floor(round));
+    if (!Number.isFinite(round) || round <= 0) continue;
+    const normalizedRound = Math.floor(round);
+    const isWithinLoadedWindow =
+      loadedMinRound !== null && loadedMaxRound !== null && normalizedRound >= loadedMinRound && normalizedRound <= loadedMaxRound;
+    const isActiveRound =
+      normalizedRound === input.openVoteRound || normalizedRound === input.liveRound || normalizedRound === input.currentRound;
+    if (isWithinLoadedWindow || isActiveRound) rounds.add(normalizedRound);
   }
   if (typeof input.openVoteRound === "number" && input.openVoteRound > 0) rounds.add(Math.floor(input.openVoteRound));
   if (typeof input.liveRound === "number" && input.liveRound > 0) rounds.add(Math.floor(input.liveRound));
@@ -1374,10 +1393,23 @@ function StatusSummaryPanel(props: {
   liveStatus: string;
 }) {
   const runtimeNoticeBadgeClass =
-    props.debate.runtimeNoticeKind === "recovering" ? "badge-recovering" : "badge-recovered";
+    props.debate.runtimeNoticeKind === "recovering"
+      ? "badge-recovering"
+      : props.debate.runtimeNoticeKind === "interrupted"
+        ? "badge-paused"
+        : "badge-recovered";
   const runtimeNoticeCardClass =
-    props.debate.runtimeNoticeKind === "recovering" ? "runtimeNoticeCardRecovering" : "runtimeNoticeCardRecovered";
-  const runtimeNoticeTitle = props.debate.runtimeNoticeKind === "recovering" ? "恢复中" : "已自动恢复";
+    props.debate.runtimeNoticeKind === "recovering"
+      ? "runtimeNoticeCardRecovering"
+      : props.debate.runtimeNoticeKind === "interrupted"
+        ? "runtimeNoticeCardRecovering"
+        : "runtimeNoticeCardRecovered";
+  const runtimeNoticeTitle =
+    props.debate.runtimeNoticeKind === "recovering"
+      ? "恢复中"
+      : props.debate.runtimeNoticeKind === "interrupted"
+        ? "已自动暂停"
+        : "已自动恢复";
   return (
     <Fragment>
       {props.debate.status === "running" ? (
@@ -2811,8 +2843,9 @@ export default function DebateDetailPage() {
         return;
       }
       updateTurnWindow((current) => mergeTurnSummaries(current, incoming));
-      setOldestLoadedTurnNumber(incoming[0]?.turnNumber ?? oldestLoadedTurnNumber);
-      setHasOlderTurns(Boolean(payload.meta?.hasMore));
+      const nextOldestTurnNumber = incoming[0]?.turnNumber ?? oldestLoadedTurnNumber;
+      setOldestLoadedTurnNumber(nextOldestTurnNumber);
+      setHasOlderTurns(shouldKeepOlderTurnsButton(nextOldestTurnNumber, payload.meta?.hasMore));
     } catch (error) {
       console.error(error);
       showToast("error", "网络错误：加载更早发言失败");
@@ -3238,7 +3271,9 @@ export default function DebateDetailPage() {
             }
             lastTurnNumberRef.current = nextTurnNumber;
             setOldestLoadedTurnNumber(incoming.length ? incoming[0]?.turnNumber ?? null : null);
-            setHasOlderTurns(Boolean(turnsPayload.meta?.hasMore));
+            setHasOlderTurns(
+              shouldKeepOlderTurnsButton(incoming.length ? incoming[0]?.turnNumber ?? null : null, turnsPayload.meta?.hasMore)
+            );
           }
         }
       } else {
@@ -3652,11 +3687,15 @@ export default function DebateDetailPage() {
     refreshQuestionDiff
   ]);
 
-  async function action(name: "start" | "pause" | "resume" | "stop") {
+  async function action(name: "start" | "pause" | "resume" | "stop" | "repair") {
     try {
       if (!id) return;
       if (name === "stop") {
         const ok = window.confirm("确定终止辩论吗？终止后将结束本场辩论（不可恢复），但不会删除记录。");
+        if (!ok) return;
+      }
+      if (name === "repair") {
+        const ok = window.confirm("确定将这场 failed 辩论修复为 paused 吗？修复后你可以手动点击恢复继续运行。");
         if (!ok) return;
       }
       const response = await fetch(`/api/debates/${id}/${name}`, { method: "POST" });
@@ -3673,6 +3712,8 @@ export default function DebateDetailPage() {
         setIsStreaming(false);
       } else if (name === "resume") {
         showToast("success", "已恢复");
+      } else if (name === "repair") {
+        showToast("success", "已修复为暂停中");
       } else if (name === "start") {
         showToast("success", "已开始");
       } else {
@@ -4088,8 +4129,8 @@ export default function DebateDetailPage() {
   const currentDirectoryRound =
     (typeof liveDisplayRound === "number" && liveDisplayRound > 0 ? liveDisplayRound : null) ??
     (typeof openVoteState?.roundNumber === "number" && openVoteState.roundNumber > 0 ? openVoteState.roundNumber : null) ??
-    latestVoteRound ??
     latestCompletedRound ??
+    latestVoteRound ??
     (debate && debate.currentTurn > 0 ? Math.floor((debate.currentTurn - 1) / agentCount) + 1 : null);
   const currentDirectoryPhase = useMemo(() => {
     if (!currentDirectoryRound) return null;
@@ -4699,6 +4740,11 @@ export default function DebateDetailPage() {
               {debate.status === "pending" ? "开始" : debate.status === "running" ? "暂停" : "恢复"}
             </button>
           ) : null}
+          {debate.isOwner && debate.status === "failed" ? (
+            <button className="btn" onClick={() => void action("repair")}>
+              修复为暂停中
+            </button>
+          ) : null}
           {debate.isOwner && ["pending", "running", "paused"].includes(debate.status) ? (
             <button className="btn btn-danger" onClick={() => void action("stop")}>
               终止
@@ -4706,9 +4752,12 @@ export default function DebateDetailPage() {
           ) : null}
         </div>
         <h2 style={{ margin: 0 }}>发言目录</h2>
+        <p className="muted" style={{ margin: 0 }}>
+          当前默认只展示最近 {RECENT_TURNS_LIMIT} 条发言，历史记录没有丢失；如果这是长辩论，请点击下方按钮继续加载更多内容。
+        </p>
         {hasOlderTurns ? (
           <button className="btn" type="button" disabled={loadingOlderTurns} onClick={() => void loadOlderTurnSummaries()}>
-            {loadingOlderTurns ? "加载中..." : `加载更早发言（${OLDER_TURNS_PAGE_SIZE} 条）`}
+            {loadingOlderTurns ? "加载中..." : `加载更多发言（追加 ${OLDER_TURNS_PAGE_SIZE} 条）`}
           </button>
         ) : null}
         {currentDirectoryPhase ? (

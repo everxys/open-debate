@@ -5084,6 +5084,72 @@ async function setDebateRuntimeNotice(
   );
 }
 
+function isRecoverableRuntimeInterruption(details: { code?: string | null; message?: string | null }) {
+  const code = String(details.code ?? "").toUpperCase();
+  const message = String(details.message ?? "").toLowerCase();
+  if (code === "AI_NETWORK_ERROR") return true;
+  const patterns = [
+    "fetch failed",
+    "network",
+    "socket hang up",
+    "econnreset",
+    "etimedout",
+    "timeout",
+    "timed out",
+    "aborted",
+    "aborterror",
+    "terminated",
+    "eai_again",
+    "enotfound",
+    "connection closed",
+    "other side closed",
+    "client network socket disconnected"
+  ];
+  return patterns.some((pattern) => message.includes(pattern));
+}
+
+async function pauseDebateAfterRuntimeInterruption(
+  id: string,
+  reason: string,
+  options?: {
+    phase?: Pick<DebateRecord, "workflowPhaseKind" | "workflowPhaseTitle" | "workflowPhaseRound"> | null;
+    lastErrorCode?: string | null;
+    lastErrorMessage?: string | null;
+  }
+) {
+  const now = new Date().toISOString();
+  await query(
+    `update debates
+        set status = case
+              when status = 'running' then 'paused'
+              else status
+            end,
+            stopped_reason = $2,
+            workflow_phase_kind = $3,
+            workflow_phase_title = $4,
+            workflow_phase_round = $5,
+            runtime_notice_kind = $6,
+            runtime_notice_message = $7,
+            runtime_notice_at = $8,
+            last_error_code = coalesce($9, last_error_code),
+            last_error_message = coalesce($10, last_error_message),
+            updated_at = $8
+      where id = $1`,
+    [
+      id,
+      reason,
+      options?.phase?.workflowPhaseKind ?? null,
+      options?.phase?.workflowPhaseTitle ?? null,
+      options?.phase?.workflowPhaseRound ?? null,
+      "interrupted",
+      "检测到运行时中断或网络断开，系统已自动暂停这场辩论；恢复设备或网络后可继续运行",
+      now,
+      options?.lastErrorCode ?? null,
+      options?.lastErrorMessage ?? null
+    ]
+  );
+}
+
 async function persistDebatePhaseSnapshot(
   id: string,
   phase: Pick<DebateRecord, "workflowPhaseKind" | "workflowPhaseTitle" | "workflowPhaseRound"> | null
@@ -6753,10 +6819,19 @@ export async function runDebate(id: string, userId: string) {
       message: details.message,
       stack: details.stack
     });
-    await finishDebate(id, "failed", "runtime error", {
-      lastErrorCode: details.code,
-      lastErrorMessage: truncateErrorMessage(details.message)
-    });
+    if (isRecoverableRuntimeInterruption(details)) {
+      await pauseDebateAfterRuntimeInterruption(id, "runtime interrupted", {
+        phase: lastKnownPhase,
+        lastErrorCode: details.code,
+        lastErrorMessage: truncateErrorMessage(details.message)
+      });
+    } else {
+      await finishDebate(id, "failed", "runtime error", {
+        phase: lastKnownPhase,
+        lastErrorCode: details.code,
+        lastErrorMessage: truncateErrorMessage(details.message)
+      });
+    }
   } finally {
     activeDebates.delete(id);
     clearDebateLiveProgress(id);

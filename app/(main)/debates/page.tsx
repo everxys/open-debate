@@ -12,7 +12,7 @@ type Debate = {
   tokenUsed: number;
   consensusReached: boolean;
   isShared: boolean;
-  runtimeNoticeKind: "recovering" | "recovered" | null;
+  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | null;
   runtimeNoticeMessage: string | null;
   runtimeNoticeAt: string | null;
   isOwner?: boolean;
@@ -27,13 +27,23 @@ function formatTime(value: string) {
 }
 
 function RecoveryBadge(props: {
-  runtimeNoticeKind: "recovering" | "recovered" | null;
+  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | null;
   runtimeNoticeMessage: string | null;
   runtimeNoticeAt: string | null;
 }) {
   if (!props.runtimeNoticeKind || !props.runtimeNoticeMessage) return null;
-  const badgeClass = props.runtimeNoticeKind === "recovering" ? "badge-recovering" : "badge-recovered";
-  const label = props.runtimeNoticeKind === "recovering" ? "恢复中" : "已自动恢复";
+  const badgeClass =
+    props.runtimeNoticeKind === "recovering"
+      ? "badge-recovering"
+      : props.runtimeNoticeKind === "interrupted"
+        ? "badge-paused"
+        : "badge-recovered";
+  const label =
+    props.runtimeNoticeKind === "recovering"
+      ? "恢复中"
+      : props.runtimeNoticeKind === "interrupted"
+        ? "已自动暂停"
+        : "已自动恢复";
   const title = props.runtimeNoticeAt
     ? `${props.runtimeNoticeMessage} · ${formatTime(props.runtimeNoticeAt)}`
     : props.runtimeNoticeMessage;
@@ -48,6 +58,7 @@ export default function DebatesPage() {
   const [debates, setDebates] = useState<Debate[]>([]);
   const [deletingId, setDeletingId] = useState<string>("");
   const [stoppingId, setStoppingId] = useState<string>("");
+  const [repairingId, setRepairingId] = useState<string>("");
   const [scope, setScope] = useState<"mine" | "shared">("mine");
   const [loadError, setLoadError] = useState<string>("");
   const [selectedFinishedIds, setSelectedFinishedIds] = useState<string[]>([]);
@@ -118,6 +129,26 @@ export default function DebatesPage() {
       await load(scope);
     } finally {
       setStoppingId("");
+    }
+  }
+
+  async function repairDebate(id: string) {
+    const target = debates.find((d) => d.id === id);
+    if (!target || !target.isOwner) return;
+    if (String(target.status) !== "failed") return;
+    if (!window.confirm("确定将这场 failed 辩论修复为 paused 吗？修复后你可以手动继续运行。")) return;
+
+    setRepairingId(id);
+    try {
+      const response = await fetch(`/api/debates/${id}/repair`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        window.alert(payload.error?.message ?? "修复失败");
+        return;
+      }
+      await load(scope);
+    } finally {
+      setRepairingId("");
     }
   }
 
@@ -227,7 +258,7 @@ export default function DebatesPage() {
                           <>
                             <button
                               className={`btn ${debate.isShared ? "btn-active" : ""}`}
-                              disabled={deletingId === debate.id || stoppingId === debate.id}
+                              disabled={deletingId === debate.id || stoppingId === debate.id || repairingId === debate.id}
                               onClick={async () => {
                                 const response = await fetch(`/api/debates/${debate.id}`, {
                                   method: "PATCH",
@@ -246,14 +277,14 @@ export default function DebatesPage() {
                             </button>
                             <button
                               className="btn btn-danger"
-                              disabled={deletingId === debate.id || stoppingId === debate.id}
+                              disabled={deletingId === debate.id || stoppingId === debate.id || repairingId === debate.id}
                               onClick={() => void stopDebate(debate.id)}
                             >
                               {stoppingId === debate.id ? "终止中..." : "终止"}
                             </button>
                             <button
                               className="btn btn-danger"
-                              disabled={deletingId === debate.id || stoppingId === debate.id}
+                              disabled={deletingId === debate.id || stoppingId === debate.id || repairingId === debate.id}
                               onClick={() => void removeDebate(debate.id)}
                             >
                               {deletingId === debate.id ? "删除中..." : "删除"}
@@ -342,7 +373,7 @@ export default function DebatesPage() {
                           <>
                             <button
                               className={`btn ${debate.isShared ? "btn-active" : ""}`}
-                              disabled={deletingId === debate.id || stoppingId === debate.id}
+                              disabled={deletingId === debate.id || stoppingId === debate.id || repairingId === debate.id}
                               onClick={async () => {
                                 const response = await fetch(`/api/debates/${debate.id}`, {
                                   method: "PATCH",
@@ -359,9 +390,18 @@ export default function DebatesPage() {
                             >
                               {debate.isShared ? "已公开" : "公开"}
                             </button>
+                            {debate.status === "failed" ? (
+                              <button
+                                className="btn"
+                                disabled={deletingId === debate.id || stoppingId === debate.id || repairingId === debate.id}
+                                onClick={() => void repairDebate(debate.id)}
+                              >
+                                {repairingId === debate.id ? "修复中..." : "修复为暂停中"}
+                              </button>
+                            ) : null}
                             <button
                               className="btn btn-danger"
-                              disabled={deletingId === debate.id || stoppingId === debate.id}
+                              disabled={deletingId === debate.id || stoppingId === debate.id || repairingId === debate.id}
                               onClick={() => void removeDebate(debate.id)}
                             >
                               {deletingId === debate.id ? "删除中..." : "删除"}

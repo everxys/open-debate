@@ -57,7 +57,7 @@ export type DebateRecord = {
   workflowPhaseKind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization" | null;
   workflowPhaseTitle: string | null;
   workflowPhaseRound: number | null;
-  runtimeNoticeKind: "recovering" | "recovered" | null;
+  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | null;
   runtimeNoticeMessage: string | null;
   runtimeNoticeAt: string | null;
   lastErrorCode: string | null;

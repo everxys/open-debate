@@ -983,6 +983,8 @@ export async function listDebateTurns(
   const mode = options?.mode === "full" ? "full" : "summary";
   const previewChars = 220;
   const isBackfill = beforeTurnNumber !== null;
+  const isInitialRecentWindow = afterTurnNumber === null && beforeTurnNumber === null && limit !== null;
+  const shouldQueryDescending = isBackfill || isInitialRecentWindow;
   const countResult = await query<{ count: number }>(
     "select count(*)::int as count from debate_agents where debate_id = $1",
     [debate.id]
@@ -1012,13 +1014,13 @@ export async function listDebateTurns(
              left(t.content, $4::int) as content_preview,
              char_length(t.content) as content_length,
              (t.structured_output is not null) as has_structured_output
-        from debate_turns t
-        join ai_agents a on a.id = t.ai_agent_id
-        left join debate_agents da on da.id = t.debate_agent_id
+       from debate_turns t
+       join ai_agents a on a.id = t.ai_agent_id
+       left join debate_agents da on da.id = t.debate_agent_id
        where t.debate_id = $1
          and ($2::int is null or t.turn_number > $2::int)
          and ($3::int is null or t.turn_number < $3::int)
-       order by t.turn_number ${isBackfill ? "desc" : "asc"}
+       order by t.turn_number ${shouldQueryDescending ? "desc" : "asc"}
        ${limit ? `limit $5::int` : ""}
     `,
     limit
@@ -1029,7 +1031,7 @@ export async function listDebateTurns(
   let rows = turnRows.rows;
   const hasMore = limit ? rows.length > limit : false;
   if (limit && rows.length > limit) rows = rows.slice(0, limit);
-  if (isBackfill) rows = rows.reverse();
+  if (shouldQueryDescending) rows = rows.reverse();
 
   function mapSpeechRoundIndexToActualRound(speechRoundIndex: number) {
     if (!Number.isFinite(speechRoundIndex) || speechRoundIndex <= 0) return 1;
@@ -1696,6 +1698,28 @@ export async function resumeDebate(id: string) {
     throw new AppError("CONFLICT", 409, "Only paused debates can be resumed");
   }
   void runDebate(id, session.userId);
+  return toListItem(normalizeDebateRow(result.rows[0]));
+}
+
+export async function repairDebate(id: string) {
+  const session = await requireSessionUser();
+  const now = new Date().toISOString();
+  const result = await query<Record<string, unknown>>(
+    `update debates
+        set status = 'paused',
+            finished_at = null,
+            stopped_reason = null,
+            runtime_notice_kind = 'interrupted',
+            runtime_notice_message = $3,
+            runtime_notice_at = $4,
+            updated_at = $4
+      where id = $1 and user_id = $2 and status = 'failed'
+      returning *`,
+    [id, session.userId, "该辩论已从 failed 修复为 paused；请确认状态后手动恢复运行", now]
+  );
+  if ((result.rowCount ?? 0) !== 1) {
+    throw new AppError("CONFLICT", 409, "Only failed debates can be repaired");
+  }
   return toListItem(normalizeDebateRow(result.rows[0]));
 }
 
