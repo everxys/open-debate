@@ -145,8 +145,8 @@ export type OfficialVote =
 export type OpenOfficialVote = Extract<OfficialVote, { status: "open" }>;
 export type ClosedOfficialVote = Extract<OfficialVote, { status: "closed" }>;
 
-export const FINALIZATION_VOTE_APPROVE = "同意进入 Phase 3";
-export const FINALIZATION_VOTE_REJECT = "不同意，继续 Phase 2";
+export const FINALIZATION_VOTE_APPROVE = "同意进入收束阶段";
+export const FINALIZATION_VOTE_REJECT = "不同意，继续讨论";
 
 export function buildFinalizationVoteOptions() {
   return [FINALIZATION_VOTE_APPROVE, FINALIZATION_VOTE_REJECT];
@@ -182,6 +182,28 @@ export function getWorkflowPhaseByKind(
   return workflow?.phaseMachine.phases.find((phase) => phase.kind === kind) ?? null;
 }
 
+export function hasWorkflowPhase(
+  workflow: NormalizedDebateWorkflow | null,
+  kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization"
+) {
+  return Boolean(getWorkflowPhaseByKind(workflow, kind));
+}
+
+export function usesWorkflowElectionPhase(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return false;
+  return hasWorkflowPhase(workflow, "election") && workflow.election.roles.length > 0;
+}
+
+export function usesWorkflowFinalizationVotePhase(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return false;
+  return hasWorkflowPhase(workflow, "finalization_vote");
+}
+
+export function usesWorkflowFinalizationPhase(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return false;
+  return hasWorkflowPhase(workflow, "finalization");
+}
+
 export function getWorkflowPhaseMinRounds(
   workflow: NormalizedDebateWorkflow | null,
   kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization",
@@ -193,22 +215,34 @@ export function getWorkflowPhaseMinRounds(
 
 export function getWorkflowMinimumAnalysisRounds(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 0;
+  if (!usesWorkflowElectionPhase(workflow)) {
+    return getWorkflowPhaseMinRounds(workflow, "analysis", 0);
+  }
   return Math.max(getWorkflowElectionStartRound(workflow) - 1, getWorkflowPhaseMinRounds(workflow, "analysis", 0));
 }
 
 export function getWorkflowEarliestDeliberationRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
+  if (!usesWorkflowElectionPhase(workflow)) {
+    return Math.max(1, getWorkflowMinimumAnalysisRounds(workflow) + 1);
+  }
   return getWorkflowMinimumAnalysisRounds(workflow) + getWorkflowPhaseMinRounds(workflow, "election", 1) + 1;
 }
 
 export function getWorkflowEarliestFinalizationVoteRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
+  if (!usesWorkflowFinalizationVotePhase(workflow)) {
+    return getWorkflowEarliestDeliberationRound(workflow);
+  }
   const minimumDiscussionRounds = Math.max(1, getWorkflowPhaseMinRounds(workflow, "deliberation", 0));
   return getWorkflowEarliestDeliberationRound(workflow) + minimumDiscussionRounds;
 }
 
 export function getWorkflowEarliestFinalizationRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
+  if (!usesWorkflowFinalizationPhase(workflow)) {
+    return getWorkflowEarliestFinalizationVoteRound(workflow);
+  }
   return getWorkflowEarliestFinalizationVoteRound(workflow) + Math.max(0, getWorkflowPhaseMinRounds(workflow, "finalization_vote", 1));
 }
 
@@ -271,7 +305,26 @@ export function resolveCurrentRoundNumberForWorkflow(input: {
 
 export function getWorkflowEarliestCompletionRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
+  if (getWorkflowCompletionMode(workflow) !== "workflow_gate") {
+    return Math.max(1, getWorkflowEarliestDeliberationRound(workflow));
+  }
   return getWorkflowEarliestFinalizationRound(workflow) + Math.max(0, getWorkflowPhaseMinRounds(workflow, "finalization", 0) - 1);
+}
+
+export function getWorkflowCompletionMode(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return "consensus_only" as const;
+  return workflow.completion.mode;
+}
+
+export function requiresWorkflowOutputsForCompletion(workflow: NormalizedDebateWorkflow | null) {
+  const mode = getWorkflowCompletionMode(workflow);
+  return mode === "consensus_plus_outputs" || mode === "workflow_gate";
+}
+
+export function requiresWorkflowFinalizationPhaseForCompletion(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return false;
+  if (getWorkflowCompletionMode(workflow) !== "workflow_gate") return false;
+  return workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion;
 }
 
 export function getWorkflowOutputMaxTokens(
@@ -316,6 +369,7 @@ export function hasEnteredWorkflowFinalization(input: {
   persistedPhaseKind: DebateRecord["workflowPhaseKind"] | null | undefined;
 }) {
   if (!input.workflow?.enabled) return false;
+  if (getWorkflowCompletionMode(input.workflow) !== "workflow_gate") return false;
   if (input.roundNumber < getWorkflowElectionStartRound(input.workflow)) return false;
   if (input.roundNumber < getWorkflowEarliestFinalizationRound(input.workflow)) return false;
   return input.persistedPhaseKind === "finalization";
@@ -377,6 +431,7 @@ export async function listMissingRequiredDeliverables(input: {
     );
     return requiredFiles.filter((file) => {
       const payload = contentByPath.get(file.path) ?? { content: "", contentLength: 0 };
+      const normalizedContent = payload.content.toLowerCase();
       if (payload.contentLength <= 0) return true;
       if (file.minChars && payload.contentLength < file.minChars) return true;
       if (file.minMarkdownHeadings) {
@@ -387,9 +442,39 @@ export async function listMissingRequiredDeliverables(input: {
         if (headingCount < file.minMarkdownHeadings) return true;
       }
       if (file.requiredSnippets.length > 0) {
-        const normalizedContent = payload.content.toLowerCase();
         const missingSnippet = file.requiredSnippets.some((snippet) => !normalizedContent.includes(snippet.toLowerCase()));
         if (missingSnippet) return true;
+      }
+      if (file.qualityChecks.requiredTerms.length > 0) {
+        const missingTerm = file.qualityChecks.requiredTerms.some((term) => !normalizedContent.includes(term.toLowerCase()));
+        if (missingTerm) return true;
+      }
+      if (file.qualityChecks.requiredSections.length > 0) {
+        const normalizedHeadings = payload.content
+          .split(/\r?\n/)
+          .filter((line) => /^\s{0,3}#{1,6}\s+\S/.test(line))
+          .map((line) => line.replace(/^\s{0,3}#{1,6}\s+/, "").trim().toLowerCase());
+        const missingSection = file.qualityChecks.requiredSections.some(
+          (section) => !normalizedHeadings.some((heading) => heading.includes(section.toLowerCase()))
+        );
+        if (missingSection) return true;
+      }
+      if (file.qualityChecks.minBulletItems) {
+        const bulletCount = payload.content
+          .split(/\r?\n/)
+          .filter((line) => /^\s*([-*+]|\d+\.)\s+\S/.test(line))
+          .length;
+        if (bulletCount < file.qualityChecks.minBulletItems) return true;
+      }
+      if (file.qualityChecks.counters.length > 0) {
+        for (const counter of file.qualityChecks.counters) {
+          const count = counter.patterns.reduce((sum, pattern) => {
+            if (!pattern) return sum;
+            const matches = normalizedContent.match(new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"));
+            return sum + (matches?.length ?? 0);
+          }, 0);
+          if (count < counter.minCount) return true;
+        }
       }
       return false;
     });
@@ -409,14 +494,10 @@ export function resolveCurrentWorkflowPhase(input: {
   const phases = input.workflow?.phaseMachine.phases ?? [];
   const byKind = new Map(phases.map((phase) => [phase.kind, phase] as const));
   if (!input.workflow?.enabled) return null;
-  if (input.openVote?.kind === "election") return byKind.get("election") ?? null;
-  if (input.openVote?.kind === "finalization") return byKind.get("finalization_vote") ?? null;
-  const electionPassed =
-    isClosedElectionVotePassed(input.latestVote) ||
-    (input.persistedPhaseKind !== null &&
-      input.persistedPhaseKind !== undefined &&
-      input.persistedPhaseKind !== "analysis" &&
-      input.persistedPhaseKind !== "election");
+  if (input.openVote?.kind === "election") return byKind.get("election") ?? byKind.get("deliberation") ?? byKind.get("analysis") ?? null;
+  if (input.openVote?.kind === "finalization") {
+    return byKind.get("finalization_vote") ?? byKind.get("deliberation") ?? byKind.get("finalization") ?? null;
+  }
   if (
     hasEnteredWorkflowFinalization({
       workflow: input.workflow,
@@ -424,8 +505,20 @@ export function resolveCurrentWorkflowPhase(input: {
       persistedPhaseKind: input.persistedPhaseKind
     })
   ) {
-    return byKind.get("finalization") ?? null;
+    return byKind.get("finalization") ?? byKind.get("deliberation") ?? null;
   }
+  if (!usesWorkflowElectionPhase(input.workflow)) {
+    if (input.roundNumber < getWorkflowEarliestDeliberationRound(input.workflow)) {
+      return byKind.get("analysis") ?? null;
+    }
+    return byKind.get("deliberation") ?? byKind.get("analysis") ?? null;
+  }
+  const electionPassed =
+    isClosedElectionVotePassed(input.latestVote) ||
+    (input.persistedPhaseKind !== null &&
+      input.persistedPhaseKind !== undefined &&
+      input.persistedPhaseKind !== "analysis" &&
+      input.persistedPhaseKind !== "election");
   if (input.roundNumber < getWorkflowElectionStartRound(input.workflow) || !electionPassed) {
     return byKind.get("analysis") ?? null;
   }

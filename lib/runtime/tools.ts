@@ -104,7 +104,7 @@ export async function loadOpenVoteInline(userId: string, debateId: string, seed?
     const candidates = candidatesList.map((candidate) => `- ${candidate.seat}: ${candidate.name}`).join("\n");
     const roles = (openVote.roles ?? []).map((role) => `- ${role}`).join("\n");
     return [
-      "OFFICIAL VOTE (OPEN): Phase 1.5 Election",
+      "OFFICIAL VOTE (OPEN): Election",
       `- Title: ${openVote.title}`,
       `- Round: ${openVote.roundNumber}`,
       ...(openVote.meta?.attempt ? [`- Attempt: ${openVote.meta.attempt}`] : []),
@@ -120,11 +120,11 @@ export async function loadOpenVoteInline(userId: string, debateId: string, seed?
   const options = optionsList.map((option) => `- ${option}`).join("\n");
   if (openVote.kind === "finalization") {
     return [
-      "OFFICIAL VOTE (OPEN): Phase 3 Entry",
+      "OFFICIAL VOTE (OPEN): Consolidation Entry",
       `- Title: ${openVote.title}`,
       `- Round: ${openVote.roundNumber}`,
       `- Prompt: ${openVote.prompt}`,
-      "- Rule: every seat must choose the approval option before the debate can enter Phase 3.",
+      "- Rule: every seat must choose the approval option before the debate can enter the consolidation phase.",
       `- Options:\n${options}`,
       "- How to vote: call tool debate_vote_cast with { choice: '...', reason?: '...' }",
       "- After all seats voted, call tool debate_vote_close to publish the official result."
@@ -229,7 +229,7 @@ export async function toolVoteOpen(input: {
     if (input.roundNumber < startRound) {
       return {
         ok: false,
-        error: `Election vote is only allowed from ${startRound === 1 ? "Phase 1.5 start" : `Round ${startRound}`} in the current workflow.`
+        error: `Election vote is only allowed from Round ${startRound} in the current workflow.`
       };
     }
     const participants = await query<Record<string, unknown>>(
@@ -269,23 +269,23 @@ export async function toolVoteOpen(input: {
       return { ok: false, error: "Finalization entry vote requires workflow.json (enabled=true)." };
     }
     if (currentPhase?.kind === "finalization") {
-      return { ok: false, error: "Phase 3 has already been entered; no new entry vote is needed." };
+      return { ok: false, error: "The debate is already in the consolidation phase; no new entry vote is needed." };
     }
     if (input.roundNumber < getWorkflowEarliestFinalizationVoteRound(workflow)) {
       return {
         ok: false,
-        error: `Phase 3 entry vote can only start from Round ${getWorkflowEarliestFinalizationVoteRound(workflow)}. Current round is ${input.roundNumber}.`
+        error: `Consolidation entry vote can only start from Round ${getWorkflowEarliestFinalizationVoteRound(workflow)}. Current round is ${input.roundNumber}.`
       };
     }
     const prompt =
       (typeof input.prompt === "string" && input.prompt.trim()) ||
-      "请判断本场辩论是否已经完成充分讨论、所有关键争议是否已收束、是否可以正式进入 Phase 3 做最终交付。只有全员同意，才允许进入 Phase 3。";
+      "请判断本场辩论是否已经完成充分讨论、所有关键争议是否已收束、是否可以正式进入收束阶段完成最终整合与交付。只有全员同意，才允许进入收束阶段。";
     const attempt = Math.max(1, Math.floor(Number(input.meta?.attempt) || 1));
     const openVote: OfficialVote = {
       status: "open",
       kind: "finalization",
       roundNumber: input.roundNumber,
-      title: input.title || `第 ${input.roundNumber} 轮 · Phase 3 入场表决`,
+      title: input.title || `第 ${input.roundNumber} 轮 · 收束阶段入场表决`,
       prompt: prompt.trim(),
       options: buildFinalizationVoteOptions(),
       ballots: [],
@@ -303,7 +303,7 @@ export async function toolVoteOpen(input: {
   if (currentPhase?.kind !== "finalization") {
     return {
       ok: false,
-      error: `Custom/final vote is only allowed in Phase 3. Current phase: ${currentPhase?.title ?? "unknown"}.`
+      error: `Custom/final vote is only allowed in the consolidation phase. Current phase: ${currentPhase?.title ?? "unknown"}.`
     };
   }
   if (!input.prompt || !input.prompt.trim()) {
@@ -514,7 +514,7 @@ export async function toolVoteClose(input: { userId: string; debateId: string; p
 
     if (!passed) {
       const directive = [
-        "# 官方指令：本轮未选出主持人 / 监管者",
+        "# 官方指令：本轮未完成角色任命",
         "",
         missingRoles.length > 0 ? `未能确认的角色：${missingRoles.join(" / ")}` : "本轮未形成有效结果。",
         Object.keys(roleTies).length > 0 ? "" : null,
@@ -522,7 +522,7 @@ export async function toolVoteClose(input: { userId: string; debateId: string; p
         Object.keys(roleTies).length > 0 ? tieSummary : null,
         "",
         electionRules.reopenUntilPassed
-          ? `要求：下一轮先回到 Phase 1 继续补充一轮全员发言；之后系统会按 workflow 配置再次发起 Phase 1.5 选举。${voteGovernance.fallbackMode ? `建议优先补清“${voteGovernance.fallbackMode}”相关缺口。` : ""}`
+          ? `要求：下一轮先回到分析阶段继续补充一轮全员发言；之后系统会按 workflow 配置再次发起选举。${voteGovernance.fallbackMode ? `建议优先补清“${voteGovernance.fallbackMode}”相关缺口。` : ""}`
           : "要求：请人工介入或手动重新发起选举。"
       ]
         .filter((line): line is string => Boolean(line))
@@ -757,17 +757,17 @@ export async function toolVoteClose(input: { userId: string; debateId: string; p
 
     const directive = passed
       ? [
-          "# 官方指令：Phase 3 入场表决通过",
+          "# 官方指令：收束阶段入场表决通过",
           "",
           `- 标题：${openVote.title}`,
           `- 轮次：${openVote.roundNumber}`,
           `- 尝试次数：第 ${attempt} 次`,
           `- 结果：全员同意（${agreeCount}/${input.participantCount}）`,
           "",
-          "要求：下一轮开始正式进入 Phase 3，所有席位必须转入最终收束、总汇总和交付写作。"
+          "要求：下一轮开始正式进入收束阶段，所有席位必须转入最终收束、总整合和交付写作。"
         ].join("\n")
       : [
-          "# 官方指令：暂不进入 Phase 3",
+          "# 官方指令：暂不进入收束阶段",
           "",
           `- 标题：${openVote.title}`,
           `- 轮次：${openVote.roundNumber}`,
@@ -776,7 +776,7 @@ export async function toolVoteClose(input: { userId: string; debateId: string; p
           `- 不同意：${disagreeCount}`,
           `- 未投票：${missingVotes}`,
           "",
-          "要求：当前继续留在 Phase 2.5，先进行至少一轮全员补充发言，把争议点、证据链和交付缺口补清楚；之后系统会按 workflow 配置再次发起 Phase 3 入场表决。"
+          "要求：当前继续留在收束投票前阶段，先进行至少一轮全员补充发言，把争议点、证据链和交付缺口补清楚；之后系统会按 workflow 配置再次发起收束阶段入场表决。"
         ].join("\n");
     await upsertDebateFile(input.debateId, VOTE_DIRECTIVE_PATH, directive, now);
 
@@ -785,7 +785,7 @@ export async function toolVoteClose(input: { userId: string; debateId: string; p
       "",
       `- 标题：${openVote.title}`,
       `- 轮次：${openVote.roundNumber}`,
-      `- 类型：Phase 3 入场表决`,
+      `- 类型：收束阶段入场表决`,
       `- 尝试次数：第 ${attempt} 次`,
       passed ? `- 结果：通过（${agreeCount}/${input.participantCount} 全员同意）` : "- 结果：未通过",
       "",

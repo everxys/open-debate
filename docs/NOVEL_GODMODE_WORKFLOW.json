@@ -1,6 +1,9 @@
 {
   "workflowVersion": 1,
   "enabled": true,
+  "completion": {
+    "mode": "workflow_gate"
+  },
   "phaseMachine": {
     "phases": [
       {
@@ -67,6 +70,26 @@
       "lastRole": "Supervisor"
     }
   },
+  "rolesMeta": {
+    "Host": {
+      "label": "Host",
+      "category": "coordinator",
+      "summary": "负责仲裁分歧、统一方向、收敛版本，并在最终阶段整合成全局成稿。",
+      "writingPolicy": "coordinate"
+    },
+    "Supervisor": {
+      "label": "Supervisor",
+      "category": "reviewer",
+      "summary": "负责指出逻辑漏洞、结构缺口、空泛内容和返工要求，防止低质量收尾。",
+      "writingPolicy": "review"
+    },
+    "Specialist": {
+      "label": "Specialist",
+      "category": "contributor",
+      "summary": "负责持续产出角色、事件、伏笔、章节等具体文件内容，不能只停留在口头建议。",
+      "writingPolicy": "contribute"
+    }
+  },
   "seatOrderRules": [
     {
       "afterRound": 1,
@@ -130,7 +153,12 @@
         "description": "核心命题、核心卖点、故事承诺、终局震撼来源",
         "minChars": 6000,
         "minMarkdownHeadings": 10,
-        "requiredSnippets": ["核心命题", "核心卖点", "故事承诺", "终局震撼"]
+        "requiredSnippets": ["核心命题", "核心卖点", "故事承诺", "终局震撼"],
+        "qualityChecks": {
+          "requiredSections": ["核心命题", "核心卖点", "故事承诺", "终局震撼"],
+          "requiredTerms": ["主题", "冲突", "代价"],
+          "minBulletItems": 8
+        }
       },
       {
         "path": "final/02-world-rules.md",
@@ -140,7 +168,19 @@
         "description": "世界规则、胜负规则、代价系统、游戏边界、破局条件",
         "minChars": 15000,
         "minMarkdownHeadings": 18,
-        "requiredSnippets": ["世界规则", "胜负规则", "代价", "破局条件"]
+        "requiredSnippets": ["世界规则", "胜负规则", "代价", "破局条件"],
+        "qualityChecks": {
+          "requiredSections": ["世界规则", "胜负规则", "代价", "破局条件"],
+          "requiredTerms": ["限制", "漏洞", "利用", "边界"],
+          "minBulletItems": 16,
+          "counters": [
+            {
+              "label": "rule-blocks",
+              "patterns": ["规则"],
+              "minCount": 6
+            }
+          ]
+        }
       },
       {
         "path": "final/03-era-history.md",
@@ -150,7 +190,19 @@
         "description": "时代断层、历史隐秘、旧文明残响、关键灾变时间线",
         "minChars": 12000,
         "minMarkdownHeadings": 14,
-        "requiredSnippets": ["时代", "历史", "灾变", "时间线"]
+        "requiredSnippets": ["时代", "历史", "灾变", "时间线"],
+        "qualityChecks": {
+          "requiredSections": ["时代", "历史", "灾变", "时间线"],
+          "requiredTerms": ["断层", "遗留", "隐秘", "影响"],
+          "minBulletItems": 12,
+          "counters": [
+            {
+              "label": "timeline-points",
+              "patterns": ["年", "时期", "阶段"],
+              "minCount": 6
+            }
+          ]
+        }
       },
       {
         "path": "final/04-factions-and-order.md",
@@ -160,7 +212,19 @@
         "description": "主要阵营、权力结构、面具组织、利益链与制衡关系",
         "minChars": 12000,
         "minMarkdownHeadings": 14,
-        "requiredSnippets": ["阵营", "权力结构", "组织", "制衡"]
+        "requiredSnippets": ["阵营", "权力结构", "组织", "制衡"],
+        "qualityChecks": {
+          "requiredSections": ["阵营", "权力结构", "组织", "制衡"],
+          "requiredTerms": ["利益", "冲突", "依附", "威胁"],
+          "minBulletItems": 14,
+          "counters": [
+            {
+              "label": "factions",
+              "patterns": ["阵营", "组织"],
+              "minCount": 6
+            }
+          ]
+        }
       },
       {
         "path": "final/05-seven-summoned-geniuses.md",
@@ -170,7 +234,19 @@
         "description": "7 位外来天才的能力、人设、软肋、执念、镜像关系、最终命运",
         "minChars": 18000,
         "minMarkdownHeadings": 22,
-        "requiredSnippets": ["能力标签", "情感软肋", "行动逻辑", "个人执念", "最终命运"]
+        "requiredSnippets": ["能力标签", "情感软肋", "行动逻辑", "个人执念", "最终命运"],
+        "qualityChecks": {
+          "requiredSections": ["能力标签", "情感软肋", "行动逻辑", "个人执念", "最终命运"],
+          "requiredTerms": ["镜像", "关系", "最强时刻", "最脆弱时刻"],
+          "minBulletItems": 24,
+          "counters": [
+            {
+              "label": "character-blocks",
+              "patterns": ["外来天才"],
+              "minCount": 7
+            }
+          ]
+        }
       },
       {
         "path": "final/06-eighteen-local-geniuses.md",
@@ -180,7 +256,19 @@
         "description": "18 位本土天才的职能定位、压迫感层级、出场价值与事件挂靠",
         "minChars": 22000,
         "minMarkdownHeadings": 24,
-        "requiredSnippets": ["本土天才", "定位", "压迫感", "事件挂靠"]
+        "requiredSnippets": ["本土天才", "定位", "压迫感", "事件挂靠"],
+        "qualityChecks": {
+          "requiredSections": ["定位", "压迫感", "事件挂靠"],
+          "requiredTerms": ["阵营", "作用", "威胁"],
+          "minBulletItems": 30,
+          "counters": [
+            {
+              "label": "local-geniuses",
+              "patterns": ["本土天才"],
+              "minCount": 18
+            }
+          ]
+        }
       },
       {
         "path": "final/07-main-plot-spine.md",
@@ -190,7 +278,19 @@
         "description": "唯一主线骨架、真主角、假 boss、真 boss、终局布局者与关键阶段转折",
         "minChars": 15000,
         "minMarkdownHeadings": 16,
-        "requiredSnippets": ["主线", "真主角", "假 boss", "真 boss", "终局布局者"]
+        "requiredSnippets": ["主线", "真主角", "假 boss", "真 boss", "终局布局者"],
+        "qualityChecks": {
+          "requiredSections": ["主线", "真主角", "假 boss", "真 boss", "终局布局者"],
+          "requiredTerms": ["转折", "误导", "揭示", "终局"],
+          "minBulletItems": 14,
+          "counters": [
+            {
+              "label": "spine-turns",
+              "patterns": ["转折", "阶段"],
+              "minCount": 6
+            }
+          ]
+        }
       },
       {
         "path": "final/08-five-major-events.md",
@@ -200,7 +300,18 @@
         "description": "五大核心事件设计，每个事件必须包含目标、误导、反制、代价、余波",
         "minChars": 25000,
         "minMarkdownHeadings": 30,
-        "requiredSnippets": ["事件目标", "信息差", "误导", "反制", "代价", "余波"]
+        "requiredSnippets": ["事件目标", "信息差", "误导", "反制", "代价", "余波"],
+        "qualityChecks": {
+          "requiredSections": ["事件目标", "信息差", "误导", "反制", "代价", "余波"],
+          "minBulletItems": 18,
+          "counters": [
+            {
+              "label": "event-blocks",
+              "patterns": ["事件"],
+              "minCount": 5
+            }
+          ]
+        }
       },
       {
         "path": "final/09-core-schemes.md",
@@ -210,7 +321,24 @@
         "description": "核心诡计设计库，要求高密度中小点子、互锁链条与可复盘性",
         "minChars": 30000,
         "minMarkdownHeadings": 32,
-        "requiredSnippets": ["大点子", "中点子", "小点子", "可复盘", "互锁"]
+        "requiredSnippets": ["大点子", "中点子", "小点子", "可复盘", "互锁"],
+        "qualityChecks": {
+          "requiredSections": ["大点子", "中点子", "小点子", "可复盘", "互锁"],
+          "requiredTerms": ["误导", "反制", "信息差"],
+          "minBulletItems": 24,
+          "counters": [
+            {
+              "label": "big-ideas",
+              "patterns": ["大点子"],
+              "minCount": 5
+            },
+            {
+              "label": "mid-ideas",
+              "patterns": ["中点子"],
+              "minCount": 10
+            }
+          ]
+        }
       },
       {
         "path": "final/10-relationships-and-betrayals.md",
@@ -220,7 +348,19 @@
         "description": "纯爱线、宿敌线、三人组/二人组、背叛线、镜像人物关系",
         "minChars": 12000,
         "minMarkdownHeadings": 16,
-        "requiredSnippets": ["纯爱", "宿敌", "背叛", "镜像", "关系变化"]
+        "requiredSnippets": ["纯爱", "宿敌", "背叛", "镜像", "关系变化"],
+        "qualityChecks": {
+          "requiredSections": ["纯爱", "宿敌", "背叛", "镜像", "关系变化"],
+          "requiredTerms": ["信任", "裂痕", "转向", "代价"],
+          "minBulletItems": 16,
+          "counters": [
+            {
+              "label": "relationship-lines",
+              "patterns": ["关系", "背叛", "宿敌"],
+              "minCount": 8
+            }
+          ]
+        }
       },
       {
         "path": "final/11-volume-architecture.md",
@@ -230,7 +370,12 @@
         "description": "分卷结构、每卷主题、卷末悬念、卷级高潮与强度递增曲线",
         "minChars": 18000,
         "minMarkdownHeadings": 18,
-        "requiredSnippets": ["卷一", "卷二", "卷三", "卷主题", "卷末悬念"]
+        "requiredSnippets": ["卷一", "卷二", "卷三", "卷主题", "卷末悬念"],
+        "qualityChecks": {
+          "requiredSections": ["卷一", "卷二", "卷三", "卷主题", "卷末悬念"],
+          "requiredTerms": ["高潮", "升级", "节奏"],
+          "minBulletItems": 12
+        }
       },
       {
         "path": "final/12-volume-1-outline.md",
@@ -240,7 +385,19 @@
         "description": "第一大卷章节细纲与人物入场设计",
         "minChars": 25000,
         "minMarkdownHeadings": 28,
-        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "人物推进"]
+        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "人物推进"],
+        "qualityChecks": {
+          "requiredSections": ["章节目标", "冲突", "转折", "结果", "钩子", "人物推进"],
+          "requiredTerms": ["主线", "铺垫"],
+          "minBulletItems": 20,
+          "counters": [
+            {
+              "label": "chapters",
+              "patterns": ["章节"],
+              "minCount": 10
+            }
+          ]
+        }
       },
       {
         "path": "final/13-volume-2-outline.md",
@@ -250,7 +407,19 @@
         "description": "第二大卷章节细纲与局势升级设计",
         "minChars": 25000,
         "minMarkdownHeadings": 28,
-        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "伏笔"]
+        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "伏笔"],
+        "qualityChecks": {
+          "requiredSections": ["章节目标", "冲突", "转折", "结果", "钩子", "伏笔"],
+          "requiredTerms": ["升级", "反制"],
+          "minBulletItems": 20,
+          "counters": [
+            {
+              "label": "chapters",
+              "patterns": ["章节"],
+              "minCount": 10
+            }
+          ]
+        }
       },
       {
         "path": "final/14-volume-3-outline.md",
@@ -260,7 +429,19 @@
         "description": "第三大卷章节细纲与终局战前布局设计",
         "minChars": 25000,
         "minMarkdownHeadings": 28,
-        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "终局关联"]
+        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "终局关联"],
+        "qualityChecks": {
+          "requiredSections": ["章节目标", "冲突", "转折", "结果", "钩子", "终局关联"],
+          "requiredTerms": ["终局", "回收"],
+          "minBulletItems": 20,
+          "counters": [
+            {
+              "label": "chapters",
+              "patterns": ["章节"],
+              "minCount": 10
+            }
+          ]
+        }
       },
       {
         "path": "final/15-foreshadowing-ledger.md",
@@ -270,7 +451,19 @@
         "description": "伏笔总台账，标明埋点、回收位置、作用、二刷价值、错觉设计",
         "minChars": 20000,
         "minMarkdownHeadings": 20,
-        "requiredSnippets": ["伏笔", "埋点", "回收", "作用", "二刷价值"]
+        "requiredSnippets": ["伏笔", "埋点", "回收", "作用", "二刷价值"],
+        "qualityChecks": {
+          "requiredSections": ["伏笔", "埋点", "回收", "作用", "二刷价值"],
+          "requiredTerms": ["错觉", "误导"],
+          "minBulletItems": 18,
+          "counters": [
+            {
+              "label": "foreshadow-links",
+              "patterns": ["伏笔"],
+              "minCount": 12
+            }
+          ]
+        }
       },
       {
         "path": "final/16-key-scenes-and-lines.md",
@@ -280,7 +473,19 @@
         "description": "关键场景库、雨戏、大屠杀、恐怖桥段、名台词、哲理句、记忆点场景",
         "minChars": 12000,
         "minMarkdownHeadings": 16,
-        "requiredSnippets": ["雨戏", "大屠杀", "恐怖", "名台词", "哲理"]
+        "requiredSnippets": ["雨戏", "大屠杀", "恐怖", "名台词", "哲理"],
+        "qualityChecks": {
+          "requiredSections": ["雨戏", "大屠杀", "恐怖", "名台词", "哲理"],
+          "requiredTerms": ["记忆点", "情绪", "画面", "回响"],
+          "minBulletItems": 18,
+          "counters": [
+            {
+              "label": "scene-blocks",
+              "patterns": ["场景", "名台词"],
+              "minCount": 8
+            }
+          ]
+        }
       },
       {
         "path": "final/novel_outline_v2.md",
@@ -290,7 +495,24 @@
         "description": "最终总汇总稿，整合创作圣经并做全局逻辑自检",
         "minChars": 40000,
         "minMarkdownHeadings": 24,
-        "requiredSnippets": ["核心命题", "世界规则", "人物", "五大事件", "分卷结构", "逻辑自检"]
+        "requiredSnippets": ["核心命题", "世界规则", "人物", "五大事件", "分卷结构", "逻辑自检"],
+        "qualityChecks": {
+          "requiredSections": ["核心命题", "世界规则", "人物", "五大事件", "分卷结构", "逻辑自检"],
+          "requiredTerms": ["终局", "伏笔", "回收"],
+          "minBulletItems": 24,
+          "counters": [
+            {
+              "label": "event-coverage",
+              "patterns": ["事件"],
+              "minCount": 5
+            },
+            {
+              "label": "volume-coverage",
+              "patterns": ["卷"],
+              "minCount": 3
+            }
+          ]
+        }
       }
     ]
   }

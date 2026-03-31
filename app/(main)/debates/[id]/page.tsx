@@ -117,6 +117,7 @@ type DebateRoundDirectoryItemProps = {
   roundTurns: TurnSummary[];
   agentCount: number;
   isOpen: boolean;
+  showWorkflowPhaseUi: boolean;
   phase: DebateDirectoryPhaseInfo | null;
   hasInjectedPrompt: boolean;
   isCurrentPhaseRound: boolean;
@@ -218,7 +219,7 @@ type FileActivityListItem = {
   targetHeading: string | null;
   reason: string | null;
   agentName: string;
-  actorRoleType: "Host" | "Supervisor" | "Specialist";
+  actorRoleType: string;
   diagnosticLabels: string[];
   summary: { added: number; deleted: number; changed: number };
 };
@@ -244,21 +245,20 @@ function formatFileActivityEntryAction(action: FileActivityEntryAction) {
 }
 
 function formatFileActivityRoleType(roleType: FileActivityListItem["actorRoleType"]) {
-  if (roleType === "Host") return "Host";
-  if (roleType === "Supervisor") return "Supervisor";
-  return "Specialist";
+  const normalized = String(roleType ?? "").trim();
+  return normalized || "Contributor";
 }
 
 const WORKFLOW_RULES_DISABLED_MARKDOWN = [
-  "**Workflow 规则（未启用）**",
+  "**讨论规则（默认中立模式）**",
   "",
-  "- 本场辩论没有启用 workflow（默认关闭）。",
-  "- 如需启用：在策略里创建 `debate/workflow.json`，然后用该策略新建辩论。",
+  "- 本场辩论没有显式 workflow 文件，系统会使用平台默认的中立协作规则。",
+  "- 如需启用自定义流程：在策略里创建 `debate/workflow.json`，然后用该策略新建辩论。",
   "",
   "- 注意：workflow 在“创建辩论”时复制到辩论共享文件 `workflow.json`，已有辩论不会自动更新。"
 ].join("\n");
 
-const WORKFLOW_RULES_ERROR_MARKDOWN = "**Workflow 规则**\n\n- 读取失败（网络错误或内容非 JSON）。";
+const WORKFLOW_RULES_ERROR_MARKDOWN = "**讨论规则**\n\n- 读取失败（网络错误或内容非 JSON）。";
 const RECENT_TURNS_LIMIT = 120;
 const OLDER_TURNS_PAGE_SIZE = 50;
 const TURN_DETAIL_CACHE_LIMIT = 80;
@@ -335,6 +335,28 @@ async function fetchTurnDetail(input: { debateId: string; turnNumber: number }) 
   return { response, payload };
 }
 
+function isLightweightWorkflowPresentation(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled) return false;
+  if (workflow.completion.mode !== "consensus_only") return false;
+  if (workflow.election.roles.length > 0) return false;
+  if (workflow.deliverables.requiredFiles.length > 0) return false;
+  if (workflow.ideaBank.rawIdeaBankPath || Object.values(workflow.ideaBank.derivedFiles).some(Boolean)) return false;
+  if (
+    workflow.contextAccess.alwaysRead.length > 0 ||
+    workflow.contextAccess.readWhenNeeded.length > 0 ||
+    workflow.contextAccess.unlockAfterPhase.length > 0
+  ) {
+    return false;
+  }
+  return (
+    workflow.phaseMachine.phases.length === 1 &&
+    workflow.phaseMachine.phases[0]?.kind === "deliberation" &&
+    !workflow.phaseMachine.phases.some((phase) =>
+      phase.kind === "analysis" || phase.kind === "election" || phase.kind === "finalization_vote" || phase.kind === "finalization"
+    )
+  );
+}
+
 function formatWorkflowRulesMarkdown(raw: string) {
   let parsedJson: unknown = null;
   try {
@@ -346,13 +368,31 @@ function formatWorkflowRulesMarkdown(raw: string) {
   if (!parsed || !parsed.enabled) {
     return WORKFLOW_RULES_DISABLED_MARKDOWN;
   }
+  const lightweight = isLightweightWorkflowPresentation(parsed);
 
   const rules: string[] = [];
-  rules.push("**Workflow 规则**");
+  rules.push(lightweight ? "**讨论规则**" : "**讨论规则（自定义 workflow）**");
   rules.push("");
   rules.push(`- 版本：v${parsed.workflowVersion}`);
   rules.push("- 状态：已启用");
   rules.push("");
+
+  if (lightweight) {
+    rules.push("**默认讨论模式**");
+    rules.push(`- 开局注入提示词：${parsed.promptPolicies.openingPrompt ? "已配置" : "未配置"}`);
+    rules.push("- 讨论会从第 1 轮直接开始，不默认插入分析、选举或收束阶段。");
+    rules.push(`- 完成模式：${parsed.completion.mode}`);
+    rules.push(`- 输出格式：${parsed.promptPolicies.responseFormat.requireMarkdown ? "Markdown" : "不强制 Markdown"}`);
+    rules.push(`- 禁止原始 JSON：${parsed.promptPolicies.responseFormat.forbidRawJson ? "是" : "否"}`);
+    rules.push(
+      `- 单轮输出预算：讨论=${parsed.promptPolicies.outputBudget.discussionMaxTokens ?? "不设上限"}；写作=${parsed.promptPolicies.outputBudget.writingMaxTokens ?? "不设上限"}`
+    );
+    rules.push(`- Round 1 公平性提示：${parsed.promptPolicies.round1Fairness ? "开启" : "关闭"}`);
+    rules.push(
+      `- 允许写入路径：${parsed.deliverables.allowedPaths.length ? parsed.deliverables.allowedPaths.join(" / ") : "（无）"}`
+    );
+    return rules.join("\n");
+  }
 
   rules.push("**阶段机**");
   rules.push(`- 开局注入提示词：${parsed.promptPolicies.openingPrompt ? "已配置" : "未配置"}`);
@@ -370,13 +410,13 @@ function formatWorkflowRulesMarkdown(raw: string) {
   rules.push("**官方投票（选举）**");
   rules.push(`- 允许投票起始轮次：第 ${parsed.election.startRound} 轮起`);
   rules.push(
-    `- 阶段切换：Phase 1.5 从第 ${parsed.phaseMachine.transitionRules.election.startRound} 轮开始；自动开选举票=${parsed.phaseMachine.transitionRules.election.autoOpen ? "是" : "否"}`
+    `- 选举阶段已配置：${parsed.phaseMachine.phases.some((phase) => phase.kind === "election") ? "是" : "否"}；选举从第 ${parsed.phaseMachine.transitionRules.election.startRound} 轮开始；自动开选举票=${parsed.phaseMachine.transitionRules.election.autoOpen ? "是" : "否"}`
   );
-  rules.push(`- 选举角色：${parsed.election.roles.length ? parsed.election.roles.join(" / ") : "（无，禁止 election）"}`);
-  rules.push(`- 平票处理：${parsed.voting.governance.tieBreaker === "seat_order" ? "按席位顺序决胜" : "未通过后回到 Phase 1，再进入下一次 Phase 1.5"}`);
+  rules.push(`- 选举角色：${parsed.election.roles.length ? parsed.election.roles.join(" / ") : "（无，不使用选举）"}`);
+  rules.push(`- 平票处理：${parsed.voting.governance.tieBreaker === "seat_order" ? "按席位顺序决胜" : "重新投票"}`);
   rules.push(`- 最大平票重投次数：${parsed.voting.governance.maxTieRounds}`);
   rules.push(
-    `- Phase 1.5 未通过后：继续讨论直到通过=${parsed.phaseMachine.transitionRules.election.reopenUntilPassed ? "是" : "否"}；两次选举之间至少讨论轮数=${parsed.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes}`
+    `- 选举未通过后：继续讨论直到通过=${parsed.phaseMachine.transitionRules.election.reopenUntilPassed ? "是" : "否"}；两次选举之间至少讨论轮数=${parsed.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes}`
   );
   rules.push(`- 平票后建议模式：${parsed.voting.governance.fallbackMode ?? "（无）"}`);
   rules.push(
@@ -389,14 +429,15 @@ function formatWorkflowRulesMarkdown(raw: string) {
   rules.push("");
 
   rules.push("**输出与交付**");
+  rules.push(`- 完成模式：${parsed.completion.mode}`);
   rules.push(
-    `- Phase 3 进入条件：先进入 Phase 2.5 入场表决；自动发起入场表决=${parsed.phaseMachine.transitionRules.finalization.autoOpenVote ? "是" : "否"}；要求全员同意=${parsed.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "是" : "否"}`
+    `- 收束投票阶段已配置：${parsed.phaseMachine.phases.some((phase) => phase.kind === "finalization_vote") ? "是" : "否"}；自动发起=${parsed.phaseMachine.transitionRules.finalization.autoOpenVote ? "是" : "否"}；要求全员同意=${parsed.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "是" : "否"}`
   );
   rules.push(
-    `- 入场表决失败后：继续讨论直到通过=${parsed.phaseMachine.transitionRules.finalization.reopenUntilPassed ? "是" : "否"}；两次投票之间至少讨论轮数=${parsed.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes}`
+    `- 收束投票失败后：继续讨论直到通过=${parsed.phaseMachine.transitionRules.finalization.reopenUntilPassed ? "是" : "否"}；两次投票之间至少讨论轮数=${parsed.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes}`
   );
   rules.push(
-    `- 完成限制：必须先进入 Phase 3 才能完成=${parsed.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "是" : "否"}`
+    `- 收束阶段已配置：${parsed.phaseMachine.phases.some((phase) => phase.kind === "finalization") ? "是" : "否"}；必须先进入收束阶段才能完成=${parsed.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "是" : "否"}`
   );
   rules.push(`- 输出格式：${parsed.promptPolicies.responseFormat.requireMarkdown ? "Markdown" : "不强制 Markdown"}`);
   rules.push(`- 禁止原始 JSON：${parsed.promptPolicies.responseFormat.forbidRawJson ? "是" : "否"}`);
@@ -412,7 +453,7 @@ function formatWorkflowRulesMarkdown(raw: string) {
       `- 原始点子库：${parsed.ideaBank.rawIdeaBankPath ?? "（无）"}`
     );
     rules.push(
-      `- 点子筛选结果文件：${[
+      `- 点子库派生文件：${[
         parsed.ideaBank.derivedFiles.selectedSTierPath,
         parsed.ideaBank.derivedFiles.selectedATierPath,
         parsed.ideaBank.derivedFiles.rejectedOrMergedPath,
@@ -494,8 +535,11 @@ function parseWorkflowConfig(raw: string | null) {
 
 function getWorkflowMinimumAnalysisRounds(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 0;
+  const hasElectionPhase =
+    workflow.phaseMachine.phases.some((phase) => phase.kind === "election") && workflow.election.roles.length > 0;
   const analysisPhase = workflow.phaseMachine.phases.find((phase) => phase.kind === "analysis");
   const analysisMinRounds = analysisPhase?.minRounds ?? 0;
+  if (!hasElectionPhase) return analysisMinRounds;
   return Math.max(workflow.phaseMachine.transitionRules.election.startRound - 1, analysisMinRounds);
 }
 
@@ -510,16 +554,27 @@ function getWorkflowPhaseMinRounds(
 
 function getWorkflowEarliestDeliberationRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
+  const hasElectionPhase =
+    workflow.phaseMachine.phases.some((phase) => phase.kind === "election") && workflow.election.roles.length > 0;
+  if (!hasElectionPhase) {
+    return Math.max(1, getWorkflowMinimumAnalysisRounds(workflow) + 1);
+  }
   return getWorkflowMinimumAnalysisRounds(workflow) + getWorkflowPhaseMinRounds(workflow, "election", 1) + 1;
 }
 
 function getWorkflowEarliestFinalizationRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
+  if (!workflow.phaseMachine.phases.some((phase) => phase.kind === "finalization")) {
+    return getWorkflowEarliestFinalizationVoteRound(workflow);
+  }
   return getWorkflowEarliestFinalizationVoteRound(workflow) + Math.max(0, getWorkflowPhaseMinRounds(workflow, "finalization_vote", 1));
 }
 
 function getWorkflowEarliestFinalizationVoteRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
+  if (!workflow.phaseMachine.phases.some((phase) => phase.kind === "finalization_vote")) {
+    return getWorkflowEarliestDeliberationRound(workflow);
+  }
   const minimumDiscussionRounds = Math.max(1, getWorkflowPhaseMinRounds(workflow, "deliberation", 0));
   return getWorkflowEarliestDeliberationRound(workflow) + minimumDiscussionRounds;
 }
@@ -591,24 +646,30 @@ function resolveDirectoryPhaseForRound(
       : null;
   if (openVote && currentRound !== null && round === currentRound) {
     if (openVote.kind === "election") {
-      return toDirectoryPhaseInfo(phaseByKind.get("election"));
+      return toDirectoryPhaseInfo(phaseByKind.get("election") ?? phaseByKind.get("deliberation") ?? phaseByKind.get("analysis"));
     }
     if (openVote.kind === "finalization") {
-      return toDirectoryPhaseInfo(phaseByKind.get("finalization_vote"));
+      return toDirectoryPhaseInfo(phaseByKind.get("finalization_vote") ?? phaseByKind.get("deliberation") ?? phaseByKind.get("finalization"));
     }
-    return toDirectoryPhaseInfo(phaseByKind.get("finalization"));
+    return toDirectoryPhaseInfo(phaseByKind.get("finalization") ?? phaseByKind.get("deliberation") ?? phaseByKind.get("analysis"));
   }
   if (closedVote?.kind === "election") {
-    return toDirectoryPhaseInfo(phaseByKind.get("election"));
+    return toDirectoryPhaseInfo(phaseByKind.get("election") ?? phaseByKind.get("deliberation") ?? phaseByKind.get("analysis"));
   }
   if (closedVote?.kind === "finalization") {
-    return toDirectoryPhaseInfo(phaseByKind.get("finalization_vote"));
+    return toDirectoryPhaseInfo(phaseByKind.get("finalization_vote") ?? phaseByKind.get("deliberation") ?? phaseByKind.get("finalization"));
   }
   if (hasVoteResult) {
-    if (round < getWorkflowEarliestDeliberationRound(workflow)) {
+    const hasElectionPhase =
+      workflow.phaseMachine.phases.some((phase) => phase.kind === "election") && workflow.election.roles.length > 0;
+    if (hasElectionPhase && round < getWorkflowEarliestDeliberationRound(workflow)) {
       return toDirectoryPhaseInfo(phaseByKind.get("election"));
     }
-    if (round >= getWorkflowEarliestFinalizationVoteRound(workflow) && round < getWorkflowEarliestFinalizationRound(workflow)) {
+    if (
+      phaseByKind.has("finalization_vote") &&
+      round >= getWorkflowEarliestFinalizationVoteRound(workflow) &&
+      round < getWorkflowEarliestFinalizationRound(workflow)
+    ) {
       return toDirectoryPhaseInfo(phaseByKind.get("finalization_vote"));
     }
   }
@@ -660,7 +721,7 @@ function formatLiveStage(stage: string | null | undefined, paused: boolean) {
 
 function isPhaseEntryRound(workflow: NormalizedDebateWorkflow | null, round: number, kind: DebateDirectoryPhaseInfo["kind"]) {
   if (!workflow?.enabled) return false;
-  if (kind === "analysis") return round === 1;
+  if (kind === "analysis") return round < getWorkflowEarliestDeliberationRound(workflow);
   if (kind === "election") return round === workflow.phaseMachine.transitionRules.election.startRound;
   if (kind === "deliberation") return round === getWorkflowEarliestDeliberationRound(workflow);
   if (kind === "finalization_vote") return round === getWorkflowEarliestFinalizationVoteRound(workflow);
@@ -677,6 +738,7 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
     roundTurns,
     agentCount,
     isOpen,
+    showWorkflowPhaseUi,
     phase,
     hasInjectedPrompt,
     isCurrentPhaseRound,
@@ -699,7 +761,7 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
       <summary style={{ cursor: "pointer" }}>
         <strong>第 {round} 轮</strong>
         <span className="muted"> · {roundTurns.length}/{agentCount}</span>
-        {phase ? (
+        {showWorkflowPhaseUi && phase ? (
           <span
             className="softBox"
             style={{
@@ -735,7 +797,7 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
     </summary>
       {isOpen ? (
         <div className="stack" style={{ marginTop: 10 }}>
-          {phase ? (
+          {showWorkflowPhaseUi && phase ? (
             <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
               <span className="muted">阶段：{phase.title}</span>
               {phase.description ? <span className="muted">· {phase.description}</span> : null}
@@ -1134,13 +1196,13 @@ function WorkflowRulesPanel(props: {
   return (
     <div className="panel stack" style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
       <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-        <strong style={{ fontSize: 14 }}>Workflow 规则</strong>
+        <strong style={{ fontSize: 14 }}>讨论规则</strong>
         <button className="btn" type="button" disabled={props.loading} onClick={props.onRefresh}>
           刷新
         </button>
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
-        <MarkdownView className="md-compact" value={props.markdown || "**Workflow 规则**\n\n- 读取中..."} />
+        <MarkdownView className="md-compact" value={props.markdown || "**讨论规则**\n\n- 读取中..."} />
       </div>
     </div>
   );
@@ -1995,7 +2057,7 @@ function buildVoteMarkdown(vote: OfficialVoteClosed) {
         ? Math.floor(vote.result.attempt)
         : 1;
 
-    lines.push(`- 结果：${vote.result.passed ? "通过，下一轮进入 Phase 3" : "未通过，继续留在 Phase 2.5"}`);
+    lines.push(`- 结果：${vote.result.passed ? "通过，下一轮进入收束阶段" : "未通过，继续停留在收束投票前阶段"}`);
     lines.push(`- 尝试次数：第 ${attempt} 次`);
     lines.push(`- 需要席位数：${vote.result.requiredSeats}`);
     lines.push(`- 同意：${vote.result.agreeCount}`);
@@ -2493,7 +2555,9 @@ function FileActivityPanel(props: {
                         ? "rgba(37, 99, 235, 0.1)"
                         : item.actorRoleType === "Supervisor"
                           ? "rgba(217, 119, 6, 0.12)"
-                          : "rgba(22, 163, 74, 0.12)"
+                          : item.actorRoleType === "Specialist" || item.actorRoleType === "Contributor"
+                            ? "rgba(22, 163, 74, 0.12)"
+                            : "rgba(100, 116, 139, 0.14)"
                   }}
                 >
                   {formatFileActivityRoleType(item.actorRoleType)}
@@ -4459,6 +4523,7 @@ export default function DebateDetailPage() {
     voteByRound,
     votePathsByRound
   ]);
+  const showWorkflowPhaseUi = useMemo(() => !isLightweightWorkflowPresentation(workflowConfig), [workflowConfig]);
 
   const directoryRounds = useMemo(() => {
     const turnsByRound = new Map(turnRoundGroups.map((group) => [group.roundNumber, group.turns] as const));
@@ -4728,7 +4793,7 @@ export default function DebateDetailPage() {
   const leftTabs: Array<{ id: LeftTab; label: string; icon: LeftTabIconName }> = [
     { id: "status", label: "辩论状态", icon: "status" },
     { id: "participants", label: "参与者", icon: "participants" },
-    { id: "workflow", label: "Workflow", icon: "workflow" },
+    { id: "workflow", label: "规则", icon: "workflow" },
     { id: "memory", label: "文件", icon: "memory" },
     { id: "file_activity", label: "文件记录", icon: "file_activity" }
   ];
@@ -4736,7 +4801,7 @@ export default function DebateDetailPage() {
   const leftTabTitle: Record<LeftTab, string> = {
     status: "辩论状态",
     participants: "参与者",
-    workflow: "Workflow 规则",
+    workflow: "讨论规则",
     memory: "文件",
     file_activity: "文件记录"
   };
@@ -5100,7 +5165,7 @@ export default function DebateDetailPage() {
             {loadingOlderTurns ? "加载中..." : `加载更多发言（追加 ${OLDER_TURNS_PAGE_SIZE} 条）`}
           </button>
         ) : null}
-        {currentDirectoryPhase ? (
+        {showWorkflowPhaseUi && currentDirectoryPhase ? (
           <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
             <span className="softBox" style={{ padding: "4px 8px", fontSize: 12 }}>
               当前阶段：{currentDirectoryPhase.title}
@@ -5147,6 +5212,7 @@ export default function DebateDetailPage() {
                 roundTurns={roundTurns}
                 agentCount={agentCount}
                 isOpen={Boolean(openRoundsByNumber[round])}
+                showWorkflowPhaseUi={showWorkflowPhaseUi}
                 phase={phase}
                 hasInjectedPrompt={hasInjectedPrompt}
                 isCurrentPhaseRound={isCurrentPhaseRound}

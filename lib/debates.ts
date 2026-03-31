@@ -8,7 +8,12 @@ import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
 import { runDebate } from "@/lib/runtime";
 import type { DebateRecord } from "@/lib/types";
 import { createDebateSchema, updateDebateQuestionSchema, updateDebateSharingSchema } from "@/lib/validation";
-import { formatRequiredDeliverableSummary, normalizeDebateWorkflow, toCanonicalWorkflowConfig } from "@/lib/workflow";
+import {
+  createDefaultDebateWorkflowConfig,
+  formatRequiredDeliverableSummary,
+  normalizeDebateWorkflow,
+  toCanonicalWorkflowConfig
+} from "@/lib/workflow";
 
 const DISPLAY_NAME_ADJECTIVES = ["青", "赤", "白", "玄", "金", "银", "苍", "墨", "紫", "绿", "蓝", "橙"];
 const DISPLAY_NAME_NOUNS = ["狐", "狼", "鹰", "鲸", "蛇", "虎", "鹿", "鸦", "猫", "犬", "熊", "龙", "雀"];
@@ -41,200 +46,18 @@ function buildFileActivityDiagnosticLabels(input: {
 }) {
   const labels: string[] = [];
   const growth = Math.max(0, input.afterContent.length - input.beforeContent.length);
-  if (input.actorRoleType === "Host") {
-    if (input.writeMode === "replace" || input.summary.changed >= 12 || growth >= 1800) {
-      labels.push("定稿中");
-    } else if (input.summary.added > 0 || input.summary.deleted > 0) {
-      labels.push("整合中");
-    }
-  } else if (input.actorRoleType === "Supervisor") {
-    if (input.summary.added >= 10 || growth >= 1200 || input.summary.changed >= 8) {
-      labels.push("审查角色参与写入");
-    }
+  if (input.writeMode === "replace" || input.summary.changed >= 12 || growth >= 1800) {
+    labels.push("大幅改写中");
+  } else if (input.summary.added > 0 || input.summary.deleted > 0) {
+    labels.push("内容整合中");
+  }
+  if (input.summary.added >= 10 || growth >= 1200) {
+    labels.push("内容扩写中");
   }
   return labels;
 }
 
-const DEFAULT_WORKFLOW_JSON = JSON.stringify(
-  {
-    workflowVersion: 1,
-    enabled: true,
-    phaseMachine: {
-      phases: [
-        {
-          id: "phase-1",
-          title: "Phase 1 · 议员实战演练",
-          kind: "analysis",
-          description: "前两轮先独立分析、归类、指出风险，并给出主持人/监管者候选建议。",
-          minRounds: null,
-          injectedPrompt:
-            "【Phase 1】当前仍处于主持人与监管者选举之前的分析阶段。本阶段只能做独立分析、提出候选建议、说明谁适合主持人或监管者以及理由，但禁止正式投票，禁止写“我投谁”，禁止提前宣布谁当选。所有席位现在都还只是议员，真正投票只能等进入 Phase 1.5 后再进行。"
-        },
-        {
-          id: "phase-1-5",
-          title: "Phase 1.5 · 主持人与监管者选举",
-          kind: "election",
-          description: "用一整轮完成主持人与监管者选举；如果本轮未选出结果，则先回到 Phase 1 补充一轮全员发言，再重新进入本阶段。",
-          minRounds: null,
-          injectedPrompt:
-            "【Phase 1.5】当前是主持人与监管者的正式选举轮。你必须基于前面 Phase 1 的实际表现投票，并把判断依据讲清楚。禁止借投票继续推进新设定、新主线或新事件。如果本轮没能选出结果，下一轮会先回到 Phase 1 继续补充发言，之后系统再发起下一次 Phase 1.5 选举。"
-        },
-        {
-          id: "phase-2",
-          title: "Phase 2 · 动态轮换讨论",
-          kind: "deliberation",
-          description: "主持人宣布统一模式，全员围绕创意发散、逻辑审核与方案收敛循环推进。",
-          minRounds: null,
-          injectedPrompt:
-            "【Phase 2】当前是动态轮换讨论阶段。每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子。禁止一口气铺开很多点子、每个只写一句简介。你必须主动做取舍，只挑最值得推进、最能说服对手的少数点子深讲。对每个点子，都要尽量讲清：它具体是什么、为什么现在优先讲它、它怎样运作、它比前案强在哪里、别人可能怎样反驳、你准备如何回应。重点不是点子数量，而是详细、完整、足以说服别人的思考过程。"
-        },
-        {
-          id: "phase-2-5",
-          title: "Phase 2.5 · Phase 3 入场表决",
-          kind: "finalization_vote",
-          description: "正式进入 Phase 3 前，先用一整轮检查是否已经具备收束条件，并完成官方入场表决。",
-          minRounds: null,
-          injectedPrompt:
-            "【Phase 2.5】当前是进入 Phase 3 前的正式入场表决阶段。你需要先判断：现有争议是否已经收束、关键结构是否稳定、必须交付的文件是否已经具备被汇总的前提。如果支持进入 Phase 3，必须把成熟依据讲清楚；如果反对，也必须明确指出还缺什么。禁止只表态不解释。只有全员同意，下一轮才正式进入 Phase 3。"
-        },
-        {
-          id: "phase-3",
-          title: "Phase 3 · 共识收敛与最终交付",
-          kind: "finalization",
-          description: "进入最终表决与最终产物输出，完成收敛与交付。",
-          minRounds: null
-        }
-      ],
-      transitionRules: {
-        election: {
-          startRound: 3,
-          autoOpen: true,
-          reopenUntilPassed: true,
-          discussionRoundsBetweenVotes: 1
-        },
-        finalization: {
-          autoOpenVote: true,
-          requireUnanimousVote: true,
-          reopenUntilPassed: true,
-          discussionRoundsBetweenVotes: 1,
-          requirePhaseForCompletion: true
-        }
-      }
-    },
-    election: {
-      startRound: 3,
-      roles: ["Host", "Supervisor"],
-      speakingOrder: { firstRole: "Host", lastRole: "Supervisor" }
-    },
-    seatOrderRules: [
-      { afterRound: 1, policy: { type: "reverse" } },
-      { afterRound: 2, policy: { type: "reverse" } }
-    ],
-    voting: {
-      custom: { minOptions: 2, maxOptions: null },
-      announcement: {
-        announcer: { type: "role", role: "Host" },
-        fallback: { type: "seat", seat: 1 }
-      },
-      governance: {
-        tieBreaker: "revote",
-        maxTieRounds: 2,
-        fallbackMode: "逻辑审核员"
-      }
-    },
-    consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true },
-    promptPolicies: {
-      openingPrompt:
-        "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。后发言者的首要任务不是沿着前一个人的结论做一点补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应该直接提出新方案，必要时可以彻底推翻前案。每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子；禁止一次抛出很多点子却每个都只讲一句。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响、你是怎么推到这一步的，让其他人一眼看懂你的意思。另外，在 Phase 1 和 Phase 1 之前严禁提前投票、严禁写“我投谁”、严禁提前宣布主持人或监管者；那只能在正式进入 Phase 1.5 后发生。",
-      round1Fairness: true,
-      responseFormat: {
-        requireMarkdown: true,
-        forbidRawJson: true
-      },
-      outputBudget: {
-        discussionMaxTokens: 2200,
-        writingMaxTokens: 4200
-      }
-    },
-    deliverables: {
-      allowedPaths: ["final/", "outputs/"],
-      requiredFiles: [
-        {
-          path: "final/01-story-core.md",
-          draftRole: "Specialist",
-          reviewRole: "Supervisor",
-          finalRole: "Host",
-          description: "核心卖点、主题、核心冲突、故事承诺",
-          minChars: 1200,
-          minMarkdownHeadings: 4,
-          requiredSnippets: ["核心卖点", "主题", "核心冲突", "故事承诺"]
-        },
-        {
-          path: "final/02-characters.md",
-          draftRole: "Specialist",
-          reviewRole: "Supervisor",
-          finalRole: "Host",
-          description: "主角、关键配角、反派的人物卡与成长弧",
-          minChars: 2200,
-          minMarkdownHeadings: 8,
-          requiredSnippets: ["主角", "关键配角", "反派", "成长弧"]
-        },
-        {
-          path: "final/03-world-and-rules.md",
-          draftRole: "Specialist",
-          reviewRole: "Supervisor",
-          finalRole: "Host",
-          description: "世界观、关键设定、限制条件、代价与规则",
-          minChars: 1800,
-          minMarkdownHeadings: 5,
-          requiredSnippets: ["世界观", "规则", "限制条件", "代价"]
-        },
-        {
-          path: "final/04-plot-architecture.md",
-          draftRole: "Specialist",
-          reviewRole: "Supervisor",
-          finalRole: "Host",
-          description: "三幕或多幕结构、关键反转、冲突升级与收束",
-          minChars: 2600,
-          minMarkdownHeadings: 7,
-          requiredSnippets: ["幕 1", "幕 2", "幕 3", "关键反转"]
-        },
-        {
-          path: "final/05-chapter-outline.md",
-          draftRole: "Specialist",
-          reviewRole: "Supervisor",
-          finalRole: "Host",
-          description: "章节级细纲，每章包含目标、冲突、转折、结果、钩子",
-          minChars: 5000,
-          minMarkdownHeadings: 16,
-          requiredSnippets: ["章节目标", "冲突", "转折", "结果", "钩子"]
-        },
-        {
-          path: "final/06-foreshadowing-ledger.md",
-          draftRole: "Specialist",
-          reviewRole: "Supervisor",
-          finalRole: "Host",
-          description: "伏笔与回收表，标明埋点、回收位置、作用",
-          minChars: 1800,
-          minMarkdownHeadings: 6,
-          requiredSnippets: ["伏笔", "回收", "埋点", "作用"]
-        },
-        {
-          path: "final/novel_outline_v2.md",
-          draftRole: "Specialist",
-          reviewRole: "Supervisor",
-          finalRole: "Host",
-          description: "最终总细纲汇总稿，引用并整合上述文件",
-          minChars: 7000,
-          minMarkdownHeadings: 10,
-          requiredSnippets: ["核心卖点", "人物", "世界观", "章节", "伏笔", "逻辑自检"]
-        }
-      ]
-    }
-  },
-  null,
-  2
-);
+const DEFAULT_WORKFLOW_JSON = JSON.stringify(createDefaultDebateWorkflowConfig(), null, 2);
 
 function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
   return {
@@ -266,13 +89,18 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
 }
 
 function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<ReturnType<typeof normalizeDebateWorkflow>>) {
-  const analysisMinRounds = Math.max(
-    workflow.election.startRound - 1,
-    workflow.phaseMachine.phases.find((phase) => phase.kind === "analysis")?.minRounds ?? 0
-  );
-  const electionMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "election")?.minRounds ?? 1;
+  const hasElectionPhase = workflow.phaseMachine.phases.some((phase) => phase.kind === "election");
+  const hasFinalizationVotePhase = workflow.phaseMachine.phases.some((phase) => phase.kind === "finalization_vote");
+  const hasFinalizationPhase = workflow.phaseMachine.phases.some((phase) => phase.kind === "finalization");
+  const analysisMinRounds = hasElectionPhase
+    ? Math.max(
+        workflow.election.startRound - 1,
+        workflow.phaseMachine.phases.find((phase) => phase.kind === "analysis")?.minRounds ?? 0
+      )
+    : (workflow.phaseMachine.phases.find((phase) => phase.kind === "analysis")?.minRounds ?? 0);
+  const electionMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "election")?.minRounds ?? 0;
   const deliberationMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "deliberation")?.minRounds ?? 0;
-  const finalizationVoteMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "finalization_vote")?.minRounds ?? 1;
+  const finalizationVoteMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "finalization_vote")?.minRounds ?? 0;
   const finalizationMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "finalization")?.minRounds ?? 0;
   lines.push(`- version: v${workflow.workflowVersion}`);
   if (workflow.phaseMachine.phases.length > 0) {
@@ -284,14 +112,15 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<Retur
     }
   }
   lines.push(
-    `- phase minRounds: analysis=${analysisMinRounds}; election=${electionMinRounds}; deliberation=${deliberationMinRounds}; finalization_vote=${finalizationVoteMinRounds}; finalization=${finalizationMinRounds}`
+    `- phase minRounds: analysis=${analysisMinRounds}; election=${hasElectionPhase ? electionMinRounds : "n/a"}; deliberation=${deliberationMinRounds}; finalization_vote=${hasFinalizationVotePhase ? finalizationVoteMinRounds : "n/a"}; finalization=${hasFinalizationPhase ? finalizationMinRounds : "n/a"}`
   );
   lines.push(
-    `- phase transitions: election@round ${workflow.phaseMachine.transitionRules.election.startRound}; election autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}; election reopenUntilPassed=${workflow.phaseMachine.transitionRules.election.reopenUntilPassed ? "yes" : "no"}; election discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes}`
+    `- election phase: configured=${hasElectionPhase ? "yes" : "no"}; roles=${workflow.election.roles.length ? workflow.election.roles.join("/") : "(none)"}; startRound=${workflow.phaseMachine.transitionRules.election.startRound}; autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}; reopenUntilPassed=${workflow.phaseMachine.transitionRules.election.reopenUntilPassed ? "yes" : "no"}; discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes}`
   );
   lines.push(
-    `- phase finalization: autoOpenVote=${workflow.phaseMachine.transitionRules.finalization.autoOpenVote ? "yes" : "no"}; requireUnanimousVote=${workflow.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "yes" : "no"}; reopenUntilPassed=${workflow.phaseMachine.transitionRules.finalization.reopenUntilPassed ? "yes" : "no"}; discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes}; requirePhaseForCompletion=${workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "yes" : "no"}`
+    `- consolidation controls: votePhase=${hasFinalizationVotePhase ? "yes" : "no"}; consolidationPhase=${hasFinalizationPhase ? "yes" : "no"}; autoOpenVote=${workflow.phaseMachine.transitionRules.finalization.autoOpenVote ? "yes" : "no"}; requireUnanimousVote=${workflow.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "yes" : "no"}; reopenUntilPassed=${workflow.phaseMachine.transitionRules.finalization.reopenUntilPassed ? "yes" : "no"}; discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes}; requirePhaseForCompletion=${workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "yes" : "no"}`
   );
+  lines.push(`- completion mode: ${workflow.completion.mode}`);
   lines.push(`- election startRound: ${workflow.election.startRound}`);
   lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
   lines.push(`- vote tieBreaker: ${workflow.voting.governance.tieBreaker}`);
@@ -668,7 +497,7 @@ async function copyStrategyRoleFilesToDebateAgent(input: {
     const path = String(file.path ?? "");
     const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").trim().toLowerCase();
     if (normalized.startsWith("memory/")) continue;
-    // Strategy role files are meant to seed per-seat prompt context and templates.
+    // Strategy role files are meant to seed per-seat prompt context and reusable workflow/content files.
     // Never seed debate-internal runtime files (they can cause "previous debate memory" leakage).
     if (normalized.startsWith("debate/")) continue;
     if (normalized.startsWith("context/")) continue;
@@ -1908,7 +1737,7 @@ export async function startDebateSegment(id: string, input: unknown) {
   }
 
   lines.push("");
-  lines.push("## Workflow (summary)");
+  lines.push("## Rules (summary)");
   if (!workflow?.enabled) {
     lines.push("- disabled (no workflow.json or enabled=false)");
   } else {
