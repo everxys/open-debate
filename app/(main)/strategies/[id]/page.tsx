@@ -35,6 +35,8 @@ type WorkflowPhasePrompt = {
   injectedPrompt: string;
     };
 
+type WorkflowPhaseKind = WorkflowPhasePrompt["kind"];
+
 type WorkflowContextAccessRule = {
   scope: "shared" | "seat";
   pathPrefix: string;
@@ -45,7 +47,7 @@ type WorkflowContextAccessRule = {
 };
 
 type WorkflowPhaseGateRule = WorkflowContextAccessRule & {
-  phaseKind: WorkflowPhasePrompt["kind"];
+  phaseKind: WorkflowPhaseKind;
 };
 
 type WorkflowContextAccess = {
@@ -125,7 +127,7 @@ function normalizeContextAccessPayload(value: unknown): WorkflowContextAccess {
     ? obj.unlockAfterPhase.map((item) => {
         const rule = normalizeRule(item);
         const raw = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : null;
-        const phaseKind =
+        const phaseKind: WorkflowPhaseKind =
           raw?.phaseKind === "analysis" ||
           raw?.phaseKind === "election" ||
           raw?.phaseKind === "deliberation" ||
@@ -234,7 +236,7 @@ export default function StrategyDetailPage() {
         setWorkflowOpeningPrompt(typeof workflowPayload.data?.openingPrompt === "string" ? workflowPayload.data.openingPrompt : "");
         const phases = Array.isArray(workflowPayload.data?.phases) ? workflowPayload.data.phases : [];
         setWorkflowPhasePrompts(
-          phases.map((phase) => ({
+          phases.map((phase: Record<string, unknown>) => ({
             id: String(phase.id ?? ""),
             title: String(phase.title ?? ""),
             kind:
@@ -611,7 +613,7 @@ export default function StrategyDetailPage() {
       }
       const phases = Array.isArray(payload.data?.phases) ? payload.data.phases : [];
       setWorkflowPhasePrompts(
-        phases.map((phase) => ({
+        phases.map((phase: Record<string, unknown>) => ({
           id: String(phase.id ?? ""),
           title: String(phase.title ?? ""),
           kind:

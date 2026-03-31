@@ -113,7 +113,7 @@ export class FsTreeModel {
     while (current && current.parent) {
       if (current.dirs.size > 0) return;
       if (current.files.size > 0) return;
-      const parent = current.parent;
+      const parent: DirEntry = current.parent;
       parent.dirs.delete(current.name);
       this.rebuildChildren(parent);
       current = parent;

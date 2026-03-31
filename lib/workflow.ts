@@ -602,7 +602,7 @@ function normalizeSeatOrRoleSelector(
   return { type: "seat" as const, seat: toPositiveInt(obj?.seat) ?? fallback.seat };
 }
 
-function normalizeVoting(value: unknown) {
+function normalizeVoting(value: unknown): NormalizedDebateWorkflow["voting"] {
   if (typeof value !== "object" || value === null) {
     return {
       custom: { minOptions: null as number | null, maxOptions: null as number | null },
@@ -1164,7 +1164,7 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
 export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig | null {
   const normalized = normalizeDebateWorkflow(input);
   if (!normalized) return null;
-  return {
+  const canonical: DebateWorkflowConfig = {
     workflowVersion: normalized.workflowVersion,
     enabled: normalized.enabled,
     phaseMachine: {
@@ -1214,7 +1214,7 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
         fallback: normalized.voting.announcement.fallback
       },
       governance: {
-        tieBreaker: normalized.voting.governance.tieBreaker,
+        tieBreaker: normalized.voting.governance.tieBreaker as "revote" | "seat_order",
         maxTieRounds: normalized.voting.governance.maxTieRounds,
         fallbackMode: normalized.voting.governance.fallbackMode
       }
@@ -1282,6 +1282,7 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
       }))
     }
   };
+  return canonical;
 }
 
 export function safeParseWorkflowJson(raw: string | null): NormalizedDebateWorkflow | null {

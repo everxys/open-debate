@@ -2152,6 +2152,9 @@ type OfficialVote =
       createdAt: string;
     };
 
+type OpenOfficialVote = Extract<OfficialVote, { status: "open" }>;
+type ClosedOfficialVote = Extract<OfficialVote, { status: "closed" }>;
+
 const FINALIZATION_VOTE_APPROVE = "同意进入 Phase 3";
 const FINALIZATION_VOTE_REJECT = "不同意，继续 Phase 2";
 
@@ -2913,7 +2916,14 @@ async function toolVoteOpen(input: {
   options?: string[];
   allowWithoutWorkflow?: boolean;
   bypassStartRound?: boolean;
-  meta?: { forcedOpen?: boolean; reason?: string };
+  meta?: {
+    forcedOpen?: boolean;
+    reason?: string;
+    tieRound?: number;
+    reopenedBecause?: string;
+    attempt?: number;
+    previousFailedRound?: number;
+  };
 }) {
   const now = new Date().toISOString();
   const workflow = await loadDebateWorkflow(input.userId, input.debateId);
@@ -2944,7 +2954,7 @@ async function toolVoteOpen(input: {
   });
 
   if (input.kind === "election") {
-    if (!workflowEnabled) {
+    if (!workflow?.enabled) {
       return { ok: false, error: "Election vote requires workflow.json (enabled=true)." };
     }
     if ((workflow.election.roles ?? []).length <= 0) {
@@ -2989,7 +2999,7 @@ async function toolVoteOpen(input: {
   }
 
   if (input.kind === "finalization") {
-    if (!workflowEnabled) {
+    if (!workflow?.enabled) {
       return { ok: false, error: "Finalization entry vote requires workflow.json (enabled=true)." };
     }
     if (currentPhase?.kind === "finalization") {
@@ -3064,14 +3074,15 @@ async function toolVoteCast(input: {
   const now = new Date().toISOString();
   const open = await loadOpenVote(input.userId, input.debateId);
   if (!open) return { ok: false, error: "No open vote." };
+  const currentOpen: OpenOfficialVote = open;
   const workflow = await loadDebateWorkflow(input.userId, input.debateId);
   const workflowEnabled = Boolean(workflow?.enabled);
-  const forcedOpen = Boolean(open.meta?.forcedOpen);
-  if (!workflowEnabled && open.kind !== "custom") {
+  const forcedOpen = Boolean(currentOpen.meta?.forcedOpen);
+  if (!workflowEnabled && currentOpen.kind !== "custom") {
     return { ok: false, error: "Official voting is disabled (missing workflow.json or enabled=false)." };
   }
   const startRound = workflowEnabled ? getWorkflowElectionStartRound(workflow) : 1;
-  if (workflowEnabled && open.roundNumber < startRound && !forcedOpen) {
+  if (workflowEnabled && currentOpen.roundNumber < startRound && !forcedOpen) {
     return { ok: false, error: `Official voting starts from Round ${startRound}.` };
   }
 
@@ -3148,14 +3159,15 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
   const now = new Date().toISOString();
   const open = await loadOpenVote(input.userId, input.debateId);
   if (!open) return { ok: false, error: "No open vote." };
+  const currentOpen: OpenOfficialVote = open;
   const workflow = await loadDebateWorkflow(input.userId, input.debateId);
   const workflowEnabled = Boolean(workflow?.enabled);
-  const forcedOpen = Boolean(open.meta?.forcedOpen);
-  if (!workflowEnabled && open.kind !== "custom") {
+  const forcedOpen = Boolean(currentOpen.meta?.forcedOpen);
+  if (!workflowEnabled && currentOpen.kind !== "custom") {
     return { ok: false, error: "Official voting is disabled (missing workflow.json or enabled=false)." };
   }
   const startRound = workflowEnabled ? getWorkflowElectionStartRound(workflow) : 1;
-  if (workflowEnabled && open.roundNumber < startRound && !forcedOpen) {
+  if (workflowEnabled && currentOpen.roundNumber < startRound && !forcedOpen) {
     return { ok: false, error: `Official voting starts from Round ${startRound}.` };
   }
   const voteGovernance = workflow?.voting.governance ?? {
@@ -3163,18 +3175,18 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
     maxTieRounds: 2,
     fallbackMode: "逻辑审核员" as string | null
   };
-  const currentTieRound = Math.max(0, Math.floor(Number(open.meta?.tieRound) || 0));
+  const currentTieRound = Math.max(0, Math.floor(Number(currentOpen.meta?.tieRound) || 0));
 
   function buildTieReopenMeta(reason: string) {
     return {
-      ...(open.meta ?? {}),
+      ...(currentOpen.meta ?? {}),
       tieRound: currentTieRound + 1,
       reopenedBecause: reason
     };
   }
 
-  if (open.kind === "election") {
-    const roles = Array.isArray(open.roles) ? open.roles : [];
+  if (currentOpen.kind === "election") {
+    const roles = Array.isArray(currentOpen.roles) ? currentOpen.roles : [];
     if (roles.length <= 0) return { ok: false, error: "Election vote is not configured (roles is empty)." };
     const electionRules = workflow?.phaseMachine.transitionRules.election ?? {
       startRound: 1,
@@ -3182,17 +3194,17 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
       reopenUntilPassed: true,
       discussionRoundsBetweenVotes: 1
     };
-    const attempt = Math.max(1, Math.floor(Number(open.meta?.attempt) || 1));
+    const attempt = Math.max(1, Math.floor(Number(currentOpen.meta?.attempt) || 1));
 
     const roleCounts = new Map<string, Map<string, number>>();
-    for (const role of roles) roleCounts.set(role, new Map<string, number>());
+    for (const role of roles as string[]) roleCounts.set(role, new Map<string, number>());
 
-    for (const ballot of open.ballots ?? []) {
+    for (const ballot of currentOpen.ballots ?? []) {
       const selections =
         ballot && typeof ballot === "object" && (ballot as { selections?: unknown }).selections
           ? ((ballot as { selections?: unknown }).selections as Record<string, unknown>)
           : {};
-      for (const role of roles) {
+      for (const role of roles as string[]) {
         const seat = typeof selections[role] === "string" ? String(selections[role]) : "";
         if (!seat) continue;
         const counts = roleCounts.get(role);
@@ -3221,7 +3233,7 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
     const winners: Record<string, string | null> = {};
     const usedSeats = new Set<string>();
     const roleTies: Record<string, string[]> = {};
-    for (const role of roles) {
+    for (const role of roles as string[]) {
       const counts = roleCounts.get(role) ?? new Map<string, number>();
       const pick = pickWinner(counts, usedSeats);
       const winner = pick.winner;
@@ -3229,7 +3241,7 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
       if (pick.tiedSeats.length > 1 && !winner) roleTies[role] = pick.tiedSeats;
       if (winner) usedSeats.add(winner);
     }
-    const missingRoles = roles.filter((role) => !winners[role]);
+    const missingRoles = (roles as string[]).filter((role: string) => !winners[role]);
     const passed = missingRoles.length === 0;
     const tieSummary = Object.entries(roleTies)
       .map(([role, seats]) => `- ${role}: ${seats.join(" / ")}`)
@@ -3311,7 +3323,7 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
       string,
       { role: string; seat: string; debateAgentId: string; aiAgentId: string; name: string } | null
     > = {};
-    for (const role of roles) {
+    for (const role of roles as string[]) {
       const seat = winners[role];
       if (!seat) {
         appointments[role] = null;
@@ -3364,7 +3376,7 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
     };
     await upsertDebateFile(input.debateId, VOTE_DIRECTIVE_JSON_PATH, JSON.stringify(directiveJson, null, 2), now);
 
-    const roleLines = roles.map((role) => {
+    const roleLines = (roles as string[]).map((role) => {
       const seat = winners[role];
       const info = seat ? bySeat.get(seat) ?? null : null;
       const who = info ? info.name : seat ?? "未能选出";
@@ -3422,7 +3434,7 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
       ...roleLines,
       "",
       "## 票数",
-      ...roles.flatMap((role) => {
+      ...(roles as string[]).flatMap((role: string) => {
         const counts = roleCounts.get(role) ?? new Map<string, number>();
         const tally = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
         return [
@@ -3557,7 +3569,7 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
   }
 
   const counts = new Map<string, number>();
-  for (const ballot of open.ballots ?? []) {
+  for (const ballot of currentOpen.ballots ?? []) {
     counts.set(ballot.choice, (counts.get(ballot.choice) ?? 0) + 1);
   }
   const ranked = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
@@ -3583,10 +3595,10 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
     const reopened: OfficialVote = {
       status: "open",
       kind: "custom",
-      roundNumber: open.roundNumber,
-      title: open.title,
-      prompt: open.prompt,
-      options: open.options,
+      roundNumber: currentOpen.roundNumber,
+      title: currentOpen.title,
+      prompt: currentOpen.prompt,
+      options: currentOpen.options,
       ballots: [],
       meta: buildTieReopenMeta("custom_tie"),
       createdAt: now
@@ -3606,8 +3618,8 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
   const summary = [
     "# 官方投票结果",
     "",
-    `- 标题：${open.title}`,
-    `- 轮次：${open.roundNumber}`,
+    `- 标题：${currentOpen.title}`,
+    `- 轮次：${currentOpen.roundNumber}`,
     winner ? `- 结果：${winner}` : "- 结果：未能选出",
     "",
     "计票与宣布：下一轮首位发言席位必须先用 3-7 条要点总结本次投票结果，并引用 `votes/round-<round>.json`/`votes/round-<round>.md`（如存在）。",
@@ -3617,27 +3629,27 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
       .sort((a, b) => b[1] - a[1])
       .map(([choice, count]) => `- ${choice}: ${count}`)
   ].join("\n");
-  await upsertDebateFile(input.debateId, `${VOTE_RESULT_PREFIX}${open.roundNumber}.md`, summary, now);
+  await upsertDebateFile(input.debateId, `${VOTE_RESULT_PREFIX}${currentOpen.roundNumber}.md`, summary, now);
 
   const directiveJson = {
     kind: "custom",
     at: now,
-    roundNumber: open.roundNumber,
-    title: open.title,
-    prompt: open.prompt,
-    options: open.options,
+    roundNumber: currentOpen.roundNumber,
+    title: currentOpen.title,
+    prompt: currentOpen.prompt,
+    options: currentOpen.options,
     winner,
     counts: Object.fromEntries(counts),
-    ballots: open.ballots ?? [],
-    ...(open.meta ? { meta: open.meta } : {})
+    ballots: currentOpen.ballots ?? [],
+    ...(currentOpen.meta ? { meta: currentOpen.meta } : {})
   };
   await upsertDebateFile(input.debateId, VOTE_DIRECTIVE_JSON_PATH, JSON.stringify(directiveJson, null, 2), now);
 
   const directive = [
     "# 官方指令：投票结果",
     "",
-    `- 标题：${open.title}`,
-    `- 轮次：${open.roundNumber}`,
+    `- 标题：${currentOpen.title}`,
+    `- 轮次：${currentOpen.roundNumber}`,
     winner ? `- 结果：${winner}` : "- 结果：未能选出",
     "",
     "要求：所有席位后续发言必须以该投票结果为准（如有争议，请在下一轮提出并发起新一轮投票）。",
@@ -3648,17 +3660,17 @@ async function toolVoteClose(input: { userId: string; debateId: string; particip
   const closed: OfficialVote = {
     status: "closed",
     kind: "custom",
-    roundNumber: open.roundNumber,
-    title: open.title,
-    prompt: open.prompt,
+    roundNumber: currentOpen.roundNumber,
+    title: currentOpen.title,
+    prompt: currentOpen.prompt,
     result: {
-      ballots: open.ballots ?? [],
+      ballots: currentOpen.ballots ?? [],
       counts: Object.fromEntries(counts),
       winner
     },
-    ...(open.meta ? { meta: open.meta } : {}),
+    ...(currentOpen.meta ? { meta: currentOpen.meta } : {}),
     closedAt: now,
-    createdAt: open.createdAt
+    createdAt: currentOpen.createdAt
   };
   await upsertDebateFile(
     input.debateId,
@@ -6589,8 +6601,8 @@ async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
     options.push(`${seat}（${info.name}）：${text}`);
   }
 
-  const minOptionsConfigured = workflow.voting.custom.minOptions;
-  const maxOptionsConfigured = workflow.voting.custom.maxOptions;
+  const minOptionsConfigured = workflow?.voting.custom.minOptions;
+  const maxOptionsConfigured = workflow?.voting.custom.maxOptions;
   const minOptions =
     typeof minOptionsConfigured === "number" && Number.isFinite(minOptionsConfigured) && minOptionsConfigured >= 1
       ? Math.floor(minOptionsConfigured)
@@ -6631,7 +6643,7 @@ async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
 function buildFallbackVoteAnnouncement(input: {
   debateQuestion: string;
   participantsInline: string | null;
-  closed: OfficialVote;
+  closed: ClosedOfficialVote;
   directiveJson: Record<string, unknown> | null;
 }) {
   const kind = input.closed.kind;
@@ -7045,10 +7057,10 @@ export async function runDebate(id: string, userId: string) {
   }
 
   activeDebates.add(id);
+  let lastKnownPhase: Pick<DebateRecord, "workflowPhaseKind" | "workflowPhaseTitle" | "workflowPhaseRound"> | null = null;
 
   try {
     const pendingAutoSegmentByDebateAgentId = new Map<string, { reason: string }>();
-    let lastKnownPhase: Pick<DebateRecord, "workflowPhaseKind" | "workflowPhaseTitle" | "workflowPhaseRound"> | null = null;
     while (true) {
       const debateResult = await query<Record<string, unknown>>(
         "select * from debates where id = $1 and user_id = $2",
@@ -7404,7 +7416,7 @@ export async function runDebate(id: string, userId: string) {
             agentName: eventAgentName,
             provider: generationDiagnostics?.provider ?? agent.provider,
             model: generationDiagnostics?.model ?? agent.model,
-            requestedMaxTokens: generationDiagnostics?.requestedMaxTokens ?? requestedMaxTokens,
+            requestedMaxTokens: generationDiagnostics?.requestedMaxTokens ?? null,
             finishReason: generationDiagnostics?.finishReason ?? null,
             toolCallsCount: generationDiagnostics?.toolCallsCount ?? 0,
             rawChars: raw.length,
@@ -7436,6 +7448,7 @@ export async function runDebate(id: string, userId: string) {
             ? Math.floor(estimatedPromptTokens)
             : null;
         const usedPromptTokens = apiPromptTokens ?? fallbackPromptTokens;
+        const completionTokens = usage?.completionTokens ?? null;
 
         if (usedPromptTokens !== null) {
           const seat = `Seat-${Number((currentParticipant as any).turn_order ?? (currentParticipant as any).turnOrder ?? currentIndex + 1)}`;
@@ -7480,10 +7493,10 @@ export async function runDebate(id: string, userId: string) {
           agent,
           usage: {
             promptTokens: usedPromptTokens,
-            completionTokens: usage?.completionTokens ?? null,
+            completionTokens,
             totalTokens:
               usage?.totalTokens ??
-              (usedPromptTokens !== null && usage?.completionTokens !== null ? usedPromptTokens + usage.completionTokens : null)
+              (usedPromptTokens !== null && completionTokens !== null ? usedPromptTokens + completionTokens : null)
           },
           source: apiPromptTokens !== null ? "api" : "estimate",
           turnNumber: messageNumber,
@@ -7710,7 +7723,7 @@ export async function runDebate(id: string, userId: string) {
               });
               const closedVote =
                 closed.result && typeof closed.result === "object" && (closed.result as any).closed
-                  ? ((closed.result as any).closed as OfficialVote)
+                  ? ((closed.result as any).closed as ClosedOfficialVote)
                   : null;
               if (closedVote) {
                 if (closedVote.kind === "finalization" && Boolean((closedVote.result as any)?.passed)) {

@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import {
   Fragment,
   memo,
+  type ReactElement,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type MutableRefObject,
@@ -567,36 +568,57 @@ function resolveDirectoryPhaseForRound(
 ): DebateDirectoryPhaseInfo | null {
   if (!workflow?.enabled) return null;
   const phaseByKind = new Map(workflow.phaseMachine.phases.map((phase) => [phase.kind, phase] as const));
+  const toDirectoryPhaseInfo = (
+    phase:
+      | {
+          id: string;
+          title: string;
+          kind: DebateDirectoryPhaseInfo["kind"];
+          description: string | null;
+          injectedPrompt: string | null;
+        }
+      | null
+      | undefined
+  ): DebateDirectoryPhaseInfo | null =>
+    phase
+      ? {
+          phaseId: phase.id,
+          title: phase.title,
+          kind: phase.kind,
+          description: phase.description ?? null,
+          injectedPrompt: phase.injectedPrompt ?? null
+        }
+      : null;
   if (openVote && currentRound !== null && round === currentRound) {
     if (openVote.kind === "election") {
-      return phaseByKind.get("election") ?? null;
+      return toDirectoryPhaseInfo(phaseByKind.get("election"));
     }
     if (openVote.kind === "finalization") {
-      return phaseByKind.get("finalization_vote") ?? null;
+      return toDirectoryPhaseInfo(phaseByKind.get("finalization_vote"));
     }
-    return phaseByKind.get("finalization") ?? null;
+    return toDirectoryPhaseInfo(phaseByKind.get("finalization"));
   }
   if (closedVote?.kind === "election") {
-    return phaseByKind.get("election") ?? null;
+    return toDirectoryPhaseInfo(phaseByKind.get("election"));
   }
   if (closedVote?.kind === "finalization") {
-    return phaseByKind.get("finalization_vote") ?? null;
+    return toDirectoryPhaseInfo(phaseByKind.get("finalization_vote"));
   }
   if (hasVoteResult) {
     if (round < getWorkflowEarliestDeliberationRound(workflow)) {
-      return phaseByKind.get("election") ?? null;
+      return toDirectoryPhaseInfo(phaseByKind.get("election"));
     }
     if (round >= getWorkflowEarliestFinalizationVoteRound(workflow) && round < getWorkflowEarliestFinalizationRound(workflow)) {
-      return phaseByKind.get("finalization_vote") ?? null;
+      return toDirectoryPhaseInfo(phaseByKind.get("finalization_vote"));
     }
   }
   if (allowFinalization && round >= getWorkflowEarliestFinalizationRound(workflow)) {
-    return phaseByKind.get("finalization") ?? null;
+    return toDirectoryPhaseInfo(phaseByKind.get("finalization"));
   }
   if (round >= getWorkflowEarliestDeliberationRound(workflow)) {
-    return phaseByKind.get("deliberation") ?? null;
+    return toDirectoryPhaseInfo(phaseByKind.get("deliberation"));
   }
-  return phaseByKind.get("analysis") ?? null;
+  return toDirectoryPhaseInfo(phaseByKind.get("analysis"));
 }
 
 function resolveStoredDirectoryPhase(
@@ -1160,14 +1182,15 @@ function DebateFilesContextMenu(props: {
   onDownload: () => void;
 }) {
   if (!props.menu) return null;
+  const menu = props.menu;
 
-  const canOpenFileInfo = props.menu.target.type === "node" && props.menu.target.nodeType === "file";
+  const canOpenFileInfo = menu.target.type === "node" && menu.target.nodeType === "file";
 
   return (
     <div className="contextOverlay" onClick={props.onClose}>
       <div
         className="contextMenu"
-        style={{ left: props.menu.x, top: props.menu.y }}
+        style={{ left: menu.x, top: menu.y }}
         onClick={(event) => event.stopPropagation()}
       >
         <button
@@ -1176,7 +1199,8 @@ function DebateFilesContextMenu(props: {
           disabled={!canOpenFileInfo}
           onClick={() => {
             if (!canOpenFileInfo) return;
-            props.onOpenFileInfo(props.menu.target.path);
+            if (menu.target.type !== "node") return;
+            props.onOpenFileInfo(menu.target.path);
           }}
         >
           获取文件信息
@@ -1204,7 +1228,7 @@ function DebateFilesPanel(props: {
   loading: boolean;
   hasFiles: boolean;
   tree: FsNode[];
-  renderNode: (props: { node: NodeApi<FsNode>; style: CSSProperties }) => JSX.Element;
+  renderNode: (props: { node: NodeApi<FsNode>; style: CSSProperties }) => ReactElement;
   contextMenu: AllFilesContextMenuValue | null;
   onDownload: () => void;
   onRefresh: () => void;
@@ -1605,27 +1629,34 @@ function DebateViewerPanel(props: {
         </div>
       ) : props.viewer?.kind === "turn" ? (
         <div className="stack" style={{ flex: 1, minHeight: 0 }}>
+          {(() => {
+            const viewerTurn = props.viewer.turn;
+            return (
+              <Fragment>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div className="stack" style={{ gap: 4 }}>
               <strong>
                 {(() => {
-                  const turnInRound = ((props.viewer.turn.turnNumber - 1) % props.agentCount) + 1;
-                  const seat = props.viewer.turn.seatNumber ? `Seat-${props.viewer.turn.seatNumber}` : "";
-                  return `#${props.viewer.turn.turnNumber} · 第 ${props.viewer.turn.roundNumber} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${props.viewer.turn.agent.name}`;
+                  const turnInRound = ((viewerTurn.turnNumber - 1) % props.agentCount) + 1;
+                  const seat = viewerTurn.seatNumber ? `Seat-${viewerTurn.seatNumber}` : "";
+                  return `#${viewerTurn.turnNumber} · 第 ${viewerTurn.roundNumber} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${viewerTurn.agent.name}`;
                 })()}
               </strong>
-              <span className="muted">{props.viewer.turn.contentLength} chars</span>
+              <span className="muted">{viewerTurn.contentLength} chars</span>
             </div>
             <div className="row" style={{ gap: 8 }}>
-              <button className="btn" type="button" onClick={() => props.onOpenDiagnostics(props.viewer!.turn.turnNumber)}>
+              <button className="btn" type="button" onClick={() => props.onOpenDiagnostics(viewerTurn.turnNumber)}>
                 查看诊断结果
               </button>
-              <span className="muted">{new Date(props.viewer.turn.createdAt).toLocaleTimeString()}</span>
+              <span className="muted">{new Date(viewerTurn.createdAt).toLocaleTimeString()}</span>
             </div>
           </div>
           <div ref={props.viewerScrollRef} className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-            <MarkdownView value={props.viewer.turn.content} />
+            <MarkdownView value={viewerTurn.content} />
           </div>
+              </Fragment>
+            );
+          })()}
         </div>
       ) : (
         <div className="muted">还没有发言记录</div>
@@ -2604,7 +2635,7 @@ function MemoryDialog(props: {
   target: { scope: "debate"; path: string } | { scope: "agent"; debateAgentId: string; path: string } | null;
   loading: boolean;
   tail: boolean;
-  truncation: { truncated: boolean; slice: "head" | "tail"; shownChars: number; totalChars: number } | null;
+  truncation: { truncated: boolean; slice: "head" | "tail" | "full"; shownChars: number; totalChars: number } | null;
   content: string;
   preWrapStyle: CSSProperties;
   contentRef: React.RefObject<HTMLDivElement | null>;
@@ -3894,7 +3925,7 @@ export default function DebateDetailPage() {
         if (typeof payload.turnNumber === "number") {
           setLiveMessageNumber((current) => {
             if (typeof current === "number" && current > 0 && current !== payload.turnNumber) return current;
-            return payload.turnNumber;
+            return payload.turnNumber ?? null;
           });
         }
         if (typeof payload.agentName === "string") setLiveAgentName(payload.agentName);
