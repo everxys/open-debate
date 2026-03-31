@@ -2,13 +2,15 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/session-core";
 
+const PROTECTED_PATH_PREFIXES = ["/agents", "/debates", "/settings", "/admin"];
+
+function isProtectedPath(pathname: string): boolean {
+  return PROTECTED_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+}
+
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
-  const isProtected =
-    pathname.startsWith("/agents") ||
-    pathname.startsWith("/debates") ||
-    pathname.startsWith("/settings") ||
-    pathname.startsWith("/admin");
+  const isProtected = isProtectedPath(pathname);
   const token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   const session = token ? await verifySessionToken(token) : null;
 

@@ -1,26 +1,27 @@
 import { randomUUID } from "crypto";
 
+import { requireSessionUser } from "@/lib/auth";
 import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type DebateParticipantRoleType } from "@/lib/debate-role-types";
 import { query } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
 import { runDebate } from "@/lib/runtime";
-import { readSession } from "@/lib/session";
 import type { DebateRecord } from "@/lib/types";
 import { createDebateSchema, updateDebateQuestionSchema, updateDebateSharingSchema } from "@/lib/validation";
 import { formatRequiredDeliverableSummary, normalizeDebateWorkflow, toCanonicalWorkflowConfig } from "@/lib/workflow";
 
 const DISPLAY_NAME_ADJECTIVES = ["青", "赤", "白", "玄", "金", "银", "苍", "墨", "紫", "绿", "蓝", "橙"];
 const DISPLAY_NAME_NOUNS = ["狐", "狼", "鹰", "鲸", "蛇", "虎", "鹿", "鸦", "猫", "犬", "熊", "龙", "雀"];
+const MAX_DISPLAY_NAME_ATTEMPTS = 80;
 
-function pickRandom<T>(items: T[]) {
-  if (items.length === 0) throw new Error("pickRandom: empty list");
+function pickRandomElement<T>(items: T[]) {
+  if (items.length === 0) throw new Error("pickRandomElement: empty list");
   return items[Math.floor(Math.random() * items.length)] as T;
 }
 
 function createUniqueDisplayName(used: Set<string>) {
-  for (let attempt = 0; attempt < 80; attempt += 1) {
-    const name = `${pickRandom(DISPLAY_NAME_ADJECTIVES)}${pickRandom(DISPLAY_NAME_NOUNS)}`;
+  for (let attempt = 0; attempt < MAX_DISPLAY_NAME_ATTEMPTS; attempt += 1) {
+    const name = `${pickRandomElement(DISPLAY_NAME_ADJECTIVES)}${pickRandomElement(DISPLAY_NAME_NOUNS)}`;
     if (!used.has(name)) {
       used.add(name);
       return name;
@@ -377,14 +378,6 @@ function toListItem(debate: DebateRecord) {
   };
 }
 
-async function requireSessionUser() {
-  const session = await readSession();
-  if (!session) {
-    throw new AppError("AUTH_REQUIRED", 401, "Authentication required");
-  }
-  return session;
-}
-
 function isMissingTableError(error: unknown, table: string) {
   if (typeof error !== "object" || error === null) return false;
   const anyError = error as { code?: unknown; message?: unknown };
@@ -495,114 +488,19 @@ export async function createDebate(input: unknown) {
   const session = await requireSessionUser();
 
   if ("agentIds" in data) {
-    const agents = await query<{ id: string }>(
-      "select id from ai_agents where user_id = $1 and deleted_at is null and id = any($2::uuid[])",
-      [session.userId, data.agentIds]
-    );
-
-    if ((agents.rowCount ?? 0) !== data.agentIds.length) {
-      throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid");
-    }
-
-    const now = new Date().toISOString();
-    const insertedDebate = await query<Record<string, unknown>>(
-      `insert into debates (
-        user_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
-        consensus_reached, consensus_summary, workflow_phase_kind, workflow_phase_title, workflow_phase_round, last_error_code, last_error_message,
-        runtime_notice_kind, runtime_notice_message, runtime_notice_at,
-        started_at, finished_at, stopped_reason, created_at, updated_at
-      ) values (
-        $1,$2,'pending',$3,0,null,0,$4,
-        false,null,null,null,null,null,null,
-        null,null,null,
-        null,null,null,$5,$5
-      )
-      returning *`,
-      [session.userId, data.question, data.maxTurns, data.enableSharedFacts, now]
-    );
-
-    const debate = normalizeDebateRow(insertedDebate.rows[0]);
-    const usedDisplayNames = new Set<string>();
-    for (let index = 0; index < data.agentIds.length; index += 1) {
-      await query(
-        `insert into debate_agents (debate_id, ai_agent_id, display_name, turn_order, turn_count, created_at)
-         values ($1,$2,$3,$4,0,$5)`,
-        [debate.id, data.agentIds[index], createUniqueDisplayName(usedDisplayNames), index + 1, now]
-      );
-    }
-
-    // Ensure workflow.json exists so seat order and election timing are deterministic.
-    try {
-      await query(
-        `
-          insert into debate_files (debate_id, path, content, created_at, updated_at)
-          values ($1, 'workflow.json', $2, $3, $3)
-          on conflict (debate_id, path) do nothing
-        `,
-        [debate.id, DEFAULT_WORKFLOW_JSON, now]
-      );
-    } catch {
-      // backward-compat: older DBs may not have debate_files yet.
-    }
-
-    return toListItem(debate);
+    return createDebateWithAgents(session.userId, data);
   }
 
-  const bindings = data.strategy.bindings;
-  const roleIds = bindings.map((binding) => binding.roleId);
-  const agentIds = bindings.map((binding) => binding.agentId);
-  const uniqueAgentIds = Array.from(new Set(agentIds));
+  return createDebateWithStrategy(session.userId, data);
+}
 
-  let strategyVisible: { id: string } | null = null;
-  try {
-    const strategyResult = await query<{ id: string }>(
-      "select id from strategies where id = $1 and (owner_user_id = $2 or is_shared = true)",
-      [data.strategy.strategyId, session.userId]
-    );
-    strategyVisible = strategyResult.rows[0] ?? null;
-  } catch (error) {
-    if (isMissingTableError(error, "strategies")) {
-      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
-    }
-    throw error;
-  }
-
-  if (!strategyVisible) {
-    throw new AppError("NOT_FOUND", 404, "Strategy not found");
-  }
-
-  const agents = await query<{ id: string }>(
-    "select id from ai_agents where user_id = $1 and deleted_at is null and id = any($2::uuid[])",
-    [session.userId, uniqueAgentIds]
-  );
-  if ((agents.rowCount ?? 0) !== uniqueAgentIds.length) {
-    throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid");
-  }
-
-  let rolesById = new Map<string, { id: string; systemPrompt: string | null }>();
-  try {
-    const roleResult = await query<Record<string, unknown>>(
-      "select id, system_prompt from strategy_roles where strategy_id = $1 and id = any($2::uuid[])",
-      [data.strategy.strategyId, roleIds]
-    );
-    rolesById = new Map(
-      roleResult.rows.map((row) => [
-        String(row.id),
-        { id: String(row.id), systemPrompt: (row.system_prompt as string | null) ?? null }
-      ])
-    );
-  } catch (error) {
-    if (isMissingTableError(error, "strategy_roles")) {
-      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
-    }
-    throw error;
-  }
-
-  if (rolesById.size !== new Set(roleIds).size) {
-    throw new AppError("VALIDATION_ERROR", 400, "Selected strategy roles are invalid");
-  }
-
-  const now = new Date().toISOString();
+async function insertPendingDebate(input: {
+  userId: string;
+  question: string;
+  maxTurns: number;
+  enableSharedFacts: boolean;
+  now: string;
+}) {
   const insertedDebate = await query<Record<string, unknown>>(
     `insert into debates (
       user_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
@@ -616,79 +514,260 @@ export async function createDebate(input: unknown) {
       null,null,null,$5,$5
     )
     returning *`,
-    [session.userId, data.question, data.maxTurns, data.enableSharedFacts, now]
+    [input.userId, input.question, input.maxTurns, input.enableSharedFacts, input.now]
   );
+  return normalizeDebateRow(insertedDebate.rows[0]);
+}
 
-  const debate = normalizeDebateRow(insertedDebate.rows[0]);
+async function insertDebateAgent(input: {
+  debateId: string;
+  agentId: string;
+  displayName: string;
+  turnOrder: number;
+  now: string;
+}) {
+  return query<{ id: string }>(
+    `insert into debate_agents (debate_id, ai_agent_id, display_name, turn_order, turn_count, created_at)
+     values ($1,$2,$3,$4,0,$5)
+     returning id`,
+    [input.debateId, input.agentId, input.displayName, input.turnOrder, input.now]
+  );
+}
 
+async function ensureDefaultDebateWorkflow(debateId: string, now: string) {
+  // Ensure workflow.json exists so seat order and election timing are deterministic.
   try {
-    const usedDisplayNames = new Set<string>();
-    const uniqueRoleIds = Array.from(new Set(roleIds));
-    const workflow = await query<{ content: string }>(
-      `
-        select content
-          from strategy_role_files
-         where strategy_role_id = any($1::uuid[])
-           and lower(path) = 'debate/workflow.json'
-         limit 1
-      `,
-      [uniqueRoleIds]
-    );
-    const workflowContent =
-      (workflow.rowCount ?? 0) >= 1 ? String(workflow.rows[0]?.content ?? "").trim() : "";
-    const canonicalWorkflowContent = (() => {
-      if (!workflowContent) return DEFAULT_WORKFLOW_JSON;
-      try {
-        const parsed = JSON.parse(workflowContent) as unknown;
-        return JSON.stringify(toCanonicalWorkflowConfig(parsed) ?? parsed, null, 2);
-      } catch {
-        return DEFAULT_WORKFLOW_JSON;
-      }
-    })();
     await query(
       `
         insert into debate_files (debate_id, path, content, created_at, updated_at)
         values ($1, 'workflow.json', $2, $3, $3)
+        on conflict (debate_id, path) do nothing
+      `,
+      [debateId, DEFAULT_WORKFLOW_JSON, now]
+    );
+  } catch {
+    // backward-compat: older DBs may not have debate_files yet.
+  }
+}
+
+async function validateOwnedAgents(userId: string, agentIds: string[]) {
+  const agents = await query<{ id: string }>(
+    "select id from ai_agents where user_id = $1 and deleted_at is null and id = any($2::uuid[])",
+    [userId, agentIds]
+  );
+  if ((agents.rowCount ?? 0) !== agentIds.length) {
+    throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid");
+  }
+}
+
+async function loadVisibleStrategy(strategyId: string, userId: string) {
+  try {
+    const strategyResult = await query<{ id: string }>(
+      "select id from strategies where id = $1 and (owner_user_id = $2 or is_shared = true)",
+      [strategyId, userId]
+    );
+    return strategyResult.rows[0] ?? null;
+  } catch (error) {
+    if (isMissingTableError(error, "strategies")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+async function loadStrategyRolesMap(strategyId: string, roleIds: string[]) {
+  try {
+    const roleResult = await query<Record<string, unknown>>(
+      "select id, system_prompt from strategy_roles where strategy_id = $1 and id = any($2::uuid[])",
+      [strategyId, roleIds]
+    );
+    return new Map(
+      roleResult.rows.map((row) => [
+        String(row.id),
+        { id: String(row.id), systemPrompt: (row.system_prompt as string | null) ?? null }
+      ])
+    );
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_roles")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+async function copyStrategyDebateFiles(debateId: string, roleIds: string[], now: string) {
+  const workflow = await query<{ content: string }>(
+    `
+      select content
+        from strategy_role_files
+       where strategy_role_id = any($1::uuid[])
+         and lower(path) = 'debate/workflow.json'
+       limit 1
+    `,
+    [roleIds]
+  );
+  const workflowContent =
+    (workflow.rowCount ?? 0) >= 1 ? String(workflow.rows[0]?.content ?? "").trim() : "";
+  const canonicalWorkflowContent = (() => {
+    if (!workflowContent) return DEFAULT_WORKFLOW_JSON;
+    try {
+      const parsed = JSON.parse(workflowContent) as unknown;
+      return JSON.stringify(toCanonicalWorkflowConfig(parsed) ?? parsed, null, 2);
+    } catch {
+      return DEFAULT_WORKFLOW_JSON;
+    }
+  })();
+  await query(
+    `
+      insert into debate_files (debate_id, path, content, created_at, updated_at)
+      values ($1, 'workflow.json', $2, $3, $3)
+      on conflict (debate_id, path)
+      do update set content = excluded.content, updated_at = excluded.updated_at
+    `,
+    [debateId, canonicalWorkflowContent, now]
+  );
+
+  const sharedDebateFiles = await query<{ path: string; content: string }>(
+    `
+      select distinct on (lower(path)) path, content
+        from strategy_role_files
+       where strategy_role_id = any($1::uuid[])
+         and lower(path) like 'debate/ideas/%'
+       order by lower(path), strategy_role_id asc
+    `,
+    [roleIds]
+  );
+  for (const file of sharedDebateFiles.rows) {
+    const sourcePath = String(file.path ?? "");
+    const normalizedPath = sourcePath.replace(/\\/g, "/").replace(/^\/+/, "").trim();
+    const debatePath = normalizedPath.replace(/^debate\//i, "");
+    if (!debatePath) continue;
+    await query(
+      `
+        insert into debate_files (debate_id, path, content, created_at, updated_at)
+        values ($1, $2, $3, $4, $4)
         on conflict (debate_id, path)
         do update set content = excluded.content, updated_at = excluded.updated_at
       `,
-      [debate.id, canonicalWorkflowContent, now]
+      [debateId, debatePath, String(file.content ?? ""), now]
     );
+  }
+}
 
-    const sharedDebateFiles = await query<{ path: string; content: string }>(
-      `
-        select distinct on (lower(path)) path, content
-          from strategy_role_files
-         where strategy_role_id = any($1::uuid[])
-           and lower(path) like 'debate/ideas/%'
-         order by lower(path), strategy_role_id asc
-      `,
-      [uniqueRoleIds]
+async function copyStrategyRoleFilesToDebateAgent(input: {
+  roleId: string;
+  debateAgentId: string;
+  now: string;
+}) {
+  const roleFiles = await query<{ path: string; content: string }>(
+    "select path, content from strategy_role_files where strategy_role_id = $1 order by path asc",
+    [input.roleId]
+  );
+
+  for (const file of roleFiles.rows) {
+    const path = String(file.path ?? "");
+    const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").trim().toLowerCase();
+    if (normalized.startsWith("memory/")) continue;
+    // Strategy role files are meant to seed per-seat prompt context and templates.
+    // Never seed debate-internal runtime files (they can cause "previous debate memory" leakage).
+    if (normalized.startsWith("debate/")) continue;
+    if (normalized.startsWith("context/")) continue;
+    if (normalized.startsWith("facts/")) continue;
+    if (normalized.startsWith("votes/")) continue;
+    if (normalized.startsWith("question/")) continue;
+    await query(
+      `insert into debate_agent_files (id, debate_agent_id, path, content, created_at, updated_at)
+       values ($1,$2,$3,$4,$5,$5)`,
+      [randomUUID(), input.debateAgentId, path, file.content ?? "", input.now]
     );
-    for (const file of sharedDebateFiles.rows) {
-      const sourcePath = String(file.path ?? "");
-      const normalizedPath = sourcePath.replace(/\\/g, "/").replace(/^\/+/, "").trim();
-      const debatePath = normalizedPath.replace(/^debate\//i, "");
-      if (!debatePath) continue;
-      await query(
-        `
-          insert into debate_files (debate_id, path, content, created_at, updated_at)
-          values ($1, $2, $3, $4, $4)
-          on conflict (debate_id, path)
-          do update set content = excluded.content, updated_at = excluded.updated_at
-        `,
-        [debate.id, debatePath, String(file.content ?? ""), now]
-      );
-    }
+  }
+}
+
+async function createDebateWithAgents(
+  userId: string,
+  data: {
+    question: string;
+    maxTurns: number;
+    enableSharedFacts: boolean;
+    agentIds: string[];
+  }
+) {
+  await validateOwnedAgents(userId, data.agentIds);
+
+  const now = new Date().toISOString();
+  const debate = await insertPendingDebate({
+    userId,
+    question: data.question,
+    maxTurns: data.maxTurns,
+    enableSharedFacts: data.enableSharedFacts,
+    now
+  });
+  const usedDisplayNames = new Set<string>();
+
+  for (let index = 0; index < data.agentIds.length; index += 1) {
+    await insertDebateAgent({
+      debateId: debate.id,
+      agentId: data.agentIds[index],
+      displayName: createUniqueDisplayName(usedDisplayNames),
+      turnOrder: index + 1,
+      now
+    });
+  }
+
+  await ensureDefaultDebateWorkflow(debate.id, now);
+  return toListItem(debate);
+}
+
+async function createDebateWithStrategy(
+  userId: string,
+  data: {
+    question: string;
+    maxTurns: number;
+    enableSharedFacts: boolean;
+    strategy: {
+      strategyId: string;
+      bindings: Array<{ roleId: string; agentId: string }>;
+    };
+  }
+) {
+  const bindings = data.strategy.bindings;
+  const roleIds = bindings.map((binding) => binding.roleId);
+  const uniqueRoleIds = Array.from(new Set(roleIds));
+  const uniqueAgentIds = Array.from(new Set(bindings.map((binding) => binding.agentId)));
+
+  const strategyVisible = await loadVisibleStrategy(data.strategy.strategyId, userId);
+  if (!strategyVisible) {
+    throw new AppError("NOT_FOUND", 404, "Strategy not found");
+  }
+
+  await validateOwnedAgents(userId, uniqueAgentIds);
+  const rolesById = await loadStrategyRolesMap(data.strategy.strategyId, roleIds);
+  if (rolesById.size !== uniqueRoleIds.length) {
+    throw new AppError("VALIDATION_ERROR", 400, "Selected strategy roles are invalid");
+  }
+
+  const now = new Date().toISOString();
+  const debate = await insertPendingDebate({
+    userId,
+    question: data.question,
+    maxTurns: data.maxTurns,
+    enableSharedFacts: data.enableSharedFacts,
+    now
+  });
+
+  try {
+    const usedDisplayNames = new Set<string>();
+    await copyStrategyDebateFiles(debate.id, uniqueRoleIds, now);
 
     for (let index = 0; index < bindings.length; index += 1) {
       const binding = bindings[index];
-      const insertParticipant = await query<{ id: string }>(
-        `insert into debate_agents (debate_id, ai_agent_id, display_name, turn_order, turn_count, created_at)
-         values ($1,$2,$3,$4,0,$5)
-         returning id`,
-        [debate.id, binding.agentId, createUniqueDisplayName(usedDisplayNames), index + 1, now]
-      );
+      const insertParticipant = await insertDebateAgent({
+        debateId: debate.id,
+        agentId: binding.agentId,
+        displayName: createUniqueDisplayName(usedDisplayNames),
+        turnOrder: index + 1,
+        now
+      });
 
       const debateAgentId = insertParticipant.rows[0]?.id;
       if (!debateAgentId) {
@@ -701,29 +780,11 @@ export async function createDebate(input: unknown) {
          values ($1,$2,$3,$3)`,
         [debateAgentId, role?.systemPrompt ?? null, now]
       );
-
-      const roleFiles = await query<{ path: string; content: string }>(
-        "select path, content from strategy_role_files where strategy_role_id = $1 order by path asc",
-        [binding.roleId]
-      );
-
-      for (const file of roleFiles.rows) {
-        const path = String(file.path ?? "");
-        const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").trim().toLowerCase();
-        if (normalized.startsWith("memory/")) continue;
-        // Strategy role files are meant to seed per-seat prompt context and templates.
-        // Never seed debate-internal runtime files (they can cause "previous debate memory" leakage).
-        if (normalized.startsWith("debate/")) continue;
-        if (normalized.startsWith("context/")) continue;
-        if (normalized.startsWith("facts/")) continue;
-        if (normalized.startsWith("votes/")) continue;
-        if (normalized.startsWith("question/")) continue;
-        await query(
-          `insert into debate_agent_files (id, debate_agent_id, path, content, created_at, updated_at)
-           values ($1,$2,$3,$4,$5,$5)`,
-          [randomUUID(), debateAgentId, path, file.content ?? "", now]
-        );
-      }
+      await copyStrategyRoleFilesToDebateAgent({
+        roleId: binding.roleId,
+        debateAgentId,
+        now
+      });
     }
   } catch (error) {
     if (

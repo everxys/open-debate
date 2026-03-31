@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { AppError } from "@/lib/http";
 import { query } from "@/lib/db";
 import { readSession } from "@/lib/session";
 import { isAdminEmail, normalizeRole, type UserRole } from "@/lib/roles";
@@ -46,4 +47,13 @@ export async function requireAdmin() {
   const user = await requireUser();
   if (user.role !== "admin") redirect("/");
   return user;
+}
+
+/** Require authenticated session, throw AppError if missing */
+export async function requireSessionUser() {
+  const session = await readSession();
+  if (!session) {
+    throw new AppError("AUTH_REQUIRED", 401, "Authentication required");
+  }
+  return session;
 }

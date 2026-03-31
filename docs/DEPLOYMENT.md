@@ -68,7 +68,7 @@ docker compose up -d --build
 | `DATABASE_URL` | PostgreSQL 连接串 | `postgres://user:pass@host:5432/db` |
 | `APP_URL` | 应用对外访问地址 | `http://localhost:3000` |
 | `SESSION_SECRET` | Session 签名密钥 | 长随机字符串 |
-| `ENCRYPTION_KEY` | 加密敏感字段（64 hex） | `0123...` |
+| `ENCRYPTION_KEY` | 加密敏感字段（生产环境必填；开发环境未配置时才允许使用内置 fallback） | `0123...` |
 
 ### 可选变量
 
