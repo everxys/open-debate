@@ -111,8 +111,8 @@ export function buildLineDiffRows(oldText: string, newText: string): LineDiffRow
   }
 
   pushContext(tailOld);
-  void headNew;
-  void tailNew;
+  // headNew and tailNew are intentionally unused - they mirror headOld/tailOld
+  // for symmetry in the diff algorithm but don't need separate handling
 
   return rows;
 }
