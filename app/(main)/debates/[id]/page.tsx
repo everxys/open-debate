@@ -1520,6 +1520,7 @@ function StatusSummaryPanel(props: {
   liveDisplayRound: number | null;
   liveDisplayMessage: number | null;
   liveStatus: string;
+  showWorkflowPhaseUi: boolean;
 }) {
   const runtimeNoticeBadgeClass =
     props.debate.runtimeNoticeKind === "recovering"
@@ -1567,7 +1568,7 @@ function StatusSummaryPanel(props: {
           ? ` · ${props.debate.consensusSummary.leadingSolution} · ${props.debate.consensusSummary.score}`
           : ""}
       </div>
-      {props.debate.workflowPhaseTitle ? (
+      {props.showWorkflowPhaseUi && props.debate.workflowPhaseTitle ? (
         <div className="muted">
           阶段快照: {props.debate.workflowPhaseTitle}
           {props.debate.workflowPhaseRound ? ` · 第 ${props.debate.workflowPhaseRound} 轮` : ""}
@@ -5041,6 +5042,7 @@ export default function DebateDetailPage() {
               liveDisplayRound={liveDisplayRound}
               liveDisplayMessage={liveDisplayMessage}
               liveStatus={liveStatus}
+              showWorkflowPhaseUi={showWorkflowPhaseUi}
             />
           </Fragment>
         ) : leftTab === "participants" ? (

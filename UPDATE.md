@@ -18,3 +18,4 @@
 - 清掉最后一层小说硬编码：默认收束投票选项改成中性的“同意进入收束阶段 / 不同意，继续讨论”，默认选举文案不再写 `Phase 1.5`，角色职责提示和文件活动诊断也不再靠 `Host / Supervisor / Specialist` 的 legacy 兜底。
 - 修正文档中的过时系统描述：`docs/PROJECT_KNOWLEDGE_BASE.md`、`docs/FAULT.md` 已改为“复杂 phase、选举、收束投票、角色职责都来自 workflow”，不再把 `Phase 3` 或三角色写成平台内建概念。
 - 继续细化真实小说策略的质量门槛：为原先还只靠 `minChars / minMarkdownHeadings / requiredSnippets` 的世界观、历史、阵营、主线骨架、人物关系、关键场景文件补齐 `qualityChecks`，并已同步回数据库中的真实 `debate/workflow.json`。
+- 修复 review 暴露的两个一致性问题：关闭共识检查时，完成判定允许正常结束但不会再把 `consensus_reached` 误写成“已达成”；同时默认轻量 workflow 下状态面板也不再额外显示阶段快照。

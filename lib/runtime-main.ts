@@ -4318,7 +4318,7 @@ export async function runDebate(id: string, userId: string) {
       const canCompleteByDeliverables = missingDeliverables.length === 0;
       const consensusRequired = workflow?.consensus.enabled !== false;
       const canCompleteByConsensus = !consensusRequired || consensus.reached;
-      const consensusReachedForDb = mustKeepRunningForVote ? false : canCompleteByConsensus;
+      const consensusReachedForDb = mustKeepRunningForVote ? false : consensus.reached;
       const nextStatusForDb =
         !mustKeepRunningForVote && canCompleteByConsensus && canCompleteByPhase && canCompleteByDeliverables
           ? "completed"
