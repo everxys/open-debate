@@ -10,6 +10,7 @@
   - `lib/db.ts`：优化函数注释，简化条件判断逻辑
   - `lib/agents.ts`：提取 `parseNullableInt()` 辅助函数，优化 `normalizeAgentRow()` 结构
   - `lib/strategies.ts`：按功能分组添加注释（DB row types/Normalizers/Error helpers/Auth helper/View helpers）
+  - `lib/line-diff.ts`：将 `void headNew; void tailNew;` 改为更有意义的注释说明，解释变量未使用的原因
 - 组件重构：优化组件结构和可读性
   - `components/auth/user-menu.tsx`：重命名 `initials()` 为 `getAvatarInitial()`，优化 effect 逻辑，提取 `handleLogout()` 函数
   - `components/nav/main-nav.tsx`：为 `isActive()` 和 `MainNav()` 添加注释，添加返回类型注解
