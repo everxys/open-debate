@@ -6,11 +6,13 @@ import type { ComponentProps } from "react";
 
 type NavItem = { href: ComponentProps<typeof Link>["href"]; label: string };
 
-function isActive(pathname: string, href: string) {
+/** Check if nav item is active based on current pathname */
+function isActive(pathname: string, href: string): boolean {
   if (href === "/") return pathname === "/";
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+/** Render navigation items with active state highlighting */
 export function MainNav({ items }: { items: NavItem[] }) {
   const pathname = usePathname();
 

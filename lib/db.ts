@@ -1,25 +1,21 @@
 import { Pool, type QueryResultRow } from "pg";
 
+/** Global pool singleton with schema readiness tracking */
 const globalPool = globalThis as typeof globalThis & {
   openDebatePool?: Pool;
   openDebateSchemaReady?: Promise<void>;
   openDebateRuntimeRecoveryScheduled?: boolean;
 };
 
+/** Schedule debate runtime recovery after DB is ready */
 function scheduleDebateRuntimeRecovery(reason = "db_ready") {
-  if (typeof window !== "undefined") {
-    return;
-  }
-  if (globalPool.openDebateRuntimeRecoveryScheduled) {
-    return;
-  }
-  globalPool.openDebateRuntimeRecoveryScheduled = true;
+  if (typeof window !== "undefined") return;
+  if (globalPool.openDebateRuntimeRecoveryScheduled) return;
 
+  globalPool.openDebateRuntimeRecoveryScheduled = true;
   queueMicrotask(() => {
     void import("@/lib/debate-runtime-recovery")
-      .then(({ ensureDebateRuntimeRecoveryStarted }) =>
-        ensureDebateRuntimeRecoveryStarted(reason)
-      )
+      .then(({ ensureDebateRuntimeRecoveryStarted }) => ensureDebateRuntimeRecoveryStarted(reason))
       .catch((error) => {
         globalPool.openDebateRuntimeRecoveryScheduled = false;
         console.error("debate runtime recovery bootstrap failed", error);
@@ -27,6 +23,7 @@ function scheduleDebateRuntimeRecovery(reason = "db_ready") {
   });
 }
 
+/** Extract DB connection diagnostics from DATABASE_URL */
 function getDbDiagnostics() {
   const raw = process.env.DATABASE_URL;
   if (!raw) return null;
@@ -42,34 +39,22 @@ function getDbDiagnostics() {
         ssl: url.searchParams.get("sslmode") ?? null
       };
     }
-  } catch {
-    // ignore
-  }
+  } catch { /* ignore */ }
 
   return { host: null, port: null, database: null, hasPassword: null, ssl: null };
 }
 
+/** Truncate SQL for logging */
 function truncateSql(sql: string, max = 500) {
   const normalized = sql.replace(/\s+/g, " ").trim();
-  if (normalized.length <= max) return normalized;
-  return `${normalized.slice(0, max)}…`;
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max)}…`;
 }
 
+/** Extract relevant PG error details for logging */
 function getPgErrorDetails(error: unknown) {
   if (typeof error !== "object" || error === null) return null;
   const anyError = error as Record<string, unknown>;
-  const allowedKeys = [
-    "code",
-    "message",
-    "detail",
-    "schema",
-    "table",
-    "column",
-    "constraint",
-    "where",
-    "severity",
-    "routine"
-  ] as const;
+  const allowedKeys = ["code", "message", "detail", "schema", "table", "column", "constraint", "where", "severity", "routine"] as const;
   const details: Record<string, unknown> = {};
   for (const key of allowedKeys) {
     if (key in anyError) details[key] = anyError[key];
@@ -77,21 +62,17 @@ function getPgErrorDetails(error: unknown) {
   return Object.keys(details).length > 0 ? details : null;
 }
 
-export function getPool() {
-  if (!process.env.DATABASE_URL) {
-    throw new Error("Missing DATABASE_URL");
-  }
-
+/** Get or create global pool singleton */
+export function getPool(): Pool {
+  if (!process.env.DATABASE_URL) throw new Error("Missing DATABASE_URL");
   if (!globalPool.openDebatePool) {
-    globalPool.openDebatePool = new Pool({
-      connectionString: process.env.DATABASE_URL
-    });
+    globalPool.openDebatePool = new Pool({ connectionString: process.env.DATABASE_URL });
   }
-
   return globalPool.openDebatePool;
 }
 
-export async function ensureDbReady() {
+/** Ensure DB schema is ready and return pool */
+export async function ensureDbReady(): Promise<Pool> {
   const pool = getPool();
   if (!globalPool.openDebateSchemaReady) {
     globalPool.openDebateSchemaReady = ensureSchema(pool);
