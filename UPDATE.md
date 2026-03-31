@@ -1,3 +1,19 @@
+## 2026-03-31
+
+- 代码重构：优化核心库文件的可读性和结构
+  - `lib/auth.ts`：提取公共的用户角色处理逻辑 `resolveUserRole()` 和 `fetchUserBySession()`，减少重复代码
+  - `lib/crypto.ts`：添加常量 `ALGORITHM` 和 `IV_LENGTH`，优化函数命名和注释
+  - `lib/http.ts`：简化 `toErrorResponse()` 结构，添加函数注释
+  - `lib/session.ts`：提取 `SESSION_COOKIE_MAX_AGE` 常量，优化 `readSession()` 逻辑
+  - `lib/types.ts`：为所有类型定义添加清晰的注释说明
+  - `lib/validation.ts`：按功能分组添加注释（Agent/Retrieval/File/Debate/Strategy schemas），简化对象定义
+  - `lib/db.ts`：优化函数注释，简化条件判断逻辑
+  - `lib/agents.ts`：提取 `parseNullableInt()` 辅助函数，优化 `normalizeAgentRow()` 结构
+  - `lib/strategies.ts`：按功能分组添加注释（DB row types/Normalizers/Error helpers/Auth helper/View helpers）
+- 组件重构：优化组件结构和可读性
+  - `components/auth/user-menu.tsx`：重命名 `initials()` 为 `getAvatarInitial()`，优化 effect 逻辑，提取 `handleLogout()` 函数
+  - `components/nav/main-nav.tsx`：为 `isActive()` 和 `MainNav()` 添加注释，添加返回类型注解
+
 ## 2026-03-29
 
 - 为旧的 failed 辩论补上修复入口：新增 `POST /api/debates/[id]/repair`，可把 owner 自己的 `failed` 辩论手动修复回 `paused`，同时在辩论列表页和详情页增加“修复为暂停中”按钮，方便把待机/断网前已经失败的旧辩论拉回可恢复状态

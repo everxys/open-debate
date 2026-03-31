@@ -14,6 +14,7 @@ import {
   updateAgentSchema
 } from "@/lib/validation";
 
+/** Convert AgentRecord to API view (omit sensitive fields) */
 function toAgentView(agent: AgentRecord) {
   return {
     id: agent.id,
@@ -31,29 +32,24 @@ function toAgentView(agent: AgentRecord) {
   };
 }
 
+/** Parse nullable integer from DB row */
+function parseNullableInt(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const num = Number(value);
+  return num > 0 && Number.isFinite(num) ? Math.floor(num) : null;
+}
+
+/** Normalize DB row to AgentRecord */
 function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
-  const contextLengthRaw = row.context_length ?? row.contextLength ?? null;
-  const contextLength = contextLengthRaw === null ? null : Number(contextLengthRaw);
-  const maxInputTokensRaw = row.max_input_tokens ?? row.maxInputTokens ?? null;
-  const maxInputTokens = maxInputTokensRaw === null ? null : Number(maxInputTokensRaw);
-  const maxOutputTokensRaw = row.max_output_tokens ?? row.maxOutputTokens ?? null;
-  const maxOutputTokens = maxOutputTokensRaw === null ? null : Number(maxOutputTokensRaw);
   return {
     id: String(row.id),
     userId: String(row.user_id),
     name: String(row.name),
     provider: row.provider as Provider,
     model: String(row.model),
-    contextLength:
-      contextLength !== null && Number.isFinite(contextLength) && contextLength > 0 ? Math.floor(contextLength) : null,
-    maxInputTokens:
-      maxInputTokens !== null && Number.isFinite(maxInputTokens) && maxInputTokens > 0
-        ? Math.floor(maxInputTokens)
-        : null,
-    maxOutputTokens:
-      maxOutputTokens !== null && Number.isFinite(maxOutputTokens) && maxOutputTokens > 0
-        ? Math.floor(maxOutputTokens)
-        : null,
+    contextLength: parseNullableInt(row.context_length ?? row.contextLength),
+    maxInputTokens: parseNullableInt(row.max_input_tokens ?? row.maxInputTokens),
+    maxOutputTokens: parseNullableInt(row.max_output_tokens ?? row.maxOutputTokens),
     baseUrl: String(row.base_url),
     apiKeyEncrypted: String(row.api_key_encrypted),
     apiKeyMasked: String(row.api_key_masked),
@@ -63,21 +59,20 @@ function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
   };
 }
 
+/** Require authenticated session, throw if missing */
 async function requireSessionUser() {
   const session = await readSession();
-  if (!session) {
-    throw new AppError("AUTH_REQUIRED", 401, "Authentication required");
-  }
+  if (!session) throw new AppError("AUTH_REQUIRED", 401, "Authentication required");
   return session;
 }
 
+/** Resolve API endpoint URL for provider health check */
 function resolveTestUrl(provider: Provider, baseUrl: string) {
   const normalized = baseUrl.replace(/\/+$/, "");
-  return provider === "openai"
-    ? `${normalized}/chat/completions`
-    : `${normalized}/messages`;
+  return provider === "openai" ? `${normalized}/chat/completions` : `${normalized}/messages`;
 }
 
+/** Resolve candidate URLs for health check (with /v1 fallback) */
 function resolveTestUrlCandidates(provider: Provider, baseUrl: string) {
   const normalized = baseUrl.replace(/\/+$/, "");
   const candidates = [normalized];
@@ -85,15 +80,12 @@ function resolveTestUrlCandidates(provider: Provider, baseUrl: string) {
   try {
     const url = new URL(normalized);
     const pathname = url.pathname.replace(/\/+$/, "");
-    const endsWithV1 = pathname === "/v1" || pathname.endsWith("/v1");
-    if (!endsWithV1) {
+    if (pathname !== "/v1" && !pathname.endsWith("/v1")) {
       candidates.push(`${normalized}/v1`);
     }
-  } catch {
-    // ignore malformed URL; schema validation should prevent this
-  }
+  } catch { /* ignore malformed URL */ }
 
-  return Array.from(new Set(candidates)).map((candidate) => resolveTestUrl(provider, candidate));
+  return Array.from(new Set(candidates)).map((c) => resolveTestUrl(provider, c));
 }
 
 async function callProviderHealthCheck(input: {

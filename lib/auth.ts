@@ -6,32 +6,15 @@ import { isAdminEmail, normalizeRole, type UserRole } from "@/lib/roles";
 
 export type AppUser = { id: string; email: string; role: UserRole };
 
-export async function requireUser(): Promise<AppUser> {
-  const session = await readSession();
-  if (!session) {
-    redirect("/login");
-  }
-
-  const result = await query<{ id: string; email: string; role: string }>(
-    "select id, email, role from users where id = $1",
-    [session.userId]
-  );
-
-  if ((result.rowCount ?? 0) !== 1) {
-    redirect("/login");
-  }
-
-  const row = result.rows[0];
-  const base = normalizeRole(row.role);
-  const role = base === "admin" || isAdminEmail(row.email) ? "admin" : "user";
-  return { ...row, role };
+/** Resolve effective user role (admin via DB role or email whitelist) */
+function resolveUserRole(dbRole: string, email: string): UserRole {
+  const base = normalizeRole(dbRole);
+  return base === "admin" || isAdminEmail(email) ? "admin" : "user";
 }
 
-export async function getOptionalUser(): Promise<AppUser | null> {
-  const session = await readSession();
-  if (!session) {
-    return null;
-  }
+/** Fetch user from DB by session, return null if not found */
+async function fetchUserBySession(session: { userId: string } | null): Promise<AppUser | null> {
+  if (!session) return null;
 
   const result = await query<{ id: string; email: string; role: string }>(
     "select id, email, role from users where id = $1",
@@ -40,15 +23,27 @@ export async function getOptionalUser(): Promise<AppUser | null> {
 
   const row = result.rows[0];
   if (!row) return null;
-  const base = normalizeRole(row.role);
-  const role = base === "admin" || isAdminEmail(row.email) ? "admin" : "user";
-  return { ...row, role };
+
+  return { ...row, role: resolveUserRole(row.role, row.email) };
 }
 
+/** Require authenticated user, redirect to login if missing */
+export async function requireUser(): Promise<AppUser> {
+  const session = await readSession();
+  const user = await fetchUserBySession(session);
+  if (!user) redirect("/login");
+  return user;
+}
+
+/** Get optional user without redirect */
+export async function getOptionalUser(): Promise<AppUser | null> {
+  const session = await readSession();
+  return fetchUserBySession(session);
+}
+
+/** Require admin role, redirect to home if not admin */
 export async function requireAdmin() {
   const user = await requireUser();
-  if (user.role !== "admin") {
-    redirect("/");
-  }
+  if (user.role !== "admin") redirect("/");
   return user;
 }

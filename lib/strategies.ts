@@ -19,6 +19,8 @@ import {
   type DebateWorkflowConfig
 } from "@/lib/workflow";
 
+// === DB row types ===
+
 type StrategyRow = {
   id: string;
   owner_user_id: string;
@@ -39,6 +41,8 @@ type StrategyRoleRow = {
   created_at: string;
   updated_at: string;
 };
+
+// === Normalizers ===
 
 function normalizeStrategyRow(row: Record<string, unknown>) {
   return {
@@ -65,6 +69,8 @@ function normalizeStrategyRoleRow(row: Record<string, unknown>) {
   };
 }
 
+// === Error helpers ===
+
 function isMissingTableError(error: unknown, table: string) {
   if (typeof error !== "object" || error === null) return false;
   const anyError = error as { code?: unknown; message?: unknown };
@@ -81,13 +87,16 @@ function isMissingColumnError(error: unknown, column: string) {
   return message.toLowerCase().includes(column.toLowerCase());
 }
 
+// === Auth helper ===
+
+/** Require authenticated session, throw if missing */
 async function requireSessionUser() {
   const session = await readSession();
-  if (!session) {
-    throw new AppError("AUTH_REQUIRED", 401, "Authentication required");
-  }
+  if (!session) throw new AppError("AUTH_REQUIRED", 401, "Authentication required");
   return session;
 }
+
+// === View helpers ===
 
 function toListItem(row: ReturnType<typeof normalizeStrategyRow>, roleCount: number) {
   return {

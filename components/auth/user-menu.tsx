@@ -6,33 +6,32 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import type { UserRole } from "@/lib/roles";
 
-function initials(email: string) {
+/** Extract avatar initial from email */
+function getAvatarInitial(email: string): string {
   const value = email.trim();
-  if (!value) return "?";
-  return value.slice(0, 1).toUpperCase();
+  return value ? value.slice(0, 1).toUpperCase() : "?";
 }
 
+/** User dropdown menu with avatar, settings links, and logout */
 export function UserMenu(props: { email: string; role: UserRole }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const menuId = useId();
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const avatar = useMemo(() => getAvatarInitial(props.email), [props.email]);
 
-  const avatar = useMemo(() => initials(props.email), [props.email]);
-
+  // Close menu on outside click or Escape key
   useEffect(() => {
-    function onPointerDown(event: PointerEvent) {
-      if (!open) return;
-      const el = rootRef.current;
-      if (!el) return;
-      if (event.target instanceof Node && el.contains(event.target)) return;
-      setOpen(false);
-    }
+    if (!open) return;
 
-    function onKeyDown(event: KeyboardEvent) {
-      if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const el = rootRef.current;
+      if (el && event.target instanceof Node && !el.contains(event.target)) setOpen(false);
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
-    }
+    };
 
     window.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("keydown", onKeyDown);
@@ -42,11 +41,11 @@ export function UserMenu(props: { email: string; role: UserRole }) {
     };
   }, [open]);
 
-  async function logout() {
+  const handleLogout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
     router.push("/login");
     router.refresh();
-  }
+  };
 
   return (
     <div className="userMenu" ref={rootRef}>
@@ -58,12 +57,10 @@ export function UserMenu(props: { email: string; role: UserRole }) {
         title={props.email}
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="userAvatar" aria-hidden="true">
-          {avatar}
-        </span>
+        <span className="userAvatar" aria-hidden="true">{avatar}</span>
       </button>
 
-      {open ? (
+      {open && (
         <div className="userMenuPanel" role="menu" id={menuId}>
           <div className="userMenuHeader">
             <div className="userMenuEmail">{props.email}</div>
@@ -71,23 +68,15 @@ export function UserMenu(props: { email: string; role: UserRole }) {
           </div>
 
           <div className="userMenuItems">
-            <Link className="userMenuItem" role="menuitem" href="/settings/security">
-              安全管理
-            </Link>
-            <Link className="userMenuItem" role="menuitem" href="/settings/retrieval">
-              检索配置
-            </Link>
-            {props.role === "admin" ? (
-              <Link className="userMenuItem" role="menuitem" href="/admin/observability">
-                监控面板
-              </Link>
-            ) : null}
-            <button className="userMenuItem userMenuDanger" role="menuitem" onClick={() => void logout()}>
-              退出
-            </button>
+            <Link className="userMenuItem" role="menuitem" href="/settings/security">安全管理</Link>
+            <Link className="userMenuItem" role="menuitem" href="/settings/retrieval">检索配置</Link>
+            {props.role === "admin" && (
+              <Link className="userMenuItem" role="menuitem" href="/admin/observability">监控面板</Link>
+            )}
+            <button className="userMenuItem userMenuDanger" role="menuitem" onClick={handleLogout}>退出</button>
           </div>
         </div>
-      ) : null}
+      )}
     </div>
   );
 }

@@ -1,27 +1,27 @@
-export type DebateStatus =
-  | "pending"
-  | "running"
-  | "paused"
-  | "completed"
-  | "stopped"
-  | "failed";
+/** Debate lifecycle status */
+export type DebateStatus = "pending" | "running" | "paused" | "completed" | "stopped" | "failed";
 
+/** AI provider type */
 export type Provider = "openai" | "anthropic";
 
+/** Retrieval/embedding provider type */
 export type RetrievalProvider = "openai";
 
+/** Structured argument from agent output */
 export type StructuredArgument = {
   type: "support" | "rebuttal";
   content: string;
   target?: string;
 };
 
+/** Structured output parsed from agent response */
 export type StructuredOutput = {
   proposed_solution?: string;
   arguments?: StructuredArgument[];
   agreement_score?: number;
 };
 
+/** AI agent configuration record */
 export type AgentRecord = {
   id: string;
   userId: string;
@@ -39,6 +39,7 @@ export type AgentRecord = {
   updatedAt: string;
 };
 
+/** Debate session record */
 export type DebateRecord = {
   id: string;
   userId: string;
@@ -50,10 +51,7 @@ export type DebateRecord = {
   enableSharedFacts: boolean;
   isShared: boolean;
   consensusReached: boolean;
-  consensusSummary: {
-    leadingSolution: string;
-    score: number;
-  } | null;
+  consensusSummary: { leadingSolution: string; score: number } | null;
   workflowPhaseKind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization" | null;
   workflowPhaseTitle: string | null;
   workflowPhaseRound: number | null;
@@ -69,6 +67,7 @@ export type DebateRecord = {
   updatedAt: string;
 };
 
+/** Debate participant (seat) record */
 export type DebateAgentRecord = {
   id: string;
   debateId: string;
@@ -79,6 +78,7 @@ export type DebateAgentRecord = {
   createdAt: string;
 };
 
+/** Debate turn (message) record */
 export type DebateTurnRecord = {
   id: string;
   debateId: string;
@@ -96,6 +96,7 @@ export type DebateTurnRecord = {
   createdAt: string;
 };
 
+/** In-memory database shape (for legacy compatibility) */
 export type AppDb = {
   agents: AgentRecord[];
   debates: DebateRecord[];
@@ -103,6 +104,7 @@ export type AppDb = {
   turns: DebateTurnRecord[];
 };
 
+/** Retrieval/embedding configuration record */
 export type RetrievalConfigRecord = {
   id: string;
   userId: string;
