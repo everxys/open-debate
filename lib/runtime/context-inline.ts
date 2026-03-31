@@ -299,6 +299,6 @@ export function getPhaseSnapshot(
   return {
     workflowPhaseKind: currentPhase?.kind ?? null,
     workflowPhaseTitle: currentPhase?.title ?? null,
-    workflowPhaseRound: currentPhase ? roundNumber : null
+    workflowPhaseRound: roundNumber
   };
 }
