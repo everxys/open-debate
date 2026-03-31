@@ -59,6 +59,7 @@ import {
   withOptionalMaxTokens
 } from "@/lib/runtime/workflow-phase";
 import type { AgentRecord, DebateRecord } from "@/lib/types";
+import type { DebateWorkflowRoleMeta } from "@/lib/workflow";
 import {
   buildWorkflowOpeningInline,
   buildWorkflowPhaseInline,
@@ -133,6 +134,7 @@ type ProviderPromptContext = ProviderCallInput & {
   latestVote: Awaited<ReturnType<typeof loadLatestVote>>;
   currentPhase: ReturnType<typeof resolveCurrentWorkflowPhase>;
   currentRoleType: DebateParticipantRoleType;
+  currentRoleMeta: DebateWorkflowRoleMeta | null;
   requestedMaxTokens: number;
   currentOutputMaxTokens: number | null;
   enableVotingTools: boolean;
@@ -263,6 +265,7 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
   });
   const roleAssignments = await loadDebateParticipantRoleTypes(input.userId, input.debate.id);
   const currentRoleType = getDebateParticipantRoleType(roleAssignments, input.debateAgentId);
+  const currentRoleMeta = workflow?.rolesMeta[currentRoleType] ?? null;
   const responseFormatPolicy = workflow?.promptPolicies.responseFormat ?? {
     requireMarkdown: true,
     forbidRawJson: true
@@ -474,6 +477,7 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
     latestVote,
     currentPhase,
     currentRoleType,
+    currentRoleMeta,
     requestedMaxTokens,
     currentOutputMaxTokens,
     enableVotingTools,
@@ -495,6 +499,7 @@ async function buildSharedSystemParts(context: ProviderPromptContext, overrideSy
       allowedOutputPaths: context.allowedOutputPaths,
       requiredFiles: context.requiredDeliverables,
       currentRoleType: context.currentRoleType,
+      currentRoleMeta: context.currentRoleMeta,
       pendingRequiredFiles: context.pendingDeliverables,
       contextAccessLines: context.contextAccessLines
     })

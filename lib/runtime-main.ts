@@ -128,9 +128,11 @@ import {
   getWorkflowEarliestDeliberationRound,
   getWorkflowEarliestFinalizationRound,
   getWorkflowEarliestFinalizationVoteRound,
+  getWorkflowCompletionMode,
   getWorkflowElectionStartRound,
   getWorkflowMinimumAnalysisRounds,
   getWorkflowOutputMaxTokens,
+  hasWorkflowPhase,
   getWorkflowPhaseMinRounds,
   getWorkflowPhaseByKind,
   isClosedElectionVotePassed,
@@ -144,6 +146,8 @@ import {
   resolveCurrentRoundNumberForWorkflow,
   resolveCurrentWorkflowPhase,
   resolveRequestedMaxTokens,
+  requiresWorkflowFinalizationPhaseForCompletion,
+  requiresWorkflowOutputsForCompletion,
   safeJsonParse,
   shouldAutoOpenWorkflowElectionAtBoundary,
   withOptionalMaxTokens
@@ -969,25 +973,28 @@ export function extractElectionBallotSummaryFromVote(
 }
 
 export function appendWorkflowSummaryLines(lines: string[], workflow: NormalizedDebateWorkflow | null) {
-  lines.push("## Workflow (summary)");
+  lines.push("## Rules (summary)");
   if (!workflow?.enabled) {
     lines.push("- disabled (no workflow.json or enabled=false)");
     return;
   }
 
+  const hasElectionPhase = hasWorkflowPhase(workflow, "election");
+  const hasFinalizationVotePhase = hasWorkflowPhase(workflow, "finalization_vote");
+  const hasFinalizationPhase = hasWorkflowPhase(workflow, "finalization");
   lines.push(`- version: v${workflow.workflowVersion}`);
   lines.push(`- election startRound: ${workflow.election.startRound}`);
   lines.push(
-    `- phase minRounds: analysis=${getWorkflowMinimumAnalysisRounds(workflow)}; election=${getWorkflowPhaseMinRounds(workflow, "election", 1)}; deliberation=${getWorkflowPhaseMinRounds(workflow, "deliberation", 0)}; finalization_vote=${getWorkflowPhaseMinRounds(workflow, "finalization_vote", 1)}; finalization=${getWorkflowPhaseMinRounds(workflow, "finalization", 0)}`
+    `- phase minRounds: analysis=${getWorkflowMinimumAnalysisRounds(workflow)}; election=${hasElectionPhase ? getWorkflowPhaseMinRounds(workflow, "election", 0) : "n/a"}; deliberation=${getWorkflowPhaseMinRounds(workflow, "deliberation", 0)}; finalization_vote=${hasFinalizationVotePhase ? getWorkflowPhaseMinRounds(workflow, "finalization_vote", 0) : "n/a"}; finalization=${hasFinalizationPhase ? getWorkflowPhaseMinRounds(workflow, "finalization", 0) : "n/a"}`
   );
   lines.push(
-    `- phase earliest rounds: deliberation@${getWorkflowEarliestDeliberationRound(workflow)}; finalization_vote@${getWorkflowEarliestFinalizationVoteRound(workflow)}; finalization@${getWorkflowEarliestFinalizationRound(workflow)}; completion@${getWorkflowEarliestCompletionRound(workflow)}`
+    `- phase earliest rounds: deliberation@${getWorkflowEarliestDeliberationRound(workflow)}; finalization_vote@${hasFinalizationVotePhase ? getWorkflowEarliestFinalizationVoteRound(workflow) : "n/a"}; finalization@${hasFinalizationPhase ? getWorkflowEarliestFinalizationRound(workflow) : "n/a"}; completion@${getWorkflowEarliestCompletionRound(workflow)}`
   );
   lines.push(
-    `- phase transitions: election@round ${workflow.phaseMachine.transitionRules.election.startRound}; election autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}; election reopenUntilPassed=${workflow.phaseMachine.transitionRules.election.reopenUntilPassed ? "yes" : "no"}; election discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes}`
+    `- election phase: configured=${hasElectionPhase ? "yes" : "no"}; roles=${workflow.election.roles.length ? workflow.election.roles.join("/") : "(none)"}; startRound=${workflow.phaseMachine.transitionRules.election.startRound}; autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}; reopenUntilPassed=${workflow.phaseMachine.transitionRules.election.reopenUntilPassed ? "yes" : "no"}; discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes}`
   );
   lines.push(
-    `- phase finalization: autoOpenVote=${workflow.phaseMachine.transitionRules.finalization.autoOpenVote ? "yes" : "no"}; requireUnanimousVote=${workflow.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "yes" : "no"}; reopenUntilPassed=${workflow.phaseMachine.transitionRules.finalization.reopenUntilPassed ? "yes" : "no"}; discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes}; requirePhaseForCompletion=${workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "yes" : "no"}`
+    `- consolidation controls: votePhase=${hasFinalizationVotePhase ? "yes" : "no"}; consolidationPhase=${hasFinalizationPhase ? "yes" : "no"}; autoOpenVote=${workflow.phaseMachine.transitionRules.finalization.autoOpenVote ? "yes" : "no"}; requireUnanimousVote=${workflow.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "yes" : "no"}; reopenUntilPassed=${workflow.phaseMachine.transitionRules.finalization.reopenUntilPassed ? "yes" : "no"}; discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes}; requirePhaseForCompletion=${workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "yes" : "no"}`
   );
   lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
   lines.push(
@@ -1489,6 +1496,18 @@ export function buildWorkflowPhaseInline(input: {
   openVote: OfficialVote | null;
   latestVote?: OfficialVote | null;
 }) {
+  const isLightweightWorkflow =
+    input.workflow?.enabled &&
+    input.workflow.completion.mode === "consensus_only" &&
+    input.workflow.election.roles.length === 0 &&
+    input.workflow.deliverables.requiredFiles.length === 0 &&
+    !input.workflow.ideaBank.rawIdeaBankPath &&
+    !Object.values(input.workflow.ideaBank.derivedFiles).some(Boolean) &&
+    input.workflow.contextAccess.alwaysRead.length === 0 &&
+    input.workflow.contextAccess.readWhenNeeded.length === 0 &&
+    input.workflow.contextAccess.unlockAfterPhase.length === 0 &&
+    input.workflow.phaseMachine.phases.length === 1 &&
+    input.workflow.phaseMachine.phases[0]?.kind === "deliberation";
   const current = resolveCurrentWorkflowPhase({
     workflow: input.workflow,
     roundNumber: input.roundNumber,
@@ -1497,8 +1516,19 @@ export function buildWorkflowPhaseInline(input: {
     persistedPhaseKind: input.debate.workflowPhaseKind
   });
   if (!current) return null;
+  if (isLightweightWorkflow) {
+    const lines = ["Discussion guidance (IMPORTANT):"];
+    if (current.description) lines.push(`- Focus: ${current.description}`);
+    if (current.injectedPrompt) {
+      lines.push("- Discussion prompt:");
+      lines.push(current.injectedPrompt);
+    }
+    lines.push(`- Earliest completion round: ${getWorkflowEarliestCompletionRound(input.workflow)}`);
+    lines.push(`- Completion mode: ${getWorkflowCompletionMode(input.workflow)}`);
+    return lines.join("\n");
+  }
   const lines = [
-    "Workflow phase (IMPORTANT):",
+    "Rule guidance (IMPORTANT):",
     `- Current phase: ${current.title}`,
     `- Phase kind: ${current.kind}`
   ];
@@ -1508,9 +1538,18 @@ export function buildWorkflowPhaseInline(input: {
     lines.push(current.injectedPrompt);
   }
   if (current.minRounds) lines.push(`- Minimum rounds for this phase: ${current.minRounds}`);
-  lines.push(`- Earliest Phase 3 vote round: ${getWorkflowEarliestFinalizationVoteRound(input.workflow)}`);
-  lines.push(`- Earliest finalization round: ${getWorkflowEarliestFinalizationRound(input.workflow)}`);
+  if (hasWorkflowPhase(input.workflow, "finalization_vote")) {
+    lines.push(`- Earliest consolidation vote round: ${getWorkflowEarliestFinalizationVoteRound(input.workflow)}`);
+  } else {
+    lines.push("- Consolidation vote phase: not configured");
+  }
+  if (hasWorkflowPhase(input.workflow, "finalization")) {
+    lines.push(`- Earliest consolidation round: ${getWorkflowEarliestFinalizationRound(input.workflow)}`);
+  } else {
+    lines.push("- Consolidation phase: not configured");
+  }
   lines.push(`- Earliest completion round: ${getWorkflowEarliestCompletionRound(input.workflow)}`);
+  lines.push(`- Completion mode: ${getWorkflowCompletionMode(input.workflow)}`);
   const allPhases = input.workflow?.phaseMachine.phases ?? [];
   if (allPhases.length > 0) {
     lines.push("- Full phase machine:");
@@ -1521,8 +1560,8 @@ export function buildWorkflowPhaseInline(input: {
     }
   }
   const requiredDeliverables = input.workflow?.deliverables.requiredFiles ?? [];
-  if (requiredDeliverables.length > 0) {
-    lines.push("- Completion gate: the debate cannot finish until all required deliverables are written.");
+  if (requiredDeliverables.length > 0 && requiresWorkflowOutputsForCompletion(input.workflow)) {
+    lines.push("- Completion gate: this workflow requires the listed deliverables before the debate can finish.");
   }
   return lines.join("\n");
 }
@@ -1576,7 +1615,7 @@ export async function loadWorkflowIdeaBankInline(input: {
       lines.push(`- Raw idea bank path: ${rawPath} (do not reopen the raw bank unless you must verify unresolved risk).`);
     }
     lines.push("- In this phase, do not expand the scope again by default.");
-    lines.push("- Focus on whether the debate is ready to enter Phase 3, what blockers remain, and whether the final deliverables can now be consolidated.");
+    lines.push("- Focus on whether the debate is ready to enter consolidation, what blockers remain, and whether the required outputs can now be unified.");
   } else if (input.phaseKind === "finalization") {
     if (rawPath) {
       lines.push(`- Raw idea bank path: ${rawPath} (do not return to this file by default in finalization).`);
@@ -3071,15 +3110,14 @@ export async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
   const electionRules = workflow?.phaseMachine.transitionRules.election;
   const electionRoles = workflowEnabled ? (workflow?.election.roles ?? []) : [];
 
-  // Prefer election vote when workflow is enabled so roles/speakingOrder can be applied
-  // (e.g., Host first, Supervisor last).
+  // Prefer election vote when workflow is enabled so appointed roles and speakingOrder can be applied.
   if (shouldOpenElection && workflowEnabled && electionRoles.length > 0) {
     const result = await toolVoteOpen({
       userId: input.userId,
       debateId: input.debateId,
       participantCount: input.participantCount,
       roundNumber: openRoundNumber,
-      title: `第 ${openRoundNumber} 轮 · Phase 1.5 角色选举`,
+      title: `第 ${openRoundNumber} 轮 · 角色选举`,
       kind: "election",
       bypassStartRound: false,
       meta: { forcedOpen: true, reason: `after_round_${input.endedRound}`, attempt: 1 }
@@ -3104,7 +3142,7 @@ export async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
         debateId: input.debateId,
         participantCount: input.participantCount,
         roundNumber: openRoundNumber,
-        title: `第 ${openRoundNumber} 轮 · Phase 1.5 角色复投`,
+        title: `第 ${openRoundNumber} 轮 · 角色选举复投`,
         kind: "election",
         bypassStartRound: false,
         meta: {
@@ -3121,6 +3159,7 @@ export async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
   const nextRoundNumber = input.endedRound + 1;
   const finalizationRules = workflow?.phaseMachine.transitionRules.finalization;
   const finalizationEntryRound = getWorkflowEarliestFinalizationVoteRound(workflow);
+  const finalizationVoteTitle = getWorkflowPhaseByKind(workflow, "finalization_vote")?.title ?? "Consolidation vote";
   if (
     workflowEnabled &&
     !input.skipFinalizationAutoOpen &&
@@ -3134,7 +3173,7 @@ export async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
         debateId: input.debateId,
         participantCount: input.participantCount,
         roundNumber: nextRoundNumber,
-        title: `第 ${nextRoundNumber} 轮 · Phase 3 入场表决`,
+        title: `Round ${nextRoundNumber} · ${finalizationVoteTitle}`,
         kind: "finalization",
         bypassStartRound: false,
         meta: { forcedOpen: true, reason: `after_round_${input.endedRound}` }
@@ -3162,7 +3201,7 @@ export async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
         debateId: input.debateId,
         participantCount: input.participantCount,
         roundNumber: nextRoundNumber,
-        title: `第 ${nextRoundNumber} 轮 · Phase 3 入场复投`,
+        title: `Round ${nextRoundNumber} · ${finalizationVoteTitle} retry`,
         kind: "finalization",
         bypassStartRound: false,
         meta: {
@@ -3308,8 +3347,8 @@ export function buildFallbackVoteAnnouncement(input: {
     "## 结果",
     kind === "finalization"
       ? passed
-        ? "- Phase 3 入场表决已通过"
-        : "- Phase 3 入场表决未通过"
+        ? "- Consolidation vote passed"
+        : "- Consolidation vote not passed"
       : kind === "custom"
       ? winner
         ? `- Winner：${winner}`
@@ -3766,7 +3805,7 @@ export async function runDebate(id: string, userId: string) {
         emitDebateLiveEvent(id, {
           type: "status",
           debateId: id,
-          message: "Workflow 规则：已生成下一轮席位顺序调整",
+          message: "讨论规则：已生成下一轮席位顺序调整",
           at: new Date().toISOString()
         });
       }
@@ -3818,15 +3857,20 @@ export async function runDebate(id: string, userId: string) {
         lastKnownPhase = phaseSnapshotBeforeTurn;
       }
       if (debate.maxTurns > 0 && completedSpeakingRounds >= debate.maxTurns) {
-        const requiresFinalizationPhase =
-          workflowBeforeTurn?.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ?? true;
+        const consensusRequiredBeforeTurn = workflowBeforeTurn?.consensus.enabled !== false;
+        const consensusReachedBeforeTurn = !consensusRequiredBeforeTurn || Boolean(debate.consensusReached);
+        const requiresFinalizationPhase = requiresWorkflowFinalizationPhaseForCompletion(workflowBeforeTurn);
+        const requiresOutputs = requiresWorkflowOutputsForCompletion(workflowBeforeTurn);
         const earliestCompletionRound = getWorkflowEarliestCompletionRound(workflowBeforeTurn);
-        const missingDeliverables = await listMissingRequiredDeliverables({
-          userId,
-          debateId: id,
-          workflow: workflowBeforeTurn
-        });
+        const missingDeliverables = requiresOutputs
+          ? await listMissingRequiredDeliverables({
+              userId,
+              debateId: id,
+              workflow: workflowBeforeTurn
+            })
+          : [];
         if (
+          consensusReachedBeforeTurn &&
           (!requiresFinalizationPhase || phaseBeforeTurn?.kind === "finalization") &&
           currentRoundNumberBeforeTurn >= earliestCompletionRound &&
           missingDeliverables.length === 0
@@ -3843,8 +3887,10 @@ export async function runDebate(id: string, userId: string) {
           await finishDebate(id, "stopped", `max turns reached before workflow minimum completion round ${earliestCompletionRound}`, {
             phase: lastKnownPhase
           });
+        } else if (!consensusReachedBeforeTurn) {
+          await finishDebate(id, "stopped", "max turns reached before consensus was reached", { phase: lastKnownPhase });
         } else {
-          await finishDebate(id, "stopped", "max turns reached before Phase 3", { phase: lastKnownPhase });
+          await finishDebate(id, "stopped", "max turns reached before consolidation phase", { phase: lastKnownPhase });
         }
         break;
       }
@@ -4251,7 +4297,8 @@ export async function runDebate(id: string, userId: string) {
         latestVote: latestVoteBeforeUpdate,
         persistedPhaseKind: debate.workflowPhaseKind
       });
-      const requiresFinalizationPhase = workflow?.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ?? true;
+      const requiresFinalizationPhase = requiresWorkflowFinalizationPhaseForCompletion(workflow);
+      const requiresOutputs = requiresWorkflowOutputsForCompletion(workflow);
       const currentSpeechRoundIndexAfterTurn = Math.floor(Math.max(0, nextTurn - 1) / Math.max(1, participantCount)) + 1;
       const currentRoundNumberAfterTurn = mapSpeechRoundIndexToActualRound(
         currentSpeechRoundIndexAfterTurn,
@@ -4260,16 +4307,22 @@ export async function runDebate(id: string, userId: string) {
       const canCompleteByPhase =
         requiresFinalizationPhase
           ? finalizationPhase?.kind === "finalization" && currentRoundNumberAfterTurn >= getWorkflowEarliestCompletionRound(workflow)
-          : true;
-      const missingDeliverables = await listMissingRequiredDeliverables({
-        userId,
-        debateId: id,
-        workflow
-      });
+          : currentRoundNumberAfterTurn >= getWorkflowEarliestCompletionRound(workflow);
+      const missingDeliverables = requiresOutputs
+        ? await listMissingRequiredDeliverables({
+            userId,
+            debateId: id,
+            workflow
+          })
+        : [];
       const canCompleteByDeliverables = missingDeliverables.length === 0;
+      const consensusRequired = workflow?.consensus.enabled !== false;
+      const canCompleteByConsensus = !consensusRequired || consensus.reached;
       const consensusReachedForDb = mustKeepRunningForVote ? false : consensus.reached;
       const nextStatusForDb =
-        !mustKeepRunningForVote && canCompleteByPhase && canCompleteByDeliverables ? "completed" : "running";
+        !mustKeepRunningForVote && canCompleteByConsensus && canCompleteByPhase && canCompleteByDeliverables
+          ? "completed"
+          : "running";
       const phaseSnapshotAfterTurn = getPhaseSnapshot(finalizationPhase, currentRoundNumberAfterTurn);
       lastKnownPhase = phaseSnapshotAfterTurn;
       await query(
@@ -4389,7 +4442,7 @@ export async function runDebate(id: string, userId: string) {
                   const workflowPhase = getWorkflowPhaseByKind(workflow, "finalization");
                   const phaseSnapshot = {
                     workflowPhaseKind: "finalization" as const,
-                    workflowPhaseTitle: workflowPhase?.title ?? "Phase 3 · 共识收敛与最终交付",
+                    workflowPhaseTitle: workflowPhase?.title ?? "Consolidation · Final alignment and outputs",
                     workflowPhaseRound: endedRound + 1
                   };
                   await persistDebatePhaseSnapshot(id, phaseSnapshot);
@@ -4398,7 +4451,7 @@ export async function runDebate(id: string, userId: string) {
                   emitDebateLiveEvent(id, {
                     type: "status",
                     debateId: id,
-                    message: `Phase 3 入场表决已通过，第 ${endedRound + 1} 轮起正式进入 Phase 3`,
+                    message: `Consolidation vote passed. From round ${endedRound + 1}, the debate enters the consolidation phase.`,
                     at: new Date().toISOString()
                   });
                 }

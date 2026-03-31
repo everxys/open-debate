@@ -21,7 +21,7 @@
         -> PostgreSQL
 ```
 
-核心思想是“Strategy 是模板，Debate 是实例”。Strategy 定义角色、Prompt、模板文件；创建 Debate 时把它们复制为辩论级覆盖与共享文件，然后运行时在这些文件上持续读写。
+核心思想是“Strategy 提供可复用的角色、Prompt 与 workflow 文件，Debate 是它们的运行实例”。创建 Debate 时，这些配置会被复制为辩论级覆盖与共享文件，然后运行时在这些文件上持续读写。
 
 ### 2. 目录结构解析（File Structure）
 
@@ -52,7 +52,7 @@
 - `users`：用户、角色、邮箱验证、登录失败锁定信息
 - `ai_agents`：用户的 AI 配置；含 provider/model/baseUrl/apiKey 加密值
 - `ai_agent_files`：Agent 私有文件
-- `strategies` / `strategy_roles` / `strategy_role_files`：策略模板、角色、角色文件
+- `strategies` / `strategy_roles` / `strategy_role_files`：策略、角色、角色文件
 - `debates`：辩论主表；含状态、当前 turn、共识、工作流阶段、运行时 notice、错误信息
 - `debate_agents`：某场辩论中的席位实例；同一个 `ai_agent_id` 可复用为多个席位
 - `debate_agent_overrides`：辩论级 system prompt 覆盖
@@ -87,7 +87,7 @@
 2. Strategy 管理
 - 输入：策略名、角色列表、角色文件、可选 workflow
 - 流程：创建 `strategies` -> 创建 `strategy_roles` -> 创建 `strategy_role_files`
-- 输出：可复用的多角色模板
+- 输出：可复用的多角色讨论配置
 - 特殊处理：`debate/workflow.json` 只允许最终保留一份“ownerRoleId”版本；fork 会复制角色及文件
 
 3. 创建 Debate
@@ -140,13 +140,13 @@ while debate.status == running:
 - 审计：每次共享文件读写会进入 `debate_fil_activity_logs`
 
 6. 工作流与官方投票
-- `workflow.json` 定义 phase、选举、席位顺序、进入 Phase 3 的条件、必交付文件
+- `workflow.json` 定义 phase、选举、席位顺序、收束条件、必交付文件
 - 官方投票状态保存在 `votes/open.json`
 - 封票后产出：
   - `votes/round-<n>.json`
   - `votes/round-<n>.md`
   - `votes/directive.md/json`
-- 角色类型不是 DB 字段，而是从“最近一次成功 election 结果”反推出 `Host / Supervisor / Specialist`
+- 角色类型不是 DB 字段，而是从“最近一次成功 election 结果”反推出任意角色名；具体职责以 `workflow.rolesMeta` 为准
 
 魔法数字/硬编码：
 - Session 7 天
@@ -233,5 +233,5 @@ while debate.status == running:
 如果要新增某类功能：
 - 新增新的 Debate 运行规则：先从 `workflow.ts` 定义配置，再接 `runtime/workflow-phase.ts` 的阶段判断，最后落到 `runtime-main.ts`
 - 新增新的共享文件工具：从 `runtime/provider-shared.ts` 的 tool schema + `runtime-main.ts` 的工具执行分支入手
-- 新增新的 Strategy 模板能力：从 `strategies.ts` 的 role/file 复制逻辑入手，确认 Debate 实例化时如何继承
+- 新增新的 Strategy 能力：从 `strategies.ts` 的 role/file 复制逻辑入手，确认 Debate 实例化时如何继承
 - 新增页面/API：遵循现有模式，UI 在 `app/(main)`，路由在 `app/api`，业务写进 `lib/*`

@@ -1,6 +1,6 @@
 import { query } from "@/lib/db";
 
-export type DebateParticipantRoleType = "Host" | "Supervisor" | "Specialist";
+export type DebateParticipantRoleType = string;
 
 type SuccessfulElectionAssignments = {
   byDebateAgentId: Map<string, DebateParticipantRoleType>;
@@ -36,12 +36,14 @@ function parseSuccessfulElectionAssignments(
   if (!winners) return null;
 
   const byDebateAgentId = new Map<string, DebateParticipantRoleType>();
-  const hostSeat = typeof winners.Host === "string" ? String(winners.Host) : null;
-  const supervisorSeat = typeof winners.Supervisor === "string" ? String(winners.Supervisor) : null;
-  const hostDebateAgentId = hostSeat ? seatToDebateAgentId.get(hostSeat) ?? null : null;
-  const supervisorDebateAgentId = supervisorSeat ? seatToDebateAgentId.get(supervisorSeat) ?? null : null;
-  if (hostDebateAgentId) byDebateAgentId.set(hostDebateAgentId, "Host");
-  if (supervisorDebateAgentId) byDebateAgentId.set(supervisorDebateAgentId, "Supervisor");
+  for (const [roleName, seatValue] of Object.entries(winners)) {
+    if (typeof seatValue !== "string") continue;
+    const normalizedRole = roleName.trim();
+    if (!normalizedRole) continue;
+    const debateAgentId = seatToDebateAgentId.get(seatValue.trim()) ?? null;
+    if (!debateAgentId || byDebateAgentId.has(debateAgentId)) continue;
+    byDebateAgentId.set(debateAgentId, normalizedRole);
+  }
 
   const roundNumber = typeof obj.roundNumber === "number" ? Math.floor(obj.roundNumber) : null;
   return { byDebateAgentId, roundNumber };
@@ -106,5 +108,5 @@ export function getDebateParticipantRoleType(
   assignments: SuccessfulElectionAssignments,
   debateAgentId: string
 ): DebateParticipantRoleType {
-  return assignments.byDebateAgentId.get(debateAgentId) ?? "Specialist";
+  return assignments.byDebateAgentId.get(debateAgentId) ?? "Contributor";
 }
