@@ -4,6 +4,11 @@
 
 如果你只想 5 分钟跑起来：直接看 **第 1～3 节**，复制模板即可。
 
+> 说明：
+> - 平台默认 workflow 已经改为“中立协作模式”，没有 `debate/workflow.json` 时，辩论依然可以运行。
+> - 系统没有内置任务分类，也没有内置“小说模式 / 文档模式 / 方案模式”。
+> - 任何场景差异都只通过 `debate/workflow.json` 和提示词表达。
+
 ---
 
 ## 0. 你到底在配置什么？
@@ -36,7 +41,7 @@
 创建辩论时，系统会做一件事：
 
 - 如果策略里存在 `debate/workflow.json`：复制到该辩论的共享文件 `workflow.json`
-- 如果不存在：该辩论 **不启用官方投票/角色**（默认关闭）
+- 如果不存在：该辩论会使用平台默认的中立 workflow，不会自动注入小说式角色或交付要求
 
 提示：你只需要在策略的任意一个角色里放这份文件即可；系统会选到一份并复制。
 
@@ -158,9 +163,9 @@
 
 ---
 
-## 3. 两个现成模板（直接复制）
+## 3. 常见 workflow 片段
 
-### 模板 A：只做“自定义投票”（不选角色）
+### 片段 A：只做“自定义投票”（不选角色）
 
 适合：你只想每隔几轮对某个提案做表决，不关心主持人/监管员。
 
@@ -176,8 +181,9 @@
 
 - 可以发起 `kind="custom"` 的投票
 - 不能发起 `kind="election"`（因为 roles 为空）
+- 如果你后面开始要求输出文件，建议同时给 `requiredFiles[].qualityChecks`，不要只靠字数门槛
 
-### 模板 B：角色选举 + 顺序约束（最常用）
+### 片段 B：角色选举 + 顺序约束
 
 ```json
 {
@@ -196,6 +202,47 @@
 - 第 1～2 轮讨论
 - 第 3 轮起可以开票做角色选举
 - 封票后会生成下一轮的席位顺序（Host 置顶，Supervisor 置底）
+
+### 片段 C：输出文件 + 质量检查
+
+适合：任何需要结构化输出的讨论场景。
+
+```json
+{
+  "workflowVersion": 1,
+  "enabled": true,
+  "completion": { "mode": "consensus_plus_outputs" },
+  "deliverables": {
+    "allowedPaths": ["final/", "outputs/"],
+    "requiredFiles": [
+      {
+        "path": "final/summary.md",
+        "description": "最终结论、依据与建议",
+        "minChars": 800,
+        "minMarkdownHeadings": 3,
+        "requiredSnippets": ["结论", "依据", "建议"],
+        "qualityChecks": {
+          "requiredSections": ["结论", "依据", "建议"],
+          "requiredTerms": ["风险", "权衡"],
+          "minBulletItems": 6,
+          "counters": [
+            { "label": "options", "patterns": ["方案"], "minCount": 2 }
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+这套 `qualityChecks` 的意思是：
+
+- 必须真的有这些章节
+- 必须覆盖这些关键术语
+- 至少列出一定数量的要点
+- 某类内容至少出现多少次
+
+这些只是字段组合示例，不是系统内置模板。
 
 ---
 

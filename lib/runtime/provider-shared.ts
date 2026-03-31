@@ -3,7 +3,11 @@ import { emitDebateLiveEvent } from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
 import { appendServerLog } from "@/lib/server-log";
 import type { AgentRecord, DebateRecord } from "@/lib/types";
-import { formatRequiredDeliverableSummary, type NormalizedWorkflowRequiredFile } from "@/lib/workflow";
+import {
+  formatRequiredDeliverableSummary,
+  type DebateWorkflowRoleMeta,
+  type NormalizedWorkflowRequiredFile
+} from "@/lib/workflow";
 
 const DEFAULT_MAX_INPUT_CHARS = 200_000 * 4;
 
@@ -164,6 +168,7 @@ export function buildFileToolInstructions(input: {
   allowedOutputPaths: string[];
   requiredFiles: NormalizedWorkflowRequiredFile[];
   currentRoleType: DebateParticipantRoleType;
+  currentRoleMeta?: DebateWorkflowRoleMeta | null;
   pendingRequiredFiles: NormalizedWorkflowRequiredFile[];
   contextAccessLines?: string[];
 }) {
@@ -197,33 +202,50 @@ export function buildFileToolInstructions(input: {
         lines.push(`      - required structure: ${file.requiredSnippets.join(" / ")}`);
       }
     }
-    lines.push("  - The debate is not complete until every required deliverable has been written.");
+    lines.push("  - When this workflow requires outputs, completion is gated on these deliverables being written.");
   }
 
+  const normalizedRoleName = input.currentRoleType.trim() || "Contributor";
+  const roleLabel = input.currentRoleMeta?.label?.trim() || normalizedRoleName;
+  const roleCategory = input.currentRoleMeta?.category ?? null;
+  const roleSummary = input.currentRoleMeta?.summary?.trim() || null;
+  const writingPolicy = input.currentRoleMeta?.writingPolicy ?? null;
+  const coordinatorLike = roleCategory === "coordinator" || writingPolicy === "coordinate";
+  const reviewerLike = roleCategory === "reviewer" || writingPolicy === "review";
+  const contributorLike = roleCategory === "contributor" || writingPolicy === "contribute";
+
   lines.push("");
-  lines.push(`Current delivery role: ${input.currentRoleType}`);
-  if (input.currentRoleType === "Host") {
-    lines.push("- Host responsibility: decide, unify, merge versions, and produce the final canonical draft.");
-    lines.push("- Do not package every missing first draft yourself. Push Specialists to write and expand missing deliverables first.");
+  lines.push(`Current delivery role: ${roleLabel}`);
+  if (roleSummary) {
+    lines.push(`- Role summary: ${roleSummary}`);
+  }
+  if (coordinatorLike) {
+    lines.push("- Coordination responsibility: decide, unify, merge versions, and produce the canonical shared draft when the workflow calls for consolidation.");
+    lines.push("- Do not package every missing first draft yourself. Push contributor seats to write and expand missing deliverables first.");
     lines.push('- Use mode="replace" on final/* mainly for true final unification, not as the default way to start a file from scratch.');
-  } else if (input.currentRoleType === "Supervisor") {
-    lines.push("- Supervisor responsibility: spot gaps, demand rework, and verify structure/logic/quality.");
+  } else if (reviewerLike) {
+    lines.push("- Review responsibility: spot gaps, demand rework, and verify structure, logic, and quality.");
     lines.push("- Do not default to primary drafting. Prefer review-oriented fixes, comments, and section-level corrections.");
     lines.push('- When you do write, prefer mode="section_merge" to correct weak sections instead of rewriting the whole deliverable.');
-  } else {
-    lines.push("- Specialist responsibility: actively write or expand deliverable files. Do not stop at verbal suggestions.");
+  } else if (contributorLike || writingPolicy === "contribute") {
+    lines.push("- Contribution responsibility: actively write or expand deliverable files. Do not stop at verbal suggestions.");
     lines.push("- If required deliverables are empty, thin, or structurally incomplete, you should prioritize debate_files_write.");
     lines.push('- For existing final/* drafts, read first and then use mode="section_merge" or mode="append" to expand them safely.');
+  } else {
+    lines.push("- No special drafting role is implied by default. Use the workflow instructions and current discussion state to decide whether to draft, review, or consolidate.");
+    lines.push("- If the workflow does not force a writing policy, prefer the smallest useful write that moves the shared work forward.");
   }
 
   if (input.pendingRequiredFiles.length > 0) {
     lines.push("");
     lines.push(
-      input.currentRoleType === "Host"
+      coordinatorLike
         ? "Current deliverable gaps for you to coordinate and later unify:"
-        : input.currentRoleType === "Supervisor"
+        : reviewerLike
           ? "Current deliverable gaps you should audit and push others to fix:"
-          : "Shared Specialist backlog: these deliverables still need real writing or expansion:"
+          : contributorLike || writingPolicy === "contribute"
+            ? "Current contributor backlog: these deliverables still need real writing or expansion:"
+            : "Current shared output gaps:"
     );
     for (const file of input.pendingRequiredFiles.slice(0, 12)) {
       lines.push(`- ${formatRequiredDeliverableSummary(file, "plain")}`);

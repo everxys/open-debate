@@ -80,7 +80,7 @@
 
 ### 3.2 Workflow 保留什么
 
-保留在 workflow preset：
+保留在 workflow 配置：
 - 最少轮数
 - 输出预算
 - 交付文件

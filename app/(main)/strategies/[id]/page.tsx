@@ -894,12 +894,12 @@ export default function StrategyDetailPage() {
       <section className="panel stack">
         <div className="row" style={{ justifyContent: "space-between" }}>
           <div>
-            <strong>阶段注入提示词</strong>
-            <div className="muted">开局提示词会在辩论一开始注入；阶段提示词会在系统进入对应阶段后自动注入到运行时 Prompt 中。</div>
+            <strong>讨论增强提示词（可选）</strong>
+            <div className="muted">默认不需要复杂 workflow；只有当你希望某些讨论阶段带特殊规则时，才需要在这里补充开局提示词或阶段提示词。</div>
           </div>
           {detail.canEdit ? (
             <button className="btn btn-primary" disabled={workflowPhasePromptsLoading || workflowPhasePromptsSaving} onClick={() => void saveWorkflowPhasePrompts()}>
-              {workflowPhasePromptsSaving ? "保存中..." : "保存阶段提示词"}
+              {workflowPhasePromptsSaving ? "保存中..." : "保存提示词"}
             </button>
           ) : null}
         </div>
@@ -935,7 +935,7 @@ export default function StrategyDetailPage() {
               </div>
             </div>
             {workflowPhasePrompts.length <= 0 ? (
-              <div className="muted">当前策略没有可编辑的阶段配置。</div>
+              <div className="muted">当前策略没有额外流程阶段，默认直接按普通讨论方式运行。</div>
             ) : null}
             {workflowPhasePrompts.map((phase, index) => (
               <div key={phase.id} className="softBox stack">
@@ -957,8 +957,8 @@ export default function StrategyDetailPage() {
                     onClick={() =>
                       openWorkflowPromptDialog({
                         type: "phase",
-                        title: `${phase.title} · 阶段注入提示词`,
-                        description: phase.description ?? "系统进入该阶段后，会自动把这里的提示词注入到运行时 Prompt 中。",
+                        title: `${phase.title} · 阶段提示词`,
+                        description: phase.description ?? "只有当 workflow 进入该阶段时，系统才会自动把这里的提示词注入到运行时 Prompt 中。",
                         value: phase.injectedPrompt,
                         phaseIndex: index
                       })
@@ -976,8 +976,8 @@ export default function StrategyDetailPage() {
       <section className="panel stack">
         <div className="row" style={{ justifyContent: "space-between" }}>
           <div>
-            <strong>上下文读取策略</strong>
-            <div className="muted">把 AGENTS 风格规则产品化：哪些目录每个新会话都必须自动读，哪些只能按需读，哪些要到特定阶段后才解锁。</div>
+            <strong>上下文读取规则（可选）</strong>
+            <div className="muted">默认可以完全不配。只有当某些目录需要“每次都读 / 按需读 / 到特定阶段再解锁”时，才需要在这里加规则。</div>
           </div>
           {detail.canEdit ? (
             <button
@@ -985,7 +985,7 @@ export default function StrategyDetailPage() {
               disabled={workflowContextAccessLoading || workflowContextAccessSaving}
               onClick={() => void saveWorkflowContextAccess()}
             >
-              {workflowContextAccessSaving ? "保存中..." : "保存读取策略"}
+              {workflowContextAccessSaving ? "保存中..." : "保存读取规则"}
             </button>
           ) : null}
         </div>

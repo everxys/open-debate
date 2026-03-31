@@ -1,3 +1,21 @@
 ## 2026-03-31
 
 - 新增 `docs/PROJECT_KNOWLEDGE_BASE.md`，整理项目全景、数据模型、运行时主流程、模块调用关系与接手须知，便于后续 AI 助手或新工程师快速接手项目。
+- 平台默认 workflow 改为中立协作模式：无策略 `workflow.json` 时不再注入小说 deliverables、三角色职责和点子库语义，默认完成模式改为 `consensus_only`。
+- 运行时角色解析改为从选举结果动态读取任意角色名，并新增 `workflow.completion.mode`、`workflow.rolesMeta`，让 workflow 自己定义完成规则和角色职责。
+- 升级 `docs/NOVEL_GODMODE_WORKFLOW.json`：显式补上 `completion.mode = workflow_gate` 和 `rolesMeta`，避免小说神作模式在新版中因为默认语义变中立而提前收尾或弱化角色职责。
+- 继续清理运行时 legacy 小说术语：`runtime/tools.ts`、`runtime-main.ts`、`debates.ts` 的默认投票/开票/诊断文案进一步改成中立表达，只把 `Phase 3 / Host / Supervisor` 保留在旧 workflow 兼容分支中。
+- 新增通用质量检查框架：`deliverables.requiredFiles` 现已支持 `qualityChecks`，可表达 `requiredSections`、`requiredTerms`、`minBulletItems`、`counters`，不再只能依赖 `minChars / minMarkdownHeadings / requiredSnippets`。
+- 去模板化重构：删除分类模板文件，不再把 generic/document/novel 当作系统内置概念；正式文档统一改成“纯 Workflow + Prompt”的通用讨论平台表述。
+- 重写 `docs/PLATFORM_VS_NOVEL_SPLIT_PLAN.md` 为通用 workflow 架构说明，并同步更新 `docs/WORKFLOW_TUTORIAL.md`、`docs/PROJECT_KNOWLEDGE_BASE.md`、`docs/FAULT.md` 等文档的叙事。
+- 把数据库里真实使用的小说策略 `debate/workflow.json` 同步到新版 `docs/NOVEL_GODMODE_WORKFLOW.json`，把增强后的 `qualityChecks` 正式应用到实际策略，而不只停留在文档中。
+- 继续轻量化默认 workflow：默认阶段从 `analysis -> decision -> deliberation -> consolidation vote -> consolidation` 收缩成单阶段 `deliberation`，选举、收束投票、收束阶段和显式分析阶段只在 workflow 明确声明对应阶段时才进入默认摘要、阶段解析和界面说明。
+- 进一步弱化默认阶段负担：默认 workflow 现在从第 1 轮直接进入实质讨论，不再默认要求先经历命名化的分析阶段；相关目录阶段解析和界面显示也已同步调整。
+- 继续淡化默认“阶段机感”：辩论详情页的默认说明改成更接近“讨论规则”，默认轻量 workflow 下不再在发言目录和轮次列表里强调阶段标签，运行时也会优先注入更轻的 `Discussion guidance` 而不是完整阶段说明。
+- 继续统一默认命名：对用户和模型暴露的摘要、提示、运行时通知，开始从 `Workflow 规则 / Workflow phase` 收口成更中性的“讨论规则 / Rule guidance”表述。
+- 策略编辑页继续去主流程化：把“阶段注入提示词”“上下文读取策略”等入口改写成更明确的“可选增强”，强调默认可以直接讨论，只有需要复杂规则时才配置 workflow 阶段或目录读取规则。
+- 继续淡化默认收尾心智：默认 workflow 不再显式内置 `consolidation` 阶段；如果 workflow 没有主动声明收束投票或收束阶段，运行时摘要和界面会明确显示“未配置”，而不是默认假设所有讨论都需要正式收尾阶段。
+- 清掉最后一层小说硬编码：默认收束投票选项改成中性的“同意进入收束阶段 / 不同意，继续讨论”，默认选举文案不再写 `Phase 1.5`，角色职责提示和文件活动诊断也不再靠 `Host / Supervisor / Specialist` 的 legacy 兜底。
+- 修正文档中的过时系统描述：`docs/PROJECT_KNOWLEDGE_BASE.md`、`docs/FAULT.md` 已改为“复杂 phase、选举、收束投票、角色职责都来自 workflow”，不再把 `Phase 3` 或三角色写成平台内建概念。
+- 继续细化真实小说策略的质量门槛：为原先还只靠 `minChars / minMarkdownHeadings / requiredSnippets` 的世界观、历史、阵营、主线骨架、人物关系、关键场景文件补齐 `qualityChecks`，并已同步回数据库中的真实 `debate/workflow.json`。
+- 修复 review 暴露的两个一致性问题：关闭共识检查时，完成判定允许正常结束但不会再把 `consensus_reached` 误写成“已达成”；同时默认轻量 workflow 下状态面板也不再额外显示阶段快照。
