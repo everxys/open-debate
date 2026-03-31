@@ -3857,7 +3857,8 @@ export async function runDebate(id: string, userId: string) {
         lastKnownPhase = phaseSnapshotBeforeTurn;
       }
       if (debate.maxTurns > 0 && completedSpeakingRounds >= debate.maxTurns) {
-        const consensusReachedBeforeTurn = Boolean(debate.consensusReached);
+        const consensusRequiredBeforeTurn = workflowBeforeTurn?.consensus.enabled !== false;
+        const consensusReachedBeforeTurn = !consensusRequiredBeforeTurn || Boolean(debate.consensusReached);
         const requiresFinalizationPhase = requiresWorkflowFinalizationPhaseForCompletion(workflowBeforeTurn);
         const requiresOutputs = requiresWorkflowOutputsForCompletion(workflowBeforeTurn);
         const earliestCompletionRound = getWorkflowEarliestCompletionRound(workflowBeforeTurn);
@@ -4315,9 +4316,11 @@ export async function runDebate(id: string, userId: string) {
           })
         : [];
       const canCompleteByDeliverables = missingDeliverables.length === 0;
-      const consensusReachedForDb = mustKeepRunningForVote ? false : consensus.reached;
+      const consensusRequired = workflow?.consensus.enabled !== false;
+      const canCompleteByConsensus = !consensusRequired || consensus.reached;
+      const consensusReachedForDb = mustKeepRunningForVote ? false : canCompleteByConsensus;
       const nextStatusForDb =
-        !mustKeepRunningForVote && consensus.reached && canCompleteByPhase && canCompleteByDeliverables
+        !mustKeepRunningForVote && canCompleteByConsensus && canCompleteByPhase && canCompleteByDeliverables
           ? "completed"
           : "running";
       const phaseSnapshotAfterTurn = getPhaseSnapshot(finalizationPhase, currentRoundNumberAfterTurn);

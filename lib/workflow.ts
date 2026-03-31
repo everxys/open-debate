@@ -655,13 +655,21 @@ function normalizeQualityChecks(
   };
 }
 
-function normalizeCompletion(value: unknown): NormalizedDebateWorkflow["completion"] {
+function normalizeCompletion(
+  value: unknown,
+  context: Pick<NormalizedDebateWorkflow, "deliverables" | "phaseMachine">
+): NormalizedDebateWorkflow["completion"] {
   const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
   const modeRaw = toTrimmedString(obj?.mode);
   const mode =
     modeRaw === "consensus_plus_outputs" || modeRaw === "workflow_gate" || modeRaw === "consensus_only"
       ? modeRaw
-      : "consensus_only";
+      : context.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ||
+          context.phaseMachine.phases.some((phase) => phase.kind === "finalization" || phase.kind === "finalization_vote")
+        ? "workflow_gate"
+        : context.deliverables.requiredFiles.length > 0
+          ? "consensus_plus_outputs"
+          : "consensus_only";
   return { mode };
 }
 function normalizeRolesMeta(value: unknown): NormalizedDebateWorkflow["rolesMeta"] {
@@ -1116,7 +1124,10 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
   const consensus = normalizeConsensus((anyInput as { consensus?: unknown }).consensus);
   const promptPolicies = normalizePromptPolicies((anyInput as { promptPolicies?: unknown }).promptPolicies);
   const deliverables = normalizeDeliverables((anyInput as { deliverables?: unknown }).deliverables);
-  const completion = normalizeCompletion((anyInput as { completion?: unknown }).completion);
+  const completion = normalizeCompletion((anyInput as { completion?: unknown }).completion, {
+    deliverables,
+    phaseMachine
+  });
   const ideaBank = normalizeIdeaBank((anyInput as { ideaBank?: unknown }).ideaBank);
   const rolesMeta = normalizeRolesMeta((anyInput as { rolesMeta?: unknown }).rolesMeta);
   let contextAccess: NormalizedDebateWorkflow["contextAccess"];
