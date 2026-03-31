@@ -131,7 +131,7 @@
     "requireAllSeats": true
   },
   "promptPolicies": {
-    "openingPrompt": "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。后发言者的首要任务不是顺着前一个人的结论做轻量补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应该直接提出新方案，必要时可以整体推翻前案并重建。每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子；禁止一次丢出很多点子却每个都只讲一句。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响、你是怎么推到这一步的，让其他人一眼看懂你的意思。另外，在 Phase 1 和 Phase 1 之前严禁提前投票、严禁写“我投谁”、严禁提前宣布主持人或监管者；那只能在正式进入 Phase 1.5 后发生。",
+    "openingPrompt": "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。后发言者的首要任务不是顺着前一个人的结论做轻量补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应该直接提出新方案，必要时可以整体推翻前案并重建。每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子；禁止一次丢出很多点子却每个都只讲一句。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响、你是怎么推到这一步的，让其他人一眼看懂你的意思。另外，在 Phase 1 和 Phase 1 之前严禁提前投票、严禁写“我投谁”、严禁提前宣布主持人或监管者；那只能在正式进入 Phase 1.5 后发生。如果 debate/ 目录下存在共享工作文件，你应该主动把它们当作当前讨论的一部分来读取和利用，尤其是原始点子池、筛选结果、事件映射、被淘汰或合并记录、以及新发明点子记录；常见文件可能包括 `debate/raw_idea_bank.md`、`debate/idea_s_tier.md`、`debate/idea_a_tier.md`、`debate/idea_rejected_or_merged.md`、`debate/idea_event_mappings.md`、`debate/idea_newly_invented.md`。这些只是共享工作文件约定，不是最终交付文件；如果它们存在，就优先把它们读懂、比较、筛选、合并，并把结论继续落到共享工作文件或最终交付里。",
     "round1Fairness": true,
     "responseFormat": {
       "requireMarkdown": true,
@@ -141,6 +141,16 @@
       "discussionMaxTokens": null,
       "writingMaxTokens": null
     }
+  },
+  "contextAccess": {
+    "readWhenNeeded": [
+      {
+        "scope": "shared",
+        "pathPrefix": "debate/",
+        "label": "Shared debate working files",
+        "recursive": true
+      }
+    ]
   },
   "deliverables": {
     "allowedPaths": ["final/", "outputs/"],

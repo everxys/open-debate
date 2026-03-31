@@ -1,5 +1,6 @@
 ## 2026-03-31
 
+- 继续把小说策略往“纯 workflow + prompt”收口：没有引入专门的 `ideaBank` 结构，而是在真实策略 workflow 里补了通用 `contextAccess`（允许按需读取 `debate/` 共享工作文件），并把原始点子池/筛选结果/事件映射等文件语义写进 opening prompt；同样配置已同步回数据库中的真实 `debate/workflow.json`。
 - 删除 8 份已不再进入 docs 页面、也不再被代码或正式教程消费的小说方案草稿文档，保留真正仍在承担配置参照作用的 `docs/NOVEL_GODMODE_WORKFLOW.json` 与接手/教程类文档，减少仓库噪音。
 - 新增 `docs/PROJECT_KNOWLEDGE_BASE.md`，整理项目全景、数据模型、运行时主流程、模块调用关系与接手须知，便于后续 AI 助手或新工程师快速接手项目。
 - 平台默认 workflow 改为中立协作模式：无策略 `workflow.json` 时不再注入小说 deliverables、三角色职责和点子库语义，默认完成模式改为 `consensus_only`。
