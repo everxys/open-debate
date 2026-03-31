@@ -178,8 +178,8 @@
 - 这些文件的目的是什么
 
 例如：
-- 更新 `final/08-five-major-events.md` 的“事件二误导结构”
-- 更新 `final/10-relationships-and-betrayals.md` 的“宿敌镜像关系”
+- 先读取 `final/08-five-major-events.md`，再用 `section_merge` 更新“事件二误导结构”
+- 先读取 `final/10-relationships-and-betrayals.md`，再用 `section_merge` 更新“宿敌镜像关系”
 
 这样模型才会把输出和交付物绑定，而不是只停留在口头讨论。
 

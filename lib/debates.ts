@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 
 import { query } from "@/lib/db";
 import { AppError } from "@/lib/http";
+import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
 import { runDebate } from "@/lib/runtime";
 import { readSession } from "@/lib/session";
 import type { DebateRecord } from "@/lib/types";
@@ -353,6 +354,9 @@ function isMissingTableError(error: unknown, table: string) {
   const message = typeof anyError.message === "string" ? anyError.message : "";
   return message.toLowerCase().includes(table.toLowerCase());
 }
+
+type DebateFileActivityAction = "read" | "write" | "search" | "list" | "stat";
+type DebateFileActivityScope = "debate" | "agent";
 
 function isMissingColumnError(error: unknown, column: string) {
   if (typeof error !== "object" || error === null) return false;
@@ -1280,9 +1284,9 @@ export async function readDebateFile(id: string, path: string) {
   }
 
   try {
-    const result = await query<{ content: string; updated_at: string }>(
+    const result = await query<{ content: string; updated_at: string; version: number }>(
       `
-        select f.content, f.updated_at
+        select f.content, f.updated_at, f.version
           from debate_files f
          where f.debate_id = $1
            and f.path = $2
@@ -1296,7 +1300,8 @@ export async function readDebateFile(id: string, path: string) {
     return {
       path,
       content: String(result.rows[0].content ?? ""),
-      updatedAt: String(result.rows[0].updated_at ?? "")
+      updatedAt: String(result.rows[0].updated_at ?? ""),
+      version: Number(result.rows[0].version ?? 1) || 1
     };
   } catch (error) {
     if (isMissingTableError(error, "debate_files")) {
@@ -1367,6 +1372,257 @@ export async function readDebateAgentFile(debateId: string, debateAgentId: strin
   } catch (error) {
     if (isMissingTableError(error, "debate_agent_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_agent_files table");
+    }
+    throw error;
+  }
+}
+
+export async function listDebateFileActivity(
+  debateId: string,
+  options?: {
+    action?: DebateFileActivityAction;
+    path?: string;
+    limit?: number;
+    beforeId?: string;
+  }
+) {
+  const session = await requireSessionUser();
+  const { isOwner } = await getDebateForView(debateId, session.userId);
+  if (!isOwner) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+
+  const requestedLimit = typeof options?.limit === "number" && Number.isFinite(options.limit) ? Math.floor(options.limit) : 40;
+  const limit = Math.min(Math.max(requestedLimit, 1), 100);
+  const action = options?.action === "read" || options?.action === "write" ? options.action : null;
+  const path = typeof options?.path === "string" && options.path.trim() ? options.path.trim() : null;
+  const beforeId = typeof options?.beforeId === "string" && options.beforeId.trim() ? options.beforeId.trim() : null;
+
+  try {
+    const result = await query<{
+      id: string;
+      action: DebateFileActivityAction;
+      scope: DebateFileActivityScope;
+      path: string;
+      debate_agent_id: string;
+      target_debate_agent_id: string | null;
+      turn_number: number;
+      round_number: number;
+      created_at: string;
+      write_mode: string | null;
+      before_version: number | null;
+      after_version: number | null;
+      before_content: string | null;
+      after_content: string | null;
+      target_heading: string | null;
+      reason: string | null;
+      actor_name: string | null;
+      actor_seat_name: string | null;
+      target_seat_name: string | null;
+    }>(
+      `
+        with cursor_row as (
+          select created_at, id
+            from debate_file_activity_logs
+           where id = $4
+           limit 1
+        )
+        select
+          l.id,
+          l.action,
+          l.scope,
+          l.path,
+          l.debate_agent_id,
+          l.target_debate_agent_id,
+          l.turn_number,
+          l.round_number,
+          l.created_at,
+          l.write_mode,
+          l.before_version,
+          l.after_version,
+          l.before_content,
+          l.after_content,
+          l.target_heading,
+          l.reason,
+          a.name as actor_name,
+          da.display_name as actor_seat_name,
+          target_da.display_name as target_seat_name
+        from debate_file_activity_logs l
+        join debate_agents da on da.id = l.debate_agent_id
+        join ai_agents a on a.id = da.ai_agent_id
+        left join debate_agents target_da on target_da.id = l.target_debate_agent_id
+        where l.debate_id = $1
+          and (
+            $2::text is null
+            or ($2::text = 'write' and l.action = 'write')
+            or ($2::text = 'read' and l.action <> 'write')
+          )
+          and ($3::text is null or l.path = $3::text)
+          and (
+            $4::uuid is null
+            or exists (
+              select 1
+                from cursor_row c
+               where (l.created_at, l.id) < (c.created_at, c.id)
+            )
+          )
+        order by l.created_at desc, l.id desc
+        limit $5
+      `,
+      [debateId, action, path, beforeId, limit + 1]
+    );
+
+    const countsResult = await query<{ action: DebateFileActivityAction; count: number }>(
+      `
+        select case when action = 'write' then 'write' else 'read' end as action, count(*)::int as count
+          from debate_file_activity_logs
+         where debate_id = $1
+         group by case when action = 'write' then 'write' else 'read' end
+      `,
+      [debateId]
+    );
+
+    const hasMore = result.rows.length > limit;
+    const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
+    const counts = { read: 0, write: 0 };
+    for (const row of countsResult.rows) {
+      if (row.action === "read" || row.action === "write") {
+        counts[row.action] = Number(row.count ?? 0);
+      }
+    }
+    return {
+      items: rows.map((row) => {
+        const summary =
+          row.action === "write"
+            ? summarizeLineDiffRows(
+                buildLineDiffRows(String(row.before_content ?? ""), String(row.after_content ?? ""))
+              )
+            : { added: 0, deleted: 0, changed: 0 };
+        return {
+          id: String(row.id),
+          action: row.action,
+          scope: row.scope,
+          path: String(row.path),
+          debateAgentId: String(row.debate_agent_id),
+          targetDebateAgentId: row.target_debate_agent_id ? String(row.target_debate_agent_id) : null,
+          targetSeatName: row.target_seat_name ? String(row.target_seat_name) : null,
+          turnNumber: Number(row.turn_number),
+          roundNumber: Number(row.round_number),
+          createdAt: String(row.created_at),
+          writeMode: row.write_mode ? String(row.write_mode) : null,
+          beforeVersion: row.before_version === null ? null : Number(row.before_version),
+          afterVersion: row.after_version === null ? null : Number(row.after_version),
+          targetHeading: row.target_heading ? String(row.target_heading) : null,
+          reason: row.reason ? String(row.reason) : null,
+          agentName: row.actor_seat_name ? String(row.actor_seat_name) : String(row.actor_name ?? "Unknown"),
+          summary
+        };
+      }),
+      hasMore,
+      counts
+    };
+  } catch (error) {
+    if (isMissingTableError(error, "debate_file_activity_logs")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_file_activity_logs table");
+    }
+    throw error;
+  }
+}
+
+export async function getDebateFileActivityDetail(debateId: string, entryId: string) {
+  const session = await requireSessionUser();
+  const { isOwner } = await getDebateForView(debateId, session.userId);
+  if (!isOwner) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+
+  try {
+    const result = await query<{
+      id: string;
+      action: DebateFileActivityAction;
+      scope: DebateFileActivityScope;
+      path: string;
+      debate_agent_id: string;
+      target_debate_agent_id: string | null;
+      turn_number: number;
+      round_number: number;
+      created_at: string;
+      write_mode: string | null;
+      before_version: number | null;
+      after_version: number | null;
+      before_content: string | null;
+      after_content: string | null;
+      target_heading: string | null;
+      reason: string | null;
+      actor_name: string | null;
+      actor_seat_name: string | null;
+      target_seat_name: string | null;
+    }>(
+      `
+        select
+          l.id,
+          l.action,
+          l.scope,
+          l.path,
+          l.debate_agent_id,
+          l.target_debate_agent_id,
+          l.turn_number,
+          l.round_number,
+          l.created_at,
+          l.write_mode,
+          l.before_version,
+          l.after_version,
+          l.before_content,
+          l.after_content,
+          l.target_heading,
+          l.reason,
+          a.name as actor_name,
+          da.display_name as actor_seat_name,
+          target_da.display_name as target_seat_name
+        from debate_file_activity_logs l
+        join debate_agents da on da.id = l.debate_agent_id
+        join ai_agents a on a.id = da.ai_agent_id
+        left join debate_agents target_da on target_da.id = l.target_debate_agent_id
+        where l.debate_id = $1
+          and l.id = $2
+        limit 1
+      `,
+      [debateId, entryId]
+    );
+    if ((result.rowCount ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "File activity not found");
+    }
+    const row = result.rows[0];
+    const beforeContent = String(row.before_content ?? "");
+    const afterContent = String(row.after_content ?? "");
+    const diffRows = row.action === "write" ? buildLineDiffRows(beforeContent, afterContent) : [];
+    const summary = summarizeLineDiffRows(diffRows);
+
+    return {
+      id: String(row.id),
+      action: row.action,
+      scope: row.scope,
+      path: String(row.path),
+      debateAgentId: String(row.debate_agent_id),
+      targetDebateAgentId: row.target_debate_agent_id ? String(row.target_debate_agent_id) : null,
+      targetSeatName: row.target_seat_name ? String(row.target_seat_name) : null,
+      turnNumber: Number(row.turn_number),
+      roundNumber: Number(row.round_number),
+      createdAt: String(row.created_at),
+      writeMode: row.write_mode ? String(row.write_mode) : null,
+      beforeVersion: row.before_version === null ? null : Number(row.before_version),
+      afterVersion: row.after_version === null ? null : Number(row.after_version),
+      beforeContent,
+      afterContent,
+      targetHeading: row.target_heading ? String(row.target_heading) : null,
+      reason: row.reason ? String(row.reason) : null,
+      agentName: row.actor_seat_name ? String(row.actor_seat_name) : String(row.actor_name ?? "Unknown"),
+      diffRows,
+      summary
+    };
+  } catch (error) {
+    if (isMissingTableError(error, "debate_file_activity_logs")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_file_activity_logs table");
     }
     throw error;
   }

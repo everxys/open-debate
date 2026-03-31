@@ -456,6 +456,144 @@ button {
   height: 22px;
 }
 
+.debatePageGrid {
+  grid-template-columns: 52px minmax(280px, 320px) minmax(0, 2fr) minmax(320px, 1fr);
+  gap: 12px;
+}
+
+.debateViewportPanel {
+  height: min(78dvh, calc(100dvh - 140px));
+  max-height: calc(100dvh - 140px);
+}
+
+.debateSidebarRail {
+  grid-column: 1;
+  min-width: 0;
+}
+
+.debateSidebarPanel {
+  grid-column: 2;
+  min-width: 0;
+}
+
+.debateViewerShell {
+  grid-column: 3;
+  min-width: 0;
+}
+
+.debateRoundsPanel {
+  grid-column: 4;
+  min-width: 0;
+}
+
+.debateCompareGrid {
+  grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.debateCompareHistoryPanel,
+.debateCompareDiffPanel {
+  min-width: 0;
+}
+
+.debateCompareToolbar {
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.debateCompareControls {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.debateModalHeader,
+.debateModalFooter {
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.debateModalActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+@media (max-width: 1500px) {
+  .debatePageGrid {
+    grid-template-columns: 52px minmax(280px, 320px) minmax(0, 1fr);
+  }
+
+  .debateRoundsPanel {
+    grid-column: 3;
+  }
+}
+
+@media (max-width: 1180px) {
+  .debatePageGrid {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .debateSidebarRail {
+    grid-column: 1;
+  }
+
+  .debateSidebarPanel,
+  .debateViewerShell,
+  .debateRoundsPanel {
+    grid-column: 2;
+  }
+
+  .debateViewportPanel {
+    height: min(68dvh, calc(100dvh - 160px));
+    max-height: calc(100dvh - 160px);
+  }
+}
+
+@media (max-width: 980px) {
+  .debateCompareGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .debateCompareToolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .debateCompareControls {
+    justify-content: flex-start;
+  }
+
+  .debateModalHeader,
+  .debateModalFooter {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .debateModalActions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-height: 900px) {
+  .debateViewportPanel {
+    height: min(72dvh, calc(100dvh - 132px));
+    max-height: calc(100dvh - 132px);
+  }
+}
+
+@media (max-height: 760px) {
+  .debateViewportPanel {
+    height: min(64dvh, calc(100dvh - 120px));
+    max-height: calc(100dvh - 120px);
+  }
+}
+
+@media (max-height: 760px) {
+  .panel[role="dialog"],
+  [role="dialog"] .panel {
+    max-height: calc(100dvh - 32px);
+  }
+}
+
 .tab {
   display: inline-flex;
   align-items: center;

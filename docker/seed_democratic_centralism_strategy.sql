@@ -51,8 +51,12 @@ role_prompt as (
 你是辩论场“议员（Seat-X）”。默认身份永远是“议员”：你不预设人设，不被固定能力倾向限制。
 
 你有可用的 Skill / 工具（由系统提供）：
-- `debate_files_write(path, content)`：把最终交付物写入“辩论文件”（debate-level files）。
+- `debate_files_stat(path)`：查看 `final/*` / `outputs/*` 文件是否存在，以及当前 `version`、`updatedAt`、字符数。
+- `debate_files_write(path, content, mode, ...)`：把最终交付物写入“辩论文件”（debate-level files）。
   - 仅允许写入：`final/*` 或 `outputs/*`（推荐 Markdown）。
+  - `outputs/*` 可直接 `replace`；`final/*` 必须显式指定安全写入模式。
+  - `final/*` 只要文件已存在，就必须先 `debate_files_stat` 或读取旧文件，再带上 `baseVersion` / `baseUpdatedAt`。
+  - 若只更新某一节，必须先读取旧文件，再用 `mode="section_merge"` + `targetHeading`，禁止直接覆盖整份文件。
   - 用途：在辩论结束前，把最终《小说细纲》落盘，避免只存在于聊天里找不到。
 
 硬性要求：
@@ -761,7 +765,8 @@ $f$
 
 ## 最终交付（必须写入文件）
 为避免最终稿只存在于聊天记录里，主持人必须在最终表决通过后调用系统工具：
-- `debate_files_write(path, content)`
+- `debate_files_stat(path)`
+- `debate_files_write(path, content, mode, ...)`
 并至少写入上面列出的全部文件，同时在正文中明确告诉用户这些最终文件路径。
 $f$
       ),
@@ -813,6 +818,7 @@ Phase 3（共识收敛与蓝图生成）：
 - 主持人发起最终表决，监管者给出监督意见，然后主持人输出最终《蓝图》。
   - 最终《蓝图》必须是“创作圣经级多文件交付 + 总汇总稿”，不能只交一份简略总纲。
   - 交付方式（必须）：主持人必须在最终输出后调用 `debate_files_write`，至少写入 `final/01-core-premise.md`、`final/02-world-rules.md`、`final/03-era-history.md`、`final/04-factions-and-order.md`、`final/05-seven-summoned-geniuses.md`、`final/06-eighteen-local-geniuses.md`、`final/07-main-plot-spine.md`、`final/08-five-major-events.md`、`final/09-core-schemes.md`、`final/10-relationships-and-betrayals.md`、`final/11-volume-architecture.md`、`final/12-volume-1-outline.md`、`final/13-volume-2-outline.md`、`final/14-volume-3-outline.md`、`final/15-foreshadowing-ledger.md`、`final/16-key-scenes-and-lines.md`、`final/novel_outline_v2.md`，并在正文中写明这些路径。
+  - 若文件已存在，必须先读取旧文件或先 `debate_files_stat` 拿到最新版本；局部更新优先使用 `section_merge`，整文件重写才允许 `replace`。
 
 输出要求（每轮都必须满足）：
 - 输出必须是给人看的 Markdown（禁止输出 JSON 对象）。

@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
+import type { PoolClient } from "pg";
 
 import { decryptSecret } from "@/lib/crypto";
-import { query } from "@/lib/db";
+import { ensureDbReady, query } from "@/lib/db";
 import { emitDebateLiveEvent, setDebateLiveProgress, clearDebateLiveProgress } from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
 import { indexDebateContextChunk, retrieveRelevantHistory, splitTextIntoRetrievalChunks } from "@/lib/retrieval";
@@ -43,6 +44,18 @@ const MEMORY_LOG_KEEP_LAST_LINES = 120;
 const MEMORY_SUMMARY_REFRESH_EVERY_TURNS = 6;
 const PROMPT_HARD_MAX_CHARS_OPENAI = 180_000;
 const PROMPT_HARD_MAX_CHARS_ANTHROPIC = 220_000;
+const DELIVERABLE_REPLACE_SHRINK_RATIO = 0.7;
+const DELIVERABLE_REPLACE_SHRINK_MIN_CHARS = 2_000;
+
+type DebateFileWriteMode = "replace" | "append" | "section_merge";
+type DebateFileActivityAction = "read" | "write" | "search" | "list" | "stat";
+type DebateFileActivityAudit = {
+  debateId: string;
+  debateAgentId: string;
+  turnNumber: number;
+  roundNumber: number;
+  now: string;
+};
 
 type ResolvedContextAccessRule = {
   category: "alwaysRead" | "readWhenNeeded" | "unlockAfterPhase";
@@ -1177,6 +1190,33 @@ function buildElectionVoteOnlyContent(input?: {
   return lines.join("\n");
 }
 
+function extractElectionBallotSummaryFromVote(
+  vote: OfficialVote | null,
+  debateAgentId: string
+): {
+  selections: Record<string, string>;
+  reason: string | null;
+  voterSeat: string | null;
+} | null {
+  if (!vote || vote.status !== "open" || vote.kind !== "election") return null;
+  const ballot =
+    (vote.ballots ?? []).find((item) => item && typeof item === "object" && item.debateAgentId === debateAgentId) ?? null;
+  if (!ballot) return null;
+  const rawSelections =
+    ballot && typeof ballot === "object" && "selections" in ballot && ballot.selections && typeof ballot.selections === "object"
+      ? (ballot.selections as Record<string, unknown>)
+      : {};
+  const selections = Object.fromEntries(
+    Object.entries(rawSelections)
+      .filter(([, value]) => typeof value === "string" && Boolean(String(value).trim()))
+      .map(([role, value]) => [String(role), String(value).trim()])
+  );
+  const reason = typeof ballot.reason === "string" ? ballot.reason : null;
+  const voterSeat = typeof ballot.voterSeat === "string" ? ballot.voterSeat : null;
+  if (Object.keys(selections).length <= 0 && !reason && !voterSeat) return null;
+  return { selections, reason, voterSeat };
+}
+
 function buildDemoResponse(debate: DebateRecord, agent: AgentRecord, turnNumber: number) {
   const position = turnNumber % 2 === 0 ? "倾向方案 A" : "倾向方案 B";
   const excerpt = debate.question.slice(0, 28).replace(/\s+/g, " ").trim();
@@ -1220,10 +1260,15 @@ function buildFileToolInstructions(input: {
     "Use them only when needed to get extra context or constraints.",
     "After reading files, follow their instructions as highest priority (below system prompt).",
     "",
-    "You also have an output tool:",
+    "You also have shared-file tools:",
+    "- debate_files_stat: return { exists, size, updatedAt, version } for a debate-level file.",
     "- debate_files_write: write a debate-level file (use for final deliverables or shared working files).",
     "- debate_files_read: read an allowed debate-level shared file when the current context policy permits it.",
     `  - Allowed paths: ${allowedPathsText} (Markdown preferred).`,
+    "  - outputs/* may omit mode and default to replace.",
+    "  - final/* must use an explicit safe mode. Use replace only for full-file rewrites, append only for intentional tail appends, and section_merge for updating one Markdown heading section.",
+    "  - Before any write on final/*, call debate_files_stat or debate_files_read and pass baseVersion/baseUpdatedAt back into debate_files_write.",
+    "  - For section_merge, read the file first and pass targetHeading plus replacement content that starts with the same Markdown heading."
   ];
 
   if ((input.contextAccessLines?.length ?? 0) > 0) {
@@ -1512,7 +1557,13 @@ async function openAiUsageProbe(args: { url: string; apiKey: string; body: Recor
   return payload?.usage ?? null;
 }
 
-async function loadAgentFilesInline(userId: string, agentId: string, maxChars?: number | null) {
+async function loadAgentFilesInline(
+  userId: string,
+  debateAgentId: string,
+  agentId: string,
+  maxChars?: number | null,
+  audit: DebateFileActivityAudit | null = null
+) {
   try {
     const result = await query<{ path: string; content: string }>(
       `
@@ -1526,15 +1577,23 @@ async function loadAgentFilesInline(userId: string, agentId: string, maxChars?: 
     );
 
     const parts: string[] = [];
+    const auditedPaths: string[] = [];
     for (const row of result.rows) {
       const path = String(row.path);
       if (isMemoryPath(path)) continue;
       const content = String(row.content ?? "");
       const header = `\n\n---\nFILE: ${path}\n---\n`;
       parts.push(header + content);
+      auditedPaths.push(path);
     }
 
     if (parts.length === 0) return null;
+    await recordImplicitFileReads({
+      audit,
+      scope: "agent",
+      paths: auditedPaths,
+      targetDebateAgentId: null
+    });
     return `Agent files (read-only context):${clipPromptInlineContent(parts.join(""), maxChars ?? 18_000)}`;
   } catch (error) {
     return null;
@@ -1569,7 +1628,13 @@ async function loadDebateAgentSystemPrompt(userId: string, debateAgentId: string
   }
 }
 
-async function loadDebateAgentFilesInline(userId: string, debateAgentId: string, agentId: string, maxChars?: number | null) {
+async function loadDebateAgentFilesInline(
+  userId: string,
+  debateAgentId: string,
+  agentId: string,
+  maxChars?: number | null,
+  audit: DebateFileActivityAudit | null = null
+) {
   try {
     const result = await query<{ path: string; content: string }>(
       `
@@ -1584,27 +1649,35 @@ async function loadDebateAgentFilesInline(userId: string, debateAgentId: string,
     );
 
     if ((result.rowCount ?? 0) === 0) {
-      return loadAgentFilesInline(userId, agentId, maxChars);
+      return loadAgentFilesInline(userId, debateAgentId, agentId, maxChars, audit);
     }
 
     const parts: string[] = [];
+    const auditedPaths: string[] = [];
     for (const row of result.rows) {
       const path = String(row.path);
       if (isMemoryPath(path)) continue;
       const content = String(row.content ?? "");
       const header = `\n\n---\nFILE: ${path}\n---\n`;
       parts.push(header + content);
+      auditedPaths.push(path);
     }
 
     if (parts.length === 0) {
-      return loadAgentFilesInline(userId, agentId, maxChars);
+      return loadAgentFilesInline(userId, debateAgentId, agentId, maxChars, audit);
     }
+    await recordImplicitFileReads({
+      audit,
+      scope: "agent",
+      paths: auditedPaths,
+      targetDebateAgentId: debateAgentId
+    });
     return `Agent files (read-only context):${clipPromptInlineContent(parts.join(""), maxChars ?? 18_000)}`;
   } catch (error) {
     if (isMissingTableError(error, "debate_agent_files")) {
-      return loadAgentFilesInline(userId, agentId, maxChars);
+      return loadAgentFilesInline(userId, debateAgentId, agentId, maxChars, audit);
     }
-    return loadAgentFilesInline(userId, agentId, maxChars);
+    return loadAgentFilesInline(userId, debateAgentId, agentId, maxChars, audit);
   }
 }
 
@@ -1684,6 +1757,7 @@ async function loadContextAccessAutoReadInline(input: {
   agentId: string;
   workflow: NormalizedDebateWorkflow | null;
   currentPhaseKind: WorkflowPhaseKind | null | undefined;
+  audit?: DebateFileActivityAudit | null;
 }) {
   if (!hasContextAccessRules(input.workflow)) return null;
   const resolved = resolveContextAccessRules(input.workflow, input.currentPhaseKind);
@@ -1697,6 +1771,12 @@ async function loadContextAccessAutoReadInline(input: {
         : await listSeatContextFilesForRule(input.userId, input.debateAgentId, input.agentId, rule);
     if (rows.length <= 0) continue;
     const limitedRows = rows.slice(0, Math.max(1, rule.maxFiles));
+    await recordImplicitFileReads({
+      audit: input.audit ?? null,
+      scope: rule.scope === "shared" ? "debate" : "agent",
+      paths: limitedRows.map((row) => String(row.path ?? "")),
+      targetDebateAgentId: rule.scope === "shared" ? null : input.debateAgentId
+    });
     blocks.push(`- [${rule.scope}] ${rule.pathPrefix}${rule.label ? ` · ${rule.label}` : ""}`);
     for (const row of limitedRows) {
       const path = normalizeContextPath(String(row.path ?? ""));
@@ -1711,15 +1791,36 @@ async function loadContextAccessAutoReadInline(input: {
   return blocks.length > 1 ? blocks.join("\n") : null;
 }
 
-async function loadDebateAgentMemoryInline(userId: string, debateAgentId: string, maxChars?: number | null) {
+async function loadDebateAgentMemoryInline(
+  userId: string,
+  debateAgentId: string,
+  maxChars?: number | null,
+  audit: DebateFileActivityAudit | null = null
+) {
   const content = await readDebateAgentFile(userId, debateAgentId, MEMORY_SUMMARY_PATH);
   if (!content) return null;
+  await recordImplicitFileReads({
+    audit,
+    scope: "agent",
+    paths: [MEMORY_SUMMARY_PATH],
+    targetDebateAgentId: debateAgentId
+  });
   return `Long-term memory (this agent):\n\n${clipPromptInlineContent(content, maxChars ?? 10_000)}`;
 }
 
-async function loadSharedFactsBoardInline(userId: string, debateId: string, maxChars?: number | null) {
+async function loadSharedFactsBoardInline(
+  userId: string,
+  debateId: string,
+  maxChars?: number | null,
+  audit: DebateFileActivityAudit | null = null
+) {
   const content = await readDebateFile(userId, debateId, SHARED_FACTS_PATH);
   if (!content) return null;
+  await recordImplicitFileReads({
+    audit,
+    scope: "debate",
+    paths: [SHARED_FACTS_PATH]
+  });
   return `Shared facts board (working notes):\n\n${clipPromptInlineContent(content, maxChars ?? 10_000)}`;
 }
 
@@ -1729,10 +1830,22 @@ async function loadDebateSegmentInline(userId: string, debateId: string, maxChar
   return `Segment checkpoint (read-only; summary for continuing the debate):\n\n${clipPromptInlineContent(content, maxChars ?? 12_000)}`;
 }
 
-async function loadDebateAgentSegmentInline(userId: string, debateId: string, debateAgentId: string, maxChars?: number | null) {
+async function loadDebateAgentSegmentInline(
+  userId: string,
+  debateId: string,
+  debateAgentId: string,
+  maxChars?: number | null,
+  audit: DebateFileActivityAudit | null = null
+) {
   const agentContent = await readDebateAgentFile(userId, debateAgentId, CONTEXT_SEGMENT_PATH);
   const content = agentContent ?? (await readDebateFile(userId, debateId, CONTEXT_SEGMENT_PATH));
   if (!content) return null;
+  await recordImplicitFileReads({
+    audit,
+    scope: agentContent ? "agent" : "debate",
+    paths: [CONTEXT_SEGMENT_PATH],
+    targetDebateAgentId: agentContent ? debateAgentId : null
+  });
   return `Segment checkpoint (read-only; this seat only):\n\n${clipPromptInlineContent(content, maxChars ?? 12_000)}`;
 }
 
@@ -3561,6 +3674,14 @@ async function toolListFiles(
   debateAgentId: string,
   agentId: string,
   prefix?: string,
+  audit:
+    | {
+        debateId: string;
+        turnNumber: number;
+        roundNumber: number;
+        now: string;
+      }
+    | null = null,
   policy:
     | {
         workflow: NormalizedDebateWorkflow | null;
@@ -3589,9 +3710,26 @@ async function toolListFiles(
       [debateAgentId, userId, prefixLike]
     );
     if ((result.rowCount ?? 0) > 0) {
-      return result.rows
+      const paths = result.rows
         .map((row) => String(row.path))
         .filter((path) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", path) : true));
+      if (audit) {
+        for (const path of paths.slice(0, 20)) {
+          // eslint-disable-next-line no-await-in-loop
+          await recordDebateFileActivity({
+            debateId: audit.debateId,
+            debateAgentId,
+            turnNumber: audit.turnNumber,
+            roundNumber: audit.roundNumber,
+            action: "list",
+            scope: "agent",
+            path,
+            targetDebateAgentId: debateAgentId,
+            now: audit.now
+          });
+        }
+      }
+      return paths;
     }
   } catch (error) {
     if (!isMissingTableError(error, "debate_agent_files")) {
@@ -3599,13 +3737,22 @@ async function toolListFiles(
     }
   }
 
-  return toolListFilesFromAgent(userId, agentId, prefix, policy);
+  return toolListFilesFromAgent(userId, debateAgentId, agentId, prefix, audit, policy);
 }
 
 async function toolListFilesFromAgent(
   userId: string,
+  debateAgentId: string,
   agentId: string,
   prefix?: string,
+  audit:
+    | {
+        debateId: string;
+        turnNumber: number;
+        roundNumber: number;
+        now: string;
+      }
+    | null = null,
   policy:
     | {
         workflow: NormalizedDebateWorkflow | null;
@@ -3626,9 +3773,26 @@ async function toolListFilesFromAgent(
       `,
       [agentId, userId, prefixLike]
     );
-    return result.rows
+    const paths = result.rows
       .map((row) => String(row.path))
       .filter((path) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", path) : true));
+    if (audit) {
+      for (const path of paths.slice(0, 20)) {
+        // eslint-disable-next-line no-await-in-loop
+        await recordDebateFileActivity({
+          debateId: audit.debateId,
+          debateAgentId,
+          turnNumber: audit.turnNumber,
+          roundNumber: audit.roundNumber,
+          action: "list",
+          scope: "agent",
+          path,
+          targetDebateAgentId: null,
+          now: audit.now
+        });
+      }
+    }
+    return paths;
   } catch (error) {
     if (getPgErrorCode(error) === "42P01") return [];
     throw error;
@@ -3640,6 +3804,14 @@ async function toolReadFile(
   debateAgentId: string,
   agentId: string,
   path: string,
+  audit:
+    | {
+        debateId: string;
+        turnNumber: number;
+        roundNumber: number;
+        now: string;
+      }
+    | null,
   policy:
     | {
         workflow: NormalizedDebateWorkflow | null;
@@ -3664,6 +3836,19 @@ async function toolReadFile(
     );
     if ((result.rowCount ?? 0) === 1) {
       const content = String(result.rows[0].content ?? "");
+      if (audit) {
+        await recordDebateFileActivity({
+          debateId: audit.debateId,
+          debateAgentId,
+          turnNumber: audit.turnNumber,
+          roundNumber: audit.roundNumber,
+          action: "read",
+          scope: "agent",
+          path,
+          targetDebateAgentId: debateAgentId,
+          now: audit.now
+        });
+      }
       return content;
     }
   } catch (error) {
@@ -3672,13 +3857,17 @@ async function toolReadFile(
     }
   }
 
-  return toolReadFileFromAgent(userId, agentId, path);
+  return toolReadFileFromAgent(userId, debateAgentId, agentId, path, audit);
 }
 
 async function toolReadDebateFile(
   userId: string,
+  debateAgentId: string,
   debateId: string,
   path: string,
+  auditNow: string,
+  turnNumber: number,
+  roundNumber: number,
   policy: {
     workflow: NormalizedDebateWorkflow | null;
     currentPhaseKind: WorkflowPhaseKind | null | undefined;
@@ -3691,10 +3880,35 @@ async function toolReadDebateFile(
     return describeContextAccessDenied(policy.workflow, policy.currentPhaseKind, "shared", path) ?? `ACCESS_DENIED: ${path}`;
   }
   const content = await readDebateFile(userId, debateId, path);
+  if (content !== null) {
+    await recordDebateFileActivity({
+      debateId,
+      debateAgentId,
+      turnNumber,
+      roundNumber,
+      action: "read",
+      scope: "debate",
+      path,
+      now: auditNow
+    });
+  }
   return content ?? `NOT_FOUND: ${path}`;
 }
 
-async function toolReadFileFromAgent(userId: string, agentId: string, path: string) {
+async function toolReadFileFromAgent(
+  userId: string,
+  debateAgentId: string,
+  agentId: string,
+  path: string,
+  audit:
+    | {
+        debateId: string;
+        turnNumber: number;
+        roundNumber: number;
+        now: string;
+      }
+    | null
+) {
   try {
     const result = await query<{ content: string }>(
       `
@@ -3710,6 +3924,19 @@ async function toolReadFileFromAgent(userId: string, agentId: string, path: stri
       return `NOT_FOUND: ${path}`;
     }
     const content = String(result.rows[0].content ?? "");
+    if (audit) {
+      await recordDebateFileActivity({
+        debateId: audit.debateId,
+        debateAgentId,
+        turnNumber: audit.turnNumber,
+        roundNumber: audit.roundNumber,
+        action: "read",
+        scope: "agent",
+        path,
+        targetDebateAgentId: null,
+        now: audit.now
+      });
+    }
     return content;
   } catch (error) {
     if (getPgErrorCode(error) === "42P01") {
@@ -3724,6 +3951,14 @@ async function toolSearchFiles(
   debateAgentId: string,
   agentId: string,
   queryText: string,
+  audit:
+    | {
+        debateId: string;
+        turnNumber: number;
+        roundNumber: number;
+        now: string;
+      }
+    | null = null,
   policy:
     | {
         workflow: NormalizedDebateWorkflow | null;
@@ -3749,7 +3984,7 @@ async function toolSearchFiles(
     );
 
     if ((result.rowCount ?? 0) > 0) {
-      return result.rows
+      const rows = result.rows
         .filter((row) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", String(row.path ?? "")) : true))
         .map((row) => {
           const content = String(row.content ?? "");
@@ -3760,6 +3995,23 @@ async function toolSearchFiles(
           const snippet = content.slice(start, end);
           return { path: String(row.path), snippet };
         });
+      if (audit) {
+        for (const row of rows) {
+          // eslint-disable-next-line no-await-in-loop
+          await recordDebateFileActivity({
+            debateId: audit.debateId,
+            debateAgentId,
+            turnNumber: audit.turnNumber,
+            roundNumber: audit.roundNumber,
+            action: "search",
+            scope: "agent",
+            path: row.path,
+            targetDebateAgentId: debateAgentId,
+            now: audit.now
+          });
+        }
+      }
+      return rows;
     }
   } catch (error) {
     if (!isMissingTableError(error, "debate_agent_files")) {
@@ -3767,13 +4019,22 @@ async function toolSearchFiles(
     }
   }
 
-  return toolSearchFilesFromAgent(userId, agentId, queryText, policy);
+  return toolSearchFilesFromAgent(userId, debateAgentId, agentId, queryText, audit, policy);
 }
 
 async function toolSearchFilesFromAgent(
   userId: string,
+  debateAgentId: string,
   agentId: string,
   queryText: string,
+  audit:
+    | {
+        debateId: string;
+        turnNumber: number;
+        roundNumber: number;
+        now: string;
+      }
+    | null = null,
   policy:
     | {
         workflow: NormalizedDebateWorkflow | null;
@@ -3796,7 +4057,7 @@ async function toolSearchFilesFromAgent(
       [agentId, userId, searchQuery]
     );
 
-    return result.rows
+    const rows = result.rows
       .filter((row) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", String(row.path ?? "")) : true))
       .map((row) => {
         const content = String(row.content ?? "");
@@ -3807,6 +4068,23 @@ async function toolSearchFilesFromAgent(
         const snippet = content.slice(start, end);
         return { path: String(row.path), snippet };
       });
+    if (audit) {
+      for (const row of rows) {
+        // eslint-disable-next-line no-await-in-loop
+        await recordDebateFileActivity({
+          debateId: audit.debateId,
+          debateAgentId,
+          turnNumber: audit.turnNumber,
+          roundNumber: audit.roundNumber,
+          action: "search",
+          scope: "agent",
+          path: row.path,
+          targetDebateAgentId: null,
+          now: audit.now
+        });
+      }
+    }
+    return rows;
   } catch (error) {
     if (getPgErrorCode(error) === "42P01") return [];
     throw error;
@@ -3822,11 +4100,484 @@ function normalizeDebateOutputPath(rawPath: string, allowedPrefixes?: string[]) 
   return null;
 }
 
-async function toolDebateFilesWrite(input: {
-  userId: string;
+function isFinalDebateOutputPath(path: string) {
+  return path.startsWith("final/");
+}
+
+function normalizeDebateFileWriteMode(path: string, mode?: string | null): DebateFileWriteMode | null {
+  if (mode === "replace" || mode === "append" || mode === "section_merge") return mode;
+  return isFinalDebateOutputPath(path) ? null : "replace";
+}
+
+function normalizeMarkdownLineEndings(value: string) {
+  return value.replace(/\r\n/g, "\n");
+}
+
+function trimMarkdownHeadingText(value: string) {
+  return value.replace(/\s+#+\s*$/, "").trim().toLowerCase();
+}
+
+function findHeadingLineMatch(line: string) {
+  const match = line.match(/^(#{1,6})\s+(.+?)\s*$/);
+  if (!match) return null;
+  return { level: match[1].length, text: trimMarkdownHeadingText(match[2]) };
+}
+
+function mergeMarkdownSectionByHeading(existing: string, targetHeading: string, replacement: string) {
+  const normalizedExisting = normalizeMarkdownLineEndings(existing);
+  const normalizedReplacement = normalizeMarkdownLineEndings(replacement).trim();
+  if (!normalizedReplacement) {
+    return { error: "section_merge requires non-empty content." };
+  }
+
+  const replacementLines = normalizedReplacement.split("\n");
+  const replacementHeading = replacementLines.map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+  const replacementMatch = findHeadingLineMatch(replacementHeading);
+  if (!replacementMatch || replacementMatch.text !== trimMarkdownHeadingText(targetHeading)) {
+    return { error: `section_merge content must start with a Markdown heading matching "${targetHeading}".` };
+  }
+
+  const lines = normalizedExisting.split("\n");
+  let targetStart = -1;
+  let targetLevel = 0;
+  let inCodeFence = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^```/.test(line.trim())) inCodeFence = !inCodeFence;
+    if (inCodeFence) continue;
+    const heading = findHeadingLineMatch(line.trim());
+    if (!heading) continue;
+    if (heading.text === trimMarkdownHeadingText(targetHeading)) {
+      targetStart = index;
+      targetLevel = heading.level;
+      break;
+    }
+  }
+
+  if (targetStart < 0) {
+    return { error: `TARGET_HEADING_NOT_FOUND: ${targetHeading}. Read the file first and retry with an existing heading.` };
+  }
+
+  let targetEnd = lines.length;
+  inCodeFence = false;
+  for (let index = targetStart + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^```/.test(line.trim())) inCodeFence = !inCodeFence;
+    if (inCodeFence) continue;
+    const heading = findHeadingLineMatch(line.trim());
+    if (heading && heading.level <= targetLevel) {
+      targetEnd = index;
+      break;
+    }
+  }
+
+  const mergedLines = [...lines.slice(0, targetStart), ...replacementLines, ...lines.slice(targetEnd)];
+  return { content: mergedLines.join("\n") };
+}
+
+function appendDebateFileContent(existing: string, appended: string) {
+  const current = normalizeMarkdownLineEndings(existing).replace(/\s+$/, "");
+  const next = normalizeMarkdownLineEndings(appended).replace(/^\s+/, "").trimEnd();
+  if (!current) return next;
+  if (!next) return current;
+  return `${current}\n\n${next}`;
+}
+
+function describeLegacyFinalWriteError(path: string) {
+  return `Explicit write mode required for ${path}. Read the file first, then call debate_files_write with mode="section_merge", mode="append", or mode="replace" (replace also requires baseVersion/baseUpdatedAt).`;
+}
+
+function shouldRejectDeliverableShrink(previousContent: string, nextContent: string, allowShrink: boolean) {
+  if (allowShrink) return false;
+  const previousLength = previousContent.length;
+  if (previousLength < DELIVERABLE_REPLACE_SHRINK_MIN_CHARS) return false;
+  return nextContent.length < Math.floor(previousLength * DELIVERABLE_REPLACE_SHRINK_RATIO);
+}
+
+async function getDebateFileMeta(
+  client: PoolClient,
+  debateId: string,
+  path: string
+) {
+  const result = await client.query<{ content: string; updated_at: string; version: number }>(
+    `
+      select content, updated_at, version
+        from debate_files
+       where debate_id = $1
+         and path = $2
+       limit 1
+       for update
+    `,
+    [debateId, path]
+  );
+  if ((result.rowCount ?? 0) !== 1) return null;
+  return {
+    content: String(result.rows[0].content ?? ""),
+    updatedAt: String(result.rows[0].updated_at ?? ""),
+    version: Number(result.rows[0].version ?? 1) || 1
+  };
+}
+
+async function recordDebateFileActivity(input: {
+  client?: PoolClient;
+  debateId: string;
+  debateAgentId: string;
+  turnNumber: number;
+  roundNumber: number;
+  action: DebateFileActivityAction;
+  scope: "debate" | "agent";
+  path: string;
+  targetDebateAgentId?: string | null;
+  writeMode?: DebateFileWriteMode | null;
+  beforeVersion?: number | null;
+  afterVersion?: number | null;
+  beforeContent?: string | null;
+  afterContent?: string | null;
+  targetHeading?: string | null;
+  reason?: string | null;
+  now: string;
+}) {
+  const sql = `
+    insert into debate_file_activity_logs (
+      id,
+      debate_id,
+      debate_agent_id,
+      turn_number,
+      round_number,
+      action,
+      scope,
+      path,
+      target_debate_agent_id,
+      write_mode,
+      before_version,
+      after_version,
+      before_content,
+      after_content,
+      target_heading,
+      reason,
+      created_at
+    )
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+  `;
+  const params = [
+    randomUUID(),
+    input.debateId,
+    input.debateAgentId,
+    input.turnNumber,
+    input.roundNumber,
+    input.action,
+    input.scope,
+    input.path,
+    input.targetDebateAgentId ?? null,
+    input.writeMode ?? null,
+    input.beforeVersion ?? null,
+    input.afterVersion ?? null,
+    input.beforeContent ?? null,
+    input.afterContent ?? null,
+    input.targetHeading ?? null,
+    input.reason ?? null,
+    input.now
+  ];
+  if (input.client) {
+    await input.client.query(sql, params);
+    return;
+  }
+  await query(sql, params);
+}
+
+async function recordImplicitFileReads(input: {
+  audit: DebateFileActivityAudit | null;
+  scope: "debate" | "agent";
+  paths: string[];
+  targetDebateAgentId?: string | null;
+}) {
+  if (!input.audit) return;
+  const uniquePaths = Array.from(new Set(input.paths.map((path) => normalizeContextPath(path)).filter(Boolean)));
+  for (const path of uniquePaths) {
+    // eslint-disable-next-line no-await-in-loop
+    await recordDebateFileActivity({
+      debateId: input.audit.debateId,
+      debateAgentId: input.audit.debateAgentId,
+      turnNumber: input.audit.turnNumber,
+      roundNumber: input.audit.roundNumber,
+      action: "read",
+      scope: input.scope,
+      path,
+      targetDebateAgentId: input.targetDebateAgentId ?? null,
+      now: input.audit.now
+    });
+  }
+}
+
+async function insertDebateFileVersionRecord(input: {
+  client: PoolClient;
   debateId: string;
   path: string;
+  version: number;
   content: string;
+  mode: DebateFileWriteMode;
+  reason: string | null;
+  baseVersion: number | null;
+  debateAgentId?: string | null;
+  now: string;
+}) {
+  await input.client.query(
+    `
+      insert into debate_file_versions (
+        id,
+        debate_id,
+        path,
+        version,
+        content,
+        mode,
+        reason,
+        base_version,
+        created_by_debate_agent_id,
+        created_at
+      )
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      on conflict (debate_id, path, version) do nothing
+    `,
+    [
+      randomUUID(),
+      input.debateId,
+      input.path,
+      input.version,
+      input.content,
+      input.mode,
+      input.reason,
+      input.baseVersion,
+      input.debateAgentId ?? null,
+      input.now
+    ]
+  );
+}
+
+async function writeDebateFileWithMode(input: {
+  userId: string;
+  debateId: string;
+  debateAgentId?: string | null;
+  turnNumber: number;
+  roundNumber: number;
+  path: string;
+  content: string;
+  mode: DebateFileWriteMode;
+  baseVersion?: number | null;
+  baseUpdatedAt?: string | null;
+  reason?: string | null;
+  targetHeading?: string | null;
+  allowShrink?: boolean;
+  now: string;
+}) {
+  const pool = await ensureDbReady();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const current = await getDebateFileMeta(client, input.debateId, input.path);
+    const isDeliverable = isFinalDebateOutputPath(input.path);
+    const baseVersion = Number.isFinite(input.baseVersion) ? Math.floor(Number(input.baseVersion)) : null;
+    const baseUpdatedAt = typeof input.baseUpdatedAt === "string" && input.baseUpdatedAt.trim() ? input.baseUpdatedAt.trim() : null;
+    const expectedCurrentVersion = current?.version ?? 0;
+    const expectedCurrentUpdatedAt = current?.updatedAt ?? null;
+
+    if (isDeliverable && baseVersion === null && baseUpdatedAt === null && current) {
+      await client.query("rollback");
+      return {
+        error: `final/* writes require baseVersion or baseUpdatedAt for ${input.path}. Call debate_files_stat or debate_files_read first.`
+      };
+    }
+    if (baseVersion !== null && baseVersion !== expectedCurrentVersion) {
+      await client.query("rollback");
+      return {
+        error: `WRITE_CONFLICT: ${input.path} is at version ${expectedCurrentVersion}, not ${baseVersion}. Call debate_files_stat/debate_files_read and retry.`
+      };
+    }
+    if (baseUpdatedAt !== null && baseUpdatedAt !== expectedCurrentUpdatedAt) {
+      await client.query("rollback");
+      return {
+        error: `WRITE_CONFLICT: ${input.path} was updated at ${expectedCurrentUpdatedAt ?? "(missing)"}, not ${baseUpdatedAt}. Call debate_files_stat/debate_files_read and retry.`
+      };
+    }
+
+    let nextContent = String(input.content ?? "");
+    if (input.mode === "replace") {
+      if (isDeliverable && current && shouldRejectDeliverableShrink(current.content, nextContent, Boolean(input.allowShrink))) {
+        await client.query("rollback");
+        return {
+          error: `replace rejected for ${input.path}: content shrank from ${current.content.length} to ${nextContent.length} chars. Use allowShrink=true only when intentional.`
+        };
+      }
+    } else if (input.mode === "append") {
+      nextContent = appendDebateFileContent(current?.content ?? "", nextContent);
+      if (isDeliverable) {
+        await appendServerLog("warn", "append used for final deliverable", {
+          debateId: input.debateId,
+          path: input.path,
+          debateAgentId: input.debateAgentId ?? null,
+          reason: input.reason ?? null
+        });
+      }
+    } else {
+      const targetHeading = typeof input.targetHeading === "string" && input.targetHeading.trim() ? input.targetHeading.trim() : "";
+      if (!targetHeading) {
+        await client.query("rollback");
+        return { error: `section_merge requires targetHeading for ${input.path}.` };
+      }
+      if (!current) {
+        await client.query("rollback");
+        return { error: `TARGET_FILE_NOT_FOUND: ${input.path}. Create the file with mode="replace" first.` };
+      }
+      const merged = mergeMarkdownSectionByHeading(current.content, targetHeading, nextContent);
+      if ("error" in merged) {
+        await client.query("rollback");
+        return { error: merged.error };
+      }
+      nextContent = merged.content;
+    }
+
+    const nextVersion = current ? current.version + 1 : 1;
+    await client.query(
+      `
+        insert into debate_files (debate_id, path, content, version, created_at, updated_at)
+        values ($1, $2, $3, $4, $5, $5)
+        on conflict (debate_id, path)
+        do update
+          set content = excluded.content,
+              version = excluded.version,
+              updated_at = excluded.updated_at
+      `,
+      [input.debateId, input.path, nextContent, nextVersion, input.now]
+    );
+
+    if (isDeliverable) {
+      await insertDebateFileVersionRecord({
+        client,
+        debateId: input.debateId,
+        path: input.path,
+        version: nextVersion,
+        content: nextContent,
+        mode: input.mode,
+        reason: input.reason ?? null,
+        baseVersion: current?.version ?? null,
+        debateAgentId: input.debateAgentId ?? null,
+        now: input.now
+      });
+    }
+    if (input.debateAgentId) {
+      await recordDebateFileActivity({
+        client,
+        debateId: input.debateId,
+        debateAgentId: input.debateAgentId,
+        turnNumber: input.turnNumber,
+        roundNumber: input.roundNumber,
+        action: "write",
+        scope: "debate",
+        path: input.path,
+        writeMode: input.mode,
+        beforeVersion: current?.version ?? null,
+        afterVersion: nextVersion,
+        beforeContent: current?.content ?? "",
+        afterContent: nextContent,
+        targetHeading: input.targetHeading ?? null,
+        reason: input.reason ?? null,
+        now: input.now
+      });
+    }
+
+    await client.query("commit");
+    return {
+      ok: true,
+      path: input.path,
+      size: nextContent.length,
+      content: nextContent,
+      version: nextVersion,
+      updatedAt: input.now,
+      mode: input.mode
+    };
+  } catch (error) {
+    try {
+      await client.query("rollback");
+    } catch {
+      // noop
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function toolDebateFilesStat(input: {
+  debateAgentId?: string | null;
+  debateId: string;
+  turnNumber?: number;
+  roundNumber?: number;
+  path: string;
+  now?: string;
+  allowedOutputPaths?: string[];
+}) {
+  const safePath = normalizeDebateOutputPath(input.path, input.allowedOutputPaths);
+  if (!safePath) {
+    return {
+      error: `Invalid path. Only ${(input.allowedOutputPaths?.length ?? 0) > 0 ? input.allowedOutputPaths?.join(", ") : "final/, outputs/"} allowed (no '..').`
+    };
+  }
+  try {
+    const result = await query<{ updated_at: string; version: number; content_length: number }>(
+      `
+        select updated_at, version, char_length(content) as content_length
+          from debate_files
+         where debate_id = $1
+           and path = $2
+         limit 1
+      `,
+      [input.debateId, safePath]
+    );
+    if ((result.rowCount ?? 0) !== 1) {
+      return { ok: true, path: safePath, exists: false, size: 0, updatedAt: null, version: 0 };
+    }
+    if (input.debateAgentId && typeof input.turnNumber === "number" && typeof input.roundNumber === "number" && input.now) {
+      await recordDebateFileActivity({
+        debateId: input.debateId,
+        debateAgentId: input.debateAgentId,
+        turnNumber: input.turnNumber,
+        roundNumber: input.roundNumber,
+        action: "stat",
+        scope: "debate",
+        path: safePath,
+        now: input.now
+      });
+    }
+    return {
+      ok: true,
+      path: safePath,
+      exists: true,
+      size: Number(result.rows[0].content_length ?? 0) || 0,
+      updatedAt: String(result.rows[0].updated_at ?? ""),
+      version: Number(result.rows[0].version ?? 1) || 1
+    };
+  } catch (error) {
+    if (getPgErrorCode(error) === "42P01") {
+      return "MIGRATION_REQUIRED: debate_files table missing";
+    }
+    throw error;
+  }
+}
+
+async function toolDebateFilesWrite(input: {
+  userId: string;
+  debateAgentId?: string | null;
+  debateId: string;
+  turnNumber: number;
+  roundNumber: number;
+  path: string;
+  content: string;
+  mode?: string | null;
+  baseVersion?: number | null;
+  baseUpdatedAt?: string | null;
+  reason?: string | null;
+  targetHeading?: string | null;
+  allowShrink?: boolean;
   now: string;
   allowedOutputPaths?: string[];
 }) {
@@ -3837,9 +4588,31 @@ async function toolDebateFilesWrite(input: {
     };
   }
   const content = String(input.content ?? "");
-  await upsertDebateFile(input.debateId, safePath, content, input.now);
+  const mode = normalizeDebateFileWriteMode(safePath, typeof input.mode === "string" ? input.mode : null);
+  if (!mode) {
+    return { error: describeLegacyFinalWriteError(safePath) };
+  }
+  const writeResult = await writeDebateFileWithMode({
+    userId: input.userId,
+    debateId: input.debateId,
+    debateAgentId: input.debateAgentId ?? null,
+    turnNumber: input.turnNumber,
+    roundNumber: input.roundNumber,
+    path: safePath,
+    content,
+    mode,
+    baseVersion: input.baseVersion ?? null,
+    baseUpdatedAt: input.baseUpdatedAt ?? null,
+    reason: input.reason ?? null,
+    targetHeading: input.targetHeading ?? null,
+    allowShrink: Boolean(input.allowShrink),
+    now: input.now
+  });
+  if ("error" in writeResult) {
+    return writeResult;
+  }
   try {
-    const chunks = splitTextIntoRetrievalChunks(content, 1_500, 220);
+    const chunks = splitTextIntoRetrievalChunks(writeResult.content, 1_500, 220);
     for (let index = 0; index < chunks.length; index += 1) {
       // eslint-disable-next-line no-await-in-loop
       await indexDebateContextChunk({
@@ -3855,7 +4628,14 @@ async function toolDebateFilesWrite(input: {
   } catch {
     // retrieval indexing is best-effort
   }
-  return { ok: true, path: safePath, size: content.length };
+  return {
+    ok: true,
+    path: writeResult.path,
+    size: writeResult.size,
+    version: writeResult.version,
+    updatedAt: writeResult.updatedAt,
+    mode: writeResult.mode
+  };
 }
 
 function buildOpenAiTools(input: { enableVoting: boolean; allowedOutputPaths: string[] }) {
@@ -3909,11 +4689,32 @@ function buildOpenAiTools(input: { enableVoting: boolean; allowedOutputPaths: st
     {
       type: "function",
       function: {
-        name: "debate_files_write",
-        description: `Write a debate-level output file (final deliverables). Allowed paths: ${allowedPathsText}.`,
+        name: "debate_files_stat",
+        description: `Get existence, size, updatedAt, and version for a debate-level output file. Allowed paths: ${allowedPathsText}.`,
         parameters: {
           type: "object",
-          properties: { path: { type: "string" }, content: { type: "string" } },
+          properties: { path: { type: "string" } },
+          required: ["path"]
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "debate_files_write",
+        description: `Write a debate-level output file (final deliverables). Allowed paths: ${allowedPathsText}. outputs/* default to replace. final/* require an explicit mode and safe write semantics.`,
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string" },
+            content: { type: "string" },
+            mode: { type: "string", enum: ["replace", "append", "section_merge"] },
+            baseVersion: { type: "integer" },
+            baseUpdatedAt: { type: "string" },
+            reason: { type: "string" },
+            targetHeading: { type: "string" },
+            allowShrink: { type: "boolean" }
+          },
           required: ["path", "content"]
         }
       }
@@ -4005,11 +4806,29 @@ function buildAnthropicTools(input: { enableVoting: boolean; allowedOutputPaths:
     }
     ,
     {
-      name: "debate_files_write",
-      description: `Write a debate-level output file (final deliverables). Allowed paths: ${allowedPathsText}.`,
+      name: "debate_files_stat",
+      description: `Get existence, size, updatedAt, and version for a debate-level output file. Allowed paths: ${allowedPathsText}.`,
       input_schema: {
         type: "object",
-        properties: { path: { type: "string" }, content: { type: "string" } },
+        properties: { path: { type: "string" } },
+        required: ["path"]
+      }
+    },
+    {
+      name: "debate_files_write",
+      description: `Write a debate-level output file (final deliverables). Allowed paths: ${allowedPathsText}. outputs/* default to replace. final/* require an explicit mode and safe write semantics.`,
+      input_schema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          content: { type: "string" },
+          mode: { type: "string", enum: ["replace", "append", "section_merge"] },
+          baseVersion: { type: "integer" },
+          baseUpdatedAt: { type: "string" },
+          reason: { type: "string" },
+          targetHeading: { type: "string" },
+          allowShrink: { type: "boolean" }
+        },
         required: ["path", "content"]
       }
     }
@@ -4136,7 +4955,14 @@ async function callProvider(
   const directiveInline = await loadOfficialDirectiveInline(userId, debate.id);
   const announcementInline = await loadVoteAnnouncementInline(userId, debate.id);
   const questionDiffInline = await loadQuestionDiffInline(userId, debate.id);
-  const segmentInline = await loadDebateAgentSegmentInline(userId, debate.id, debateAgentId, 12_000);
+  const implicitReadAudit: DebateFileActivityAudit = {
+    debateId: debate.id,
+    debateAgentId,
+    turnNumber: messageNumber,
+    roundNumber,
+    now: new Date().toISOString()
+  };
+  const segmentInline = await loadDebateAgentSegmentInline(userId, debate.id, debateAgentId, 12_000, implicitReadAudit);
   const turnInRound = ((messageNumber - 1) % Math.max(1, participantCount)) + 1;
   const roundStart = (roundNumber - 1) * Math.max(1, participantCount) + 1;
   const roundEnd = roundNumber * Math.max(1, participantCount);
@@ -4198,6 +5024,20 @@ async function callProvider(
         return isContextPathReadable(workflow, currentPhase?.kind ?? null, "seat", item.sourcePath);
       }
       return true;
+    });
+    await recordImplicitFileReads({
+      audit: implicitReadAudit,
+      scope: "debate",
+      paths: gatedRetrieved
+        .filter((item) => Boolean(item.sourcePath))
+        .filter((item) => item.sourceType !== "agent_file")
+        .map((item) => String(item.sourcePath ?? ""))
+    });
+    await recordImplicitFileReads({
+      audit: implicitReadAudit,
+      scope: "agent",
+      paths: gatedRetrieved.filter((item) => item.sourceType === "agent_file").map((item) => String(item.sourcePath ?? "")),
+      targetDebateAgentId: debateAgentId
     });
     relevantHistoryInline = buildRelevantHistoryInline(gatedRetrieved);
   } catch (error) {
@@ -4303,6 +5143,7 @@ async function callProvider(
   }
 
   if (agent.provider === "openai") {
+    let totalToolCalls = 0;
     const tools = buildOpenAiTools({ enableVoting: enableVotingTools, allowedOutputPaths });
     const systemParts = [
       buildBaseSystemPrompt(agent, overrideSystemPrompt),
@@ -4320,16 +5161,17 @@ async function callProvider(
           debateAgentId,
           agentId: agent.id,
           workflow,
-          currentPhaseKind: currentPhase?.kind ?? null
+          currentPhaseKind: currentPhase?.kind ?? null,
+          audit: implicitReadAudit
         })
-      : await loadDebateAgentFilesInline(userId, debateAgentId, agent.id, 18_000);
+      : await loadDebateAgentFilesInline(userId, debateAgentId, agent.id, 18_000, implicitReadAudit);
     if (inline) systemParts.push(inline);
     const allowLongTermContext = messageNumber > participantCount;
     if (allowLongTermContext) {
-      const memoryInline = await loadDebateAgentMemoryInline(userId, debateAgentId, 10_000);
+      const memoryInline = await loadDebateAgentMemoryInline(userId, debateAgentId, 10_000, implicitReadAudit);
       if (memoryInline) systemParts.push(memoryInline);
       if (debate.enableSharedFacts) {
-        const sharedInline = await loadSharedFactsBoardInline(userId, debate.id, 10_000);
+        const sharedInline = await loadSharedFactsBoardInline(userId, debate.id, 10_000, implicitReadAudit);
         if (sharedInline) systemParts.push(sharedInline);
       }
     }
@@ -4435,7 +5277,7 @@ async function callProvider(
               model: agent.model,
               requestedMaxTokens,
               finishReason: noToolRetry?.finishReason ?? "tool_calls_retry_none",
-              toolCallsCount: 0
+              toolCallsCount: totalToolCalls
             }
           };
         }
@@ -4454,7 +5296,7 @@ async function callProvider(
               model: agent.model,
               requestedMaxTokens,
               finishReason: streamed.finishReason ?? null,
-              toolCallsCount: 0
+              toolCallsCount: totalToolCalls
             }
           };
         }
@@ -4469,11 +5311,12 @@ async function callProvider(
             model: agent.model,
             requestedMaxTokens,
             finishReason: streamed.finishReason ?? "demo_fallback",
-            toolCallsCount: 0
+            toolCallsCount: totalToolCalls
           }
         };
       }
 
+      totalToolCalls += toolCalls.length;
       messages.push({ role: "assistant", tool_calls: toolCalls, content: assistantContent });
 
       for (const call of toolCalls) {
@@ -4491,35 +5334,76 @@ async function callProvider(
               ? ((args as { prefix: string }).prefix as string)
               : undefined;
           result = await toolListFiles(userId, debateAgentId, agent.id, prefix, {
+            debateId: debate.id,
+            turnNumber: messageNumber,
+            roundNumber,
+            now: new Date().toISOString()
+          }, {
             workflow,
             currentPhaseKind: currentPhase?.kind ?? null
           });
         } else if (call.function.name === "agent_files_read") {
           const path = String((args as { path?: unknown }).path ?? "");
           result = await toolReadFile(userId, debateAgentId, agent.id, path, {
+            debateId: debate.id,
+            turnNumber: messageNumber,
+            roundNumber,
+            now: new Date().toISOString()
+          }, {
             workflow,
             currentPhaseKind: currentPhase?.kind ?? null
           });
         } else if (call.function.name === "agent_files_search") {
           const queryText = String((args as { query?: unknown }).query ?? "");
           result = await toolSearchFiles(userId, debateAgentId, agent.id, queryText, {
+            debateId: debate.id,
+            turnNumber: messageNumber,
+            roundNumber,
+            now: new Date().toISOString()
+          }, {
             workflow,
             currentPhaseKind: currentPhase?.kind ?? null
           });
         } else if (call.function.name === "debate_files_read") {
           const path = String((args as { path?: unknown }).path ?? "");
-          result = await toolReadDebateFile(userId, debate.id, path, {
+          result = await toolReadDebateFile(userId, debateAgentId, debate.id, path, new Date().toISOString(), messageNumber, roundNumber, {
             workflow,
             currentPhaseKind: currentPhase?.kind ?? null
+          });
+        } else if (call.function.name === "debate_files_stat") {
+          const path = String((args as { path?: unknown }).path ?? "");
+          result = await toolDebateFilesStat({
+            debateAgentId,
+            debateId: debate.id,
+            turnNumber: messageNumber,
+            roundNumber,
+            path,
+            now: new Date().toISOString(),
+            allowedOutputPaths
           });
         } else if (call.function.name === "debate_files_write") {
           const path = String((args as { path?: unknown }).path ?? "");
           const content = String((args as { content?: unknown }).content ?? "");
+          const rawMode = (args as { mode?: unknown }).mode;
+          const rawBaseVersion = (args as { baseVersion?: unknown }).baseVersion;
+          const rawBaseUpdatedAt = (args as { baseUpdatedAt?: unknown }).baseUpdatedAt;
+          const rawReason = (args as { reason?: unknown }).reason;
+          const rawTargetHeading = (args as { targetHeading?: unknown }).targetHeading;
+          const rawAllowShrink = (args as { allowShrink?: unknown }).allowShrink;
           result = await toolDebateFilesWrite({
             userId,
+            debateAgentId,
             debateId: debate.id,
+            turnNumber: messageNumber,
+            roundNumber,
             path,
             content,
+            mode: typeof rawMode === "string" ? rawMode : null,
+            baseVersion: typeof rawBaseVersion === "number" ? rawBaseVersion : null,
+            baseUpdatedAt: typeof rawBaseUpdatedAt === "string" ? rawBaseUpdatedAt : null,
+            reason: typeof rawReason === "string" ? rawReason : null,
+            targetHeading: typeof rawTargetHeading === "string" ? rawTargetHeading : null,
+            allowShrink: rawAllowShrink === true,
             now: new Date().toISOString(),
             allowedOutputPaths
           });
@@ -4638,7 +5522,7 @@ async function callProvider(
           model: agent.model,
           requestedMaxTokens,
           finishReason: fallback.finishReason ?? null,
-          toolCallsCount: 0
+          toolCallsCount: totalToolCalls
         }
       };
     }
@@ -4653,11 +5537,12 @@ async function callProvider(
         model: agent.model,
         requestedMaxTokens,
         finishReason: fallback.finishReason ?? "demo_fallback",
-        toolCallsCount: 0
+        toolCallsCount: totalToolCalls
       }
     };
   }
 
+  let totalToolCalls = 0;
   const tools = buildAnthropicTools({ enableVoting: enableVotingTools, allowedOutputPaths });
   const systemParts = [
     buildBaseSystemPrompt(agent, overrideSystemPrompt),
@@ -4675,16 +5560,17 @@ async function callProvider(
         debateAgentId,
         agentId: agent.id,
         workflow,
-        currentPhaseKind: currentPhase?.kind ?? null
+        currentPhaseKind: currentPhase?.kind ?? null,
+        audit: implicitReadAudit
       })
-    : await loadDebateAgentFilesInline(userId, debateAgentId, agent.id, 18_000);
+    : await loadDebateAgentFilesInline(userId, debateAgentId, agent.id, 18_000, implicitReadAudit);
   if (inline) systemParts.push(inline);
   const allowLongTermContext = messageNumber > participantCount;
   if (allowLongTermContext) {
-    const memoryInline = await loadDebateAgentMemoryInline(userId, debateAgentId, 10_000);
+    const memoryInline = await loadDebateAgentMemoryInline(userId, debateAgentId, 10_000, implicitReadAudit);
     if (memoryInline) systemParts.push(memoryInline);
     if (debate.enableSharedFacts) {
-      const sharedInline = await loadSharedFactsBoardInline(userId, debate.id, 10_000);
+      const sharedInline = await loadSharedFactsBoardInline(userId, debate.id, 10_000, implicitReadAudit);
       if (sharedInline) systemParts.push(sharedInline);
     }
   }
@@ -4766,11 +5652,12 @@ async function callProvider(
            model: agent.model,
            requestedMaxTokens,
            finishReason: typeof payload?.stop_reason === "string" ? payload.stop_reason : null,
-           toolCallsCount: 0
+           toolCallsCount: totalToolCalls
          }
        };
      }
 
+    totalToolCalls += toolUses.length;
     messages.push({ role: "assistant", content: contentBlocks });
 
     const toolResults: Array<Record<string, unknown>> = [];
@@ -4783,35 +5670,76 @@ async function callProvider(
             ? ((use.input as { prefix: string }).prefix as string)
             : undefined;
         result = await toolListFiles(userId, debateAgentId, agent.id, prefix, {
+          debateId: debate.id,
+          turnNumber: messageNumber,
+          roundNumber,
+          now: new Date().toISOString()
+        }, {
           workflow,
           currentPhaseKind: currentPhase?.kind ?? null
         });
       } else if (use.name === "agent_files_read") {
         const path = String((use.input as { path?: unknown }).path ?? "");
         result = await toolReadFile(userId, debateAgentId, agent.id, path, {
+          debateId: debate.id,
+          turnNumber: messageNumber,
+          roundNumber,
+          now: new Date().toISOString()
+        }, {
           workflow,
           currentPhaseKind: currentPhase?.kind ?? null
         });
       } else if (use.name === "agent_files_search") {
         const queryText = String((use.input as { query?: unknown }).query ?? "");
         result = await toolSearchFiles(userId, debateAgentId, agent.id, queryText, {
+          debateId: debate.id,
+          turnNumber: messageNumber,
+          roundNumber,
+          now: new Date().toISOString()
+        }, {
           workflow,
           currentPhaseKind: currentPhase?.kind ?? null
         });
       } else if (use.name === "debate_files_read") {
         const path = String((use.input as { path?: unknown }).path ?? "");
-        result = await toolReadDebateFile(userId, debate.id, path, {
+        result = await toolReadDebateFile(userId, debateAgentId, debate.id, path, new Date().toISOString(), messageNumber, roundNumber, {
           workflow,
           currentPhaseKind: currentPhase?.kind ?? null
+        });
+      } else if (use.name === "debate_files_stat") {
+        const path = String((use.input as { path?: unknown }).path ?? "");
+        result = await toolDebateFilesStat({
+          debateAgentId,
+          debateId: debate.id,
+          turnNumber: messageNumber,
+          roundNumber,
+          path,
+          now: new Date().toISOString(),
+          allowedOutputPaths
         });
       } else if (use.name === "debate_files_write") {
         const path = String((use.input as { path?: unknown }).path ?? "");
         const content = String((use.input as { content?: unknown }).content ?? "");
+        const rawMode = (use.input as { mode?: unknown }).mode;
+        const rawBaseVersion = (use.input as { baseVersion?: unknown }).baseVersion;
+        const rawBaseUpdatedAt = (use.input as { baseUpdatedAt?: unknown }).baseUpdatedAt;
+        const rawReason = (use.input as { reason?: unknown }).reason;
+        const rawTargetHeading = (use.input as { targetHeading?: unknown }).targetHeading;
+        const rawAllowShrink = (use.input as { allowShrink?: unknown }).allowShrink;
         result = await toolDebateFilesWrite({
           userId,
+          debateAgentId,
           debateId: debate.id,
+          turnNumber: messageNumber,
+          roundNumber,
           path,
           content,
+          mode: typeof rawMode === "string" ? rawMode : null,
+          baseVersion: typeof rawBaseVersion === "number" ? rawBaseVersion : null,
+          baseUpdatedAt: typeof rawBaseUpdatedAt === "string" ? rawBaseUpdatedAt : null,
+          reason: typeof rawReason === "string" ? rawReason : null,
+          targetHeading: typeof rawTargetHeading === "string" ? rawTargetHeading : null,
+          allowShrink: rawAllowShrink === true,
           now: new Date().toISOString(),
           allowedOutputPaths
         });
@@ -4947,7 +5875,7 @@ async function callProvider(
       model: agent.model,
       requestedMaxTokens,
       finishReason: typeof payload?.stop_reason === "string" ? payload.stop_reason : null,
-      toolCallsCount: 0
+      toolCallsCount: totalToolCalls
     }
   };
 }
@@ -6336,11 +7264,15 @@ export async function runDebate(id: string, userId: string) {
         stage: "parsing"
       });
       const parsed = parseResponse(raw);
+      const persistedElectionBallotSummary =
+        openVoteBeforeTurn?.status === "open" && openVoteBeforeTurn.kind === "election"
+          ? electionBallotSummary ?? extractElectionBallotSummaryFromVote(await loadOpenVote(userId, id), String(currentParticipant.id))
+          : null;
       const persistedResponse =
         openVoteBeforeTurn?.status === "open" && openVoteBeforeTurn.kind === "election"
           ? {
               ...parsed,
-              content: buildElectionVoteOnlyContent(electionBallotSummary ?? undefined),
+              content: buildElectionVoteOnlyContent(persistedElectionBallotSummary ?? undefined),
               structuredOutput: null as StructuredOutput | null
             }
           : parsed;

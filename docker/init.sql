@@ -249,6 +249,7 @@ create table if not exists debate_files (
   debate_id uuid not null references debates(id) on delete cascade,
   path text not null,
   content text not null default '',
+  version int not null default 1,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (debate_id, path)
@@ -256,3 +257,46 @@ create table if not exists debate_files (
 
 create index if not exists idx_debate_files_debate_id_updated_at
   on debate_files (debate_id, updated_at desc);
+
+create table if not exists debate_file_versions (
+  id uuid primary key default gen_random_uuid(),
+  debate_id uuid not null references debates(id) on delete cascade,
+  path text not null,
+  version int not null,
+  content text not null default '',
+  mode text not null,
+  reason text null,
+  base_version int null,
+  created_by_debate_agent_id uuid null references debate_agents(id) on delete set null,
+  created_at timestamptz not null default now(),
+  unique (debate_id, path, version)
+);
+
+create index if not exists idx_debate_file_versions_debate_id_path_version
+  on debate_file_versions (debate_id, path, version desc);
+
+create table if not exists debate_file_activity_logs (
+  id uuid primary key default gen_random_uuid(),
+  debate_id uuid not null references debates(id) on delete cascade,
+  debate_agent_id uuid not null references debate_agents(id) on delete cascade,
+  turn_number int not null,
+  round_number int not null,
+  action text not null check (action in ('read', 'write', 'search', 'list', 'stat')),
+  scope text not null check (scope in ('debate', 'agent')),
+  path text not null,
+  target_debate_agent_id uuid null references debate_agents(id) on delete set null,
+  write_mode text null,
+  before_version int null,
+  after_version int null,
+  before_content text null,
+  after_content text null,
+  target_heading text null,
+  reason text null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_debate_file_activity_logs_debate_id_created_at
+  on debate_file_activity_logs (debate_id, created_at desc, id desc);
+
+create index if not exists idx_debate_file_activity_logs_debate_id_action_created_at
+  on debate_file_activity_logs (debate_id, action, created_at desc, id desc);

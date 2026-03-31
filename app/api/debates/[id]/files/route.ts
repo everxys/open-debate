@@ -16,6 +16,7 @@ function maybeTruncateFileContent(input: {
   path: string;
   content: string;
   updatedAt: string;
+  version?: number | null;
   maxChars: number | null;
   tail: boolean;
 }) {
@@ -32,13 +33,13 @@ function maybeTruncateFileContent(input: {
 function getOptionalSystemFileFallback(path: string) {
   const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").trim().toLowerCase();
   if (normalized === "votes/open.json") {
-    return { path, content: JSON.stringify({ status: "closed" }), updatedAt: "" };
+    return { path, content: JSON.stringify({ status: "closed" }), updatedAt: "", version: null };
   }
   if (normalized === "context/usage.json" || normalized === "context/usage_totals.json") {
-    return { path, content: JSON.stringify({ byDebateAgentId: {} }), updatedAt: "" };
+    return { path, content: JSON.stringify({ byDebateAgentId: {} }), updatedAt: "", version: null };
   }
   if (normalized === "question/history.json") {
-    return { path, content: "[]", updatedAt: "" };
+    return { path, content: "[]", updatedAt: "", version: null };
   }
   return null;
 }

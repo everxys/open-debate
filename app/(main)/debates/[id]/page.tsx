@@ -19,6 +19,7 @@ import { Tree, type NodeApi } from "react-arborist";
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 import { MarkdownView } from "@/components/ui/markdown";
 import { createFsTreeModel, type FsNode, normalizeFsPath } from "@/lib/fs-tree";
+import { buildLineDiffRows, type LineDiffRow } from "@/lib/line-diff";
 import {
   formatRequiredDeliverableSummary,
   normalizeDebateWorkflow,
@@ -127,9 +128,9 @@ type DebateRoundDirectoryItemProps = {
   onSelectTurn: (turnId: string) => void;
 };
 
-type LeftTab = "status" | "participants" | "workflow" | "memory";
+type LeftTab = "status" | "participants" | "workflow" | "memory" | "file_activity";
 
-type LeftTabIconName = "status" | "participants" | "workflow" | "memory";
+type LeftTabIconName = "status" | "participants" | "workflow" | "memory" | "file_activity";
 
 type WorkflowRulesState = {
   markdown: string;
@@ -194,16 +195,50 @@ type AllFileInfoState = {
   updatedAt: string;
 };
 
-type QuestionDiffRow =
-  | { kind: "skip"; leftSkip: number; rightSkip: number }
-  | {
-      kind: "row";
-      type: "same" | "add" | "del" | "change";
-      leftNo: number | null;
-      rightNo: number | null;
-      leftText: string;
-      rightText: string;
-    };
+type QuestionDiffRow = LineDiffRow;
+
+type FileActivityAction = "read" | "write";
+type FileActivityEntryAction = "read" | "write" | "search" | "list" | "stat";
+
+type FileActivityListItem = {
+  id: string;
+  action: FileActivityEntryAction;
+  scope: "debate" | "agent";
+  path: string;
+  debateAgentId: string;
+  targetDebateAgentId: string | null;
+  targetSeatName: string | null;
+  turnNumber: number;
+  roundNumber: number;
+  createdAt: string;
+  writeMode: string | null;
+  beforeVersion: number | null;
+  afterVersion: number | null;
+  targetHeading: string | null;
+  reason: string | null;
+  agentName: string;
+  summary: { added: number; deleted: number; changed: number };
+};
+
+type FileActivityDetail = FileActivityListItem & {
+  beforeContent: string;
+  afterContent: string;
+  diffRows: QuestionDiffRow[];
+  summary: { added: number; deleted: number; changed: number };
+};
+
+type FileActivityCounts = {
+  read: number;
+  write: number;
+};
+
+function formatFileActivityEntryAction(action: FileActivityEntryAction) {
+  if (action === "write") return "写入";
+  if (action === "search") return "搜索";
+  if (action === "list") return "列表";
+  if (action === "stat") return "查看";
+  return "读取";
+}
 
 const WORKFLOW_RULES_DISABLED_MARKDOWN = [
   "**Workflow 规则（未启用）**",
@@ -962,7 +997,7 @@ function FileInfoDialog(props: {
       }}
     >
       <div className="panel stack" onClick={(event) => event.stopPropagation()} style={{ width: "min(560px, 100%)" }}>
-        <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+        <div className="row debateModalHeader" style={{ justifyContent: "space-between", gap: 8 }}>
           <strong>文件信息</strong>
           <button className="btn" type="button" onClick={props.onClose}>
             关闭
@@ -1482,7 +1517,7 @@ function DebateViewerPanel(props: {
   onOpenDiagnostics: (turnNumber: number) => void;
 }) {
   return (
-    <section className="panel stack" style={{ height: "calc(100vh - 140px)", overflow: "hidden" }}>
+    <section className="panel stack debateViewportPanel" style={{ overflow: "hidden" }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <h2 style={{ margin: 0 }}>发言内容</h2>
         <div className="row" style={{ gap: 8 }}>
@@ -1627,6 +1662,16 @@ function LeftTabIcon({ name }: { name: LeftTabIconName }) {
         <rect x="14" y="14" width="6" height="6" rx="1.2" />
         <path d="M10 7h4" />
         <path d="M14 7v7" />
+      </svg>
+    );
+  }
+  if (name === "file_activity") {
+    return (
+      <svg {...baseProps}>
+        <circle cx="12" cy="12" r="8" />
+        <path d="M12 8v4l3 2" />
+        <path d="M8 4.5v3" />
+        <path d="M16 4.5v3" />
       </svg>
     );
   }
@@ -1977,7 +2022,7 @@ function DiagnosticsDialog(props: {
   return (
     <div role="dialog" aria-modal="true" onClick={onClose} style={{ ...MODAL_OVERLAY_STYLE, alignItems: "flex-start", zIndex: 1000 }}>
       <div className="panel stack" onClick={MODAL_PANEL_CLICK_STOP} style={{ width: "min(860px, 100%)" }}>
-        <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="row debateModalHeader" style={{ justifyContent: "space-between" }}>
           <div className="stack" style={{ gap: 4 }}>
             <strong>第 {dialog.turnNumber} 条发言 · 生成诊断</strong>
             <div className="muted">用于判断正文是被平台截断、工具打断，还是被业务逻辑覆盖。</div>
@@ -2032,7 +2077,7 @@ function SaveSuccessDialog(props: {
       <div className="panel stack" onClick={MODAL_PANEL_CLICK_STOP} style={{ width: "min(520px, 100%)" }}>
         <strong>保存成功</strong>
         <div className="muted">{version ? `当前版本：v${version}` : "已更新问题并生成版本"}</div>
-        <div className="row" style={{ justifyContent: "flex-end" }}>
+        <div className="row debateModalFooter" style={{ justifyContent: "flex-end" }}>
           <button className="btn" type="button" onClick={onClose}>
             关闭
           </button>
@@ -2061,7 +2106,7 @@ function QuestionZoomDialog(props: {
   return (
     <div role="dialog" aria-modal="true" onClick={onClose} style={{ ...MODAL_OVERLAY_STYLE, alignItems: "flex-start", zIndex: 1000 }}>
       <div className="panel stack" onClick={MODAL_PANEL_CLICK_STOP} style={{ width: "min(980px, 100%)" }}>
-        <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="row debateModalHeader" style={{ justifyContent: "space-between" }}>
           <strong>问题（放大查看）</strong>
           <button className="btn" type="button" onClick={onClose}>
             关闭
@@ -2072,12 +2117,12 @@ function QuestionZoomDialog(props: {
           value={value}
           onChange={onChange}
           maxLength={50_000}
-          height={"60vh"}
+          height={"min(62dvh, calc(100dvh - 220px))"}
           autoFocus
           baseline={baseline}
         />
         {canEdit ? (
-          <div className="row" style={{ justifyContent: "space-between" }}>
+          <div className="row debateModalFooter" style={{ justifyContent: "space-between" }}>
             <span className="muted">{value.length.toLocaleString()}/50,000</span>
             <button className="btn btn-primary" disabled={isSavingQuestion || !questionDirty} type="button" onClick={onSave}>
               {isSavingQuestion ? "保存中..." : "保存"}
@@ -2143,11 +2188,11 @@ function QuestionHistoryDialog(props: {
         {!loading && error ? <div className="muted">{error}</div> : null}
 
         {!loading && !error ? (
-          <div className="grid" style={{ gridTemplateColumns: "320px 1fr", alignItems: "start" }}>
-            <div className="panel stack">
+          <div className="grid debateCompareGrid" style={{ alignItems: "start" }}>
+            <div className="panel stack debateCompareHistoryPanel">
               <strong>历史</strong>
               <div className="muted">当前版本：v{questionVersion ?? (history.at(-1)?.version ?? 1)}</div>
-              <div className="stack" style={{ gap: 8, maxHeight: "60vh", overflowY: "auto" }}>
+              <div className="stack" style={{ gap: 8, maxHeight: "min(62dvh, calc(100dvh - 240px))", overflowY: "auto" }}>
                 {history.length === 0 ? <div className="muted">暂无</div> : null}
                 {history.map((item) => (
                   <button
@@ -2176,10 +2221,10 @@ function QuestionHistoryDialog(props: {
               </div>
             </div>
 
-            <div className="panel stack">
-              <div className="row" style={{ justifyContent: "space-between" }}>
+            <div className="panel stack debateCompareDiffPanel">
+              <div className="row debateCompareToolbar" style={{ justifyContent: "space-between" }}>
                 <strong>Diff</strong>
-                <div className="row" style={{ gap: 8 }}>
+                <div className="row debateCompareControls" style={{ gap: 8 }}>
                   <select value={diffFromVersion ?? ""} onChange={(event) => onSelectFromVersion(event.target.value ? Number(event.target.value) : null)}>
                     <option value="">From</option>
                     {history.map((item) => (
@@ -2202,95 +2247,308 @@ function QuestionHistoryDialog(props: {
                 </div>
               </div>
 
-              <div className="panel" style={{ height: "60vh", overflowY: "auto" }}>
-                {diffLoading ? <div className="muted">生成中...</div> : null}
-                {!diffLoading ? (
-                  diffRows.length > 0 ? (
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "1fr 1fr",
-                        gap: 0,
-                        fontFamily:
-                          "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
-                        fontSize: 12
-                      }}
-                    >
-                      {diffRows.map((row, index) => {
-                        if (row.kind === "skip") {
-                          return (
-                            <div key={`skip_${index}`} className="muted" style={{ gridColumn: "1 / span 2", padding: "8px 10px" }}>
-                              … 跳过 {row.leftSkip} 行未变更 …
-                            </div>
-                          );
-                        }
-
-                        const baseCell: CSSProperties = {
-                          display: "flex",
-                          gap: 10,
-                          padding: "4px 10px",
-                          whiteSpace: "pre-wrap",
-                          alignItems: "flex-start"
-                        };
-                        const leftBg =
-                          row.type === "del" ? "rgba(220, 38, 38, 0.10)" : row.type === "change" ? "rgba(37, 99, 235, 0.10)" : "transparent";
-                        const rightBg =
-                          row.type === "add" ? "rgba(22, 163, 74, 0.10)" : row.type === "change" ? "rgba(37, 99, 235, 0.10)" : "transparent";
-                        const leftNoBg =
-                          row.type === "del" ? "rgba(220, 38, 38, 0.22)" : row.type === "change" ? "rgba(37, 99, 235, 0.18)" : "transparent";
-                        const rightNoBg =
-                          row.type === "add" ? "rgba(22, 163, 74, 0.22)" : row.type === "change" ? "rgba(37, 99, 235, 0.18)" : "transparent";
-
-                        return (
-                          <Fragment key={`row_${index}`}>
-                            <div style={{ ...baseCell, background: leftBg }}>
-                              <span
-                                className="muted"
-                                style={{
-                                  width: 44,
-                                  flex: "0 0 auto",
-                                  textAlign: "right",
-                                  background: leftNoBg,
-                                  borderRadius: 6,
-                                  padding: "0 6px",
-                                  lineHeight: "18px",
-                                  marginTop: 1
-                                }}
-                              >
-                                {row.leftNo ?? ""}
-                              </span>
-                              <span style={{ flex: 1 }}>{row.leftText}</span>
-                            </div>
-                            <div style={{ ...baseCell, background: rightBg }}>
-                              <span
-                                className="muted"
-                                style={{
-                                  width: 44,
-                                  flex: "0 0 auto",
-                                  textAlign: "right",
-                                  background: rightNoBg,
-                                  borderRadius: 6,
-                                  padding: "0 6px",
-                                  lineHeight: "18px",
-                                  marginTop: 1
-                                }}
-                              >
-                                {row.rightNo ?? ""}
-                              </span>
-                              <span style={{ flex: 1 }}>{row.rightText}</span>
-                            </div>
-                          </Fragment>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="muted">选择版本并点击“生成 Diff”</div>
-                  )
-                ) : null}
-              </div>
+              <TwoPaneDiffView rows={diffRows} loading={diffLoading} emptyText="选择版本并点击“生成 Diff”" />
             </div>
           </div>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+function TwoPaneDiffView(props: {
+  rows: QuestionDiffRow[];
+  loading?: boolean;
+  emptyText?: string;
+  height?: string | number;
+}) {
+  return (
+    <div className="panel" style={{ height: props.height ?? "min(62dvh, calc(100dvh - 240px))", flex: 1, minHeight: 0, overflowY: "auto" }}>
+      {props.loading ? <div className="muted">生成中...</div> : null}
+      {!props.loading ? (
+        props.rows.length > 0 ? (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 0,
+              fontFamily:
+                "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+              fontSize: 12
+            }}
+          >
+            {props.rows.map((row, index) => {
+              if (row.kind === "skip") {
+                return (
+                  <div key={`skip_${index}`} className="muted" style={{ gridColumn: "1 / span 2", padding: "8px 10px" }}>
+                    … 跳过 {row.leftSkip} 行未变更 …
+                  </div>
+                );
+              }
+
+              const baseCell: CSSProperties = {
+                display: "flex",
+                gap: 10,
+                padding: "4px 10px",
+                whiteSpace: "pre-wrap",
+                alignItems: "flex-start"
+              };
+              const leftBg =
+                row.type === "del" ? "rgba(220, 38, 38, 0.10)" : row.type === "change" ? "rgba(37, 99, 235, 0.10)" : "transparent";
+              const rightBg =
+                row.type === "add" ? "rgba(22, 163, 74, 0.10)" : row.type === "change" ? "rgba(37, 99, 235, 0.10)" : "transparent";
+              const leftNoBg =
+                row.type === "del" ? "rgba(220, 38, 38, 0.22)" : row.type === "change" ? "rgba(37, 99, 235, 0.18)" : "transparent";
+              const rightNoBg =
+                row.type === "add" ? "rgba(22, 163, 74, 0.22)" : row.type === "change" ? "rgba(37, 99, 235, 0.18)" : "transparent";
+
+              return (
+                <Fragment key={`row_${index}`}>
+                  <div style={{ ...baseCell, background: leftBg }}>
+                    <span
+                      className="muted"
+                      style={{
+                        width: 44,
+                        flex: "0 0 auto",
+                        textAlign: "right",
+                        background: leftNoBg,
+                        borderRadius: 6,
+                        padding: "0 6px",
+                        lineHeight: "18px"
+                      }}
+                    >
+                      {row.leftNo ?? ""}
+                    </span>
+                    <span style={{ flex: 1 }}>{row.leftText}</span>
+                  </div>
+                  <div style={{ ...baseCell, background: rightBg }}>
+                    <span
+                      className="muted"
+                      style={{
+                        width: 44,
+                        flex: "0 0 auto",
+                        textAlign: "right",
+                        background: rightNoBg,
+                        borderRadius: 6,
+                        padding: "0 6px",
+                        lineHeight: "18px"
+                      }}
+                    >
+                      {row.rightNo ?? ""}
+                    </span>
+                    <span style={{ flex: 1 }}>{row.rightText}</span>
+                  </div>
+                </Fragment>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="muted">{props.emptyText ?? "暂无 Diff"}</div>
+        )
+      ) : null}
+    </div>
+  );
+}
+
+function FileActivityPanel(props: {
+  action: FileActivityAction;
+  counts: FileActivityCounts;
+  loading: boolean;
+  error: string;
+  items: FileActivityListItem[];
+  hasMore: boolean;
+  loadingMore: boolean;
+  onChangeAction: (action: FileActivityAction) => void;
+  onRefresh: () => void;
+  onLoadMore: () => void;
+  onSelectEntry: (entryId: string) => void;
+}) {
+  return (
+    <div className="panel stack" style={{ minHeight: 0, height: "100%", overflow: "hidden" }}>
+      <div className="row" style={{ justifyContent: "flex-start", gap: 8 }}>
+        <button className="btn" type="button" disabled={props.loading} onClick={props.onRefresh}>
+          刷新
+        </button>
+      </div>
+      <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          <button
+            className="btn"
+            type="button"
+            style={props.action === "read" ? { borderColor: "rgba(38, 99, 235, 0.55)", background: "rgba(38, 99, 235, 0.08)" } : undefined}
+            onClick={() => props.onChangeAction("read")}
+          >
+            {`读取${props.counts.read > 0 ? ` (${props.counts.read})` : ""}`}
+          </button>
+          <button
+            className="btn"
+            type="button"
+            style={props.action === "write" ? { borderColor: "rgba(38, 99, 235, 0.55)", background: "rgba(38, 99, 235, 0.08)" } : undefined}
+            onClick={() => props.onChangeAction("write")}
+          >
+            {`AI写入${props.counts.write > 0 ? ` (${props.counts.write})` : ""}`}
+          </button>
+        </div>
+      </div>
+      {props.loading ? <div className="muted">加载中...</div> : null}
+      {!props.loading && props.error ? <div className="muted">{props.error}</div> : null}
+      {!props.loading && !props.error ? (
+        <div className="stack" style={{ gap: 8, flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+          {props.items.length === 0 ? (
+            <div className="muted">
+              {props.action === "read"
+                ? props.counts.write > 0
+                  ? `当前还没有读取记录，但已记录 ${props.counts.write} 条 AI 写入，切到“AI写入”即可查看。`
+                  : "尚未开始记录文件读取历史（仅统计功能上线后的操作）。"
+                : props.counts.read > 0
+                  ? `当前还没有 AI 写入记录，但已记录 ${props.counts.read} 条读取，切到“读取”即可查看。`
+                  : "尚未开始记录文件 AI 写入历史（仅统计功能上线后的操作）。"}
+            </div>
+          ) : null}
+          {props.items.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="btn"
+              style={{
+                textAlign: "left",
+                padding: "12px 14px",
+                borderColor: props.action === "write" ? "rgba(148, 163, 184, 0.3)" : "rgba(59, 130, 246, 0.18)",
+                background: props.action === "write" ? "rgba(248, 250, 252, 0.96)" : "rgba(239, 246, 255, 0.55)"
+              }}
+              onClick={() => props.onSelectEntry(item.id)}
+            >
+              <div className="row" style={{ justifyContent: "space-between", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+                <div style={{ wordBreak: "break-all", flex: 1, minWidth: 0 }}>
+                  <strong>{item.path}</strong>
+                </div>
+                <span
+                  className="softBox"
+                  style={{
+                    padding: "2px 8px",
+                    fontSize: 12,
+                    background:
+                      props.action === "write"
+                        ? "rgba(15, 23, 42, 0.05)"
+                        : item.action === "read"
+                          ? "rgba(37, 99, 235, 0.1)"
+                          : item.action === "search"
+                            ? "rgba(217, 119, 6, 0.12)"
+                            : item.action === "list"
+                              ? "rgba(107, 114, 128, 0.12)"
+                              : "rgba(20, 184, 166, 0.12)"
+                  }}
+                >
+                  {props.action === "write" ? "AI写入" : formatFileActivityEntryAction(item.action)}
+                </span>
+              </div>
+              <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                <span className="muted">{item.agentName}</span>
+                <span className="muted">{`Round ${item.roundNumber}`}</span>
+                <span className="muted">{`Turn ${item.turnNumber}`}</span>
+              </div>
+              <div className="muted" style={{ marginTop: 4 }}>
+                {item.createdAt ? new Date(item.createdAt).toLocaleString() : ""}
+                {item.scope === "agent" ? ` · seat file${item.targetSeatName ? ` · ${item.targetSeatName}` : ""}` : " · shared file"}
+              </div>
+              {props.action === "read" ? <div className="muted" style={{ marginTop: 6 }}>点击查看详细信息</div> : null}
+              {props.action === "write" ? (
+                <div className="row" style={{ gap: 10, flexWrap: "wrap", marginTop: 8, alignItems: "center" }}>
+                  <span className="muted">
+                    {(item.beforeVersion ?? 0) > 0 || (item.afterVersion ?? 0) > 0
+                      ? `v${item.beforeVersion ?? 0} -> v${item.afterVersion ?? 0}`
+                      : item.writeMode ?? "AI write"}
+                    {item.writeMode ? ` · ${item.writeMode}` : ""}
+                  </span>
+                  <span style={{ color: "rgb(22, 163, 74)", fontWeight: 600 }}>{`+${item.summary.added}`}</span>
+                  <span style={{ color: "rgb(220, 38, 38)", fontWeight: 600 }}>{`-${item.summary.deleted}`}</span>
+                  <span style={{ color: "rgb(37, 99, 235)", fontWeight: 600 }}>{`~${item.summary.changed}`}</span>
+                </div>
+              ) : null}
+            </button>
+          ))}
+          {props.hasMore ? (
+            <button className="btn" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>
+              {props.loadingMore ? "加载中..." : "加载更多"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function FileActivityDetailDialog(props: {
+  open: boolean;
+  action: FileActivityAction;
+  detailLoading: boolean;
+  detail: FileActivityDetail | null;
+  onClose: () => void;
+}) {
+  if (!props.open) return null;
+
+  return (
+    <div role="dialog" aria-modal="true" onClick={props.onClose} style={{ ...MODAL_OVERLAY_STYLE, alignItems: "flex-start", zIndex: 1000 }}>
+      <div
+        className="panel stack"
+        onClick={MODAL_PANEL_CLICK_STOP}
+        style={{ width: "min(1120px, 100%)", maxHeight: "calc(100dvh - 48px)", overflow: "hidden" }}
+      >
+        <div className="row debateModalHeader" style={{ justifyContent: "space-between" }}>
+          <strong>{props.action === "read" ? "读取详情" : "AI写入详情"}</strong>
+          <button className="btn" type="button" onClick={props.onClose}>
+            关闭
+          </button>
+        </div>
+        <div className="stack" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+          {props.detailLoading ? <div className="muted">详情加载中...</div> : null}
+          {!props.detailLoading && !props.detail ? <div className="muted">未找到这条记录的详情。</div> : null}
+          {!props.detailLoading && props.detail ? (
+            <Fragment>
+              <div className="panel stack" style={{ gap: 6 }}>
+                <div style={{ wordBreak: "break-all" }}>
+                  <strong>{props.detail.path}</strong>
+                </div>
+                <div className="muted">
+                  {props.detail.agentName} · Round {props.detail.roundNumber} · Turn {props.detail.turnNumber}
+                </div>
+                <div className="muted">
+                  {props.detail.createdAt ? new Date(props.detail.createdAt).toLocaleString() : ""}
+                  {props.detail.scope === "agent" ? ` · seat file${props.detail.targetSeatName ? ` · ${props.detail.targetSeatName}` : ""}` : " · shared file"}
+                  {props.action === "read" ? ` · ${formatFileActivityEntryAction(props.detail.action)}` : ""}
+                </div>
+                {props.action === "write" ? (
+                  <div className="muted">
+                    {`v${props.detail.beforeVersion ?? 0} -> v${props.detail.afterVersion ?? 0}`}
+                    {props.detail.writeMode ? ` · ${props.detail.writeMode}` : ""}
+                    {props.detail.targetHeading ? ` · ${props.detail.targetHeading}` : ""}
+                    {props.detail.reason ? ` · ${props.detail.reason}` : ""}
+                  </div>
+                ) : null}
+              </div>
+              {props.action === "write" ? (
+                <div className="muted">
+                  <span style={{ color: "rgb(22, 163, 74)" }}>+{props.detail.summary.added}</span>
+                  {" / "}
+                  <span style={{ color: "rgb(220, 38, 38)" }}>-{props.detail.summary.deleted}</span>
+                  {" / "}
+                  <span style={{ color: "rgb(37, 99, 235)" }}>~{props.detail.summary.changed}</span>
+                </div>
+              ) : null}
+              {props.action === "write" ? (
+                <TwoPaneDiffView rows={props.detail.diffRows} emptyText="本次写入没有产生可展示的差异。" height="min(68dvh, calc(100dvh - 240px))" />
+              ) : (
+                <div className="panel stack" style={{ minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+                  <div className="muted">本次读取没有 diff，仅展示读取对象信息。</div>
+                  <div>路径：{props.detail.path}</div>
+                  <div>操作：{formatFileActivityEntryAction(props.detail.action)}</div>
+                  <div>范围：{props.detail.scope === "agent" ? "seat file" : "shared file"}</div>
+                  <div>执行者：{props.detail.agentName}</div>
+                </div>
+              )}
+            </Fragment>
+          ) : null}
+        </div>
       </div>
     </div>
   );
@@ -2319,9 +2577,9 @@ function MemoryDialog(props: {
   return (
     <div role="dialog" aria-modal="true" onClick={onClose} style={{ ...MODAL_OVERLAY_STYLE, alignItems: "flex-start", zIndex: 1000 }}>
       <div className="panel stack" onClick={MODAL_PANEL_CLICK_STOP} style={{ width: "min(980px, 100%)" }}>
-        <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="row debateModalHeader" style={{ justifyContent: "space-between" }}>
           <strong>{title || "记忆文件"}</strong>
-          <div className="row" style={{ gap: 8 }}>
+          <div className="row debateModalActions" style={{ gap: 8 }}>
             {target ? (
               <>
                 <button className="btn" type="button" disabled={loading} onClick={onShowHead} title="显示开头（适合查看 jsonl 的前半部分）">
@@ -2351,7 +2609,7 @@ function MemoryDialog(props: {
             内容过大已截断：显示{truncation.slice === "tail" ? "末尾" : "开头"} {truncation.shownChars}/{truncation.totalChars} chars
           </div>
         ) : null}
-        <div ref={contentRef} className="panel" style={{ height: "70vh", overflowY: "auto" }}>
+        <div ref={contentRef} className="panel" style={{ height: "min(72dvh, calc(100dvh - 220px))", overflowY: "auto" }}>
           {loading ? (
             <div className="muted">加载中...</div>
           ) : path.toLowerCase().endsWith(".md") ? (
@@ -2648,6 +2906,17 @@ export default function DebateDetailPage() {
   const [diffToVersion, setDiffToVersion] = useState<number | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffRows, setDiffRows] = useState<QuestionDiffRow[]>([]);
+  const [fileActivityAction, setFileActivityAction] = useState<FileActivityAction>("write");
+  const [fileActivityCounts, setFileActivityCounts] = useState<FileActivityCounts>({ read: 0, write: 0 });
+  const [fileActivityLoading, setFileActivityLoading] = useState(false);
+  const [fileActivityLoadingMore, setFileActivityLoadingMore] = useState(false);
+  const [fileActivityError, setFileActivityError] = useState("");
+  const [fileActivityItems, setFileActivityItems] = useState<FileActivityListItem[]>([]);
+  const [fileActivityHasMore, setFileActivityHasMore] = useState(false);
+  const [selectedFileActivityId, setSelectedFileActivityId] = useState("");
+  const [fileActivityDetailLoading, setFileActivityDetailLoading] = useState(false);
+  const [fileActivityDetail, setFileActivityDetail] = useState<FileActivityDetail | null>(null);
+  const fileActivityItemsRef = useRef<FileActivityListItem[]>([]);
   const [saveSuccessOpen, setSaveSuccessOpen] = useState(false);
   const [saveSuccessVersion, setSaveSuccessVersion] = useState<number | null>(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -2768,7 +3037,7 @@ export default function DebateDetailPage() {
   const leftTabStorageKey = useMemo(() => (id ? `debate_left_tab_${id}` : ""), [id]);
 
   function isLeftTab(value: unknown): value is LeftTab {
-    return value === "status" || value === "participants" || value === "workflow" || value === "memory";
+    return value === "status" || value === "participants" || value === "workflow" || value === "memory" || value === "file_activity";
   }
 
   useEffect(() => {
@@ -3328,134 +3597,7 @@ export default function DebateDetailPage() {
   }, [id, voteLoadingRound, votePathsByRound]);
 
   function buildQuestionCompareRows(oldText: string, newText: string) {
-    const oldLines = oldText.replace(/\r\n/g, "\n").split("\n");
-    const newLines = newText.replace(/\r\n/g, "\n").split("\n");
-
-    let prefix = 0;
-    while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) {
-      prefix += 1;
-    }
-    let suffix = 0;
-    while (
-      suffix < oldLines.length - prefix &&
-      suffix < newLines.length - prefix &&
-      oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
-    ) {
-      suffix += 1;
-    }
-
-    const headOld = oldLines.slice(0, prefix);
-    const headNew = newLines.slice(0, prefix);
-    const midOld = oldLines.slice(prefix, oldLines.length - suffix);
-    const midNew = newLines.slice(prefix, newLines.length - suffix);
-    const tailOld = oldLines.slice(oldLines.length - suffix);
-    const tailNew = newLines.slice(newLines.length - suffix);
-
-    type Row =
-      | { kind: "skip"; leftSkip: number; rightSkip: number }
-      | {
-          kind: "row";
-          type: "same" | "add" | "del" | "change";
-          leftNo: number | null;
-          rightNo: number | null;
-          leftText: string;
-          rightText: string;
-        };
-
-    const rows: Row[] = [];
-    const MAX_CONTEXT = 60;
-    const KEEP = 18;
-
-    let oldNo = 1;
-    let newNo = 1;
-
-    function pushSameLines(lines: string[]) {
-      for (const line of lines) {
-        rows.push({
-          kind: "row",
-          type: "same",
-          leftNo: oldNo,
-          rightNo: newNo,
-          leftText: line,
-          rightText: line
-        });
-        oldNo += 1;
-        newNo += 1;
-      }
-    }
-
-    function pushContext(lines: string[]) {
-      if (lines.length <= MAX_CONTEXT) {
-        pushSameLines(lines);
-        return;
-      }
-      const head = lines.slice(0, KEEP);
-      const tail = lines.slice(lines.length - KEEP);
-      pushSameLines(head);
-      const skipped = lines.length - head.length - tail.length;
-      rows.push({ kind: "skip", leftSkip: skipped, rightSkip: skipped });
-      oldNo += skipped;
-      newNo += skipped;
-      pushSameLines(tail);
-    }
-
-    pushContext(headOld);
-
-    const maxMid = Math.max(midOld.length, midNew.length);
-    for (let i = 0; i < maxMid; i += 1) {
-      const left = midOld[i];
-      const right = midNew[i];
-      if (typeof left === "string" && typeof right === "string") {
-        if (left === right) {
-          rows.push({
-            kind: "row",
-            type: "same",
-            leftNo: oldNo,
-            rightNo: newNo,
-            leftText: left,
-            rightText: right
-          });
-        } else {
-          rows.push({
-            kind: "row",
-            type: "change",
-            leftNo: oldNo,
-            rightNo: newNo,
-            leftText: left,
-            rightText: right
-          });
-        }
-        oldNo += 1;
-        newNo += 1;
-      } else if (typeof left === "string") {
-        rows.push({
-          kind: "row",
-          type: "del",
-          leftNo: oldNo,
-          rightNo: null,
-          leftText: left,
-          rightText: ""
-        });
-        oldNo += 1;
-      } else if (typeof right === "string") {
-        rows.push({
-          kind: "row",
-          type: "add",
-          leftNo: null,
-          rightNo: newNo,
-          leftText: "",
-          rightText: right
-        });
-        newNo += 1;
-      }
-    }
-
-    pushContext(tailOld);
-    // ensure symmetry in case of weird split
-    void headNew;
-    void tailNew;
-
-    return rows;
+    return buildLineDiffRows(oldText, newText);
   }
 
   async function openQuestionHistory() {
@@ -3542,6 +3684,92 @@ export default function DebateDetailPage() {
     }
   }, [diffFromVersion, diffToVersion, id, questionHistory]);
 
+  const loadFileActivity = useCallback(
+    async (mode: "reset" | "more" = "reset") => {
+      if (!id) return;
+      const beforeId = mode === "more" ? fileActivityItemsRef.current.at(-1)?.id ?? "" : "";
+      if (mode === "more" && !beforeId) return;
+      if (mode === "reset") {
+        setFileActivityLoading(true);
+        setFileActivityError("");
+      } else {
+        setFileActivityLoadingMore(true);
+      }
+      try {
+        const query = new URLSearchParams({
+          action: fileActivityAction,
+          limit: "40"
+        });
+        if (beforeId) query.set("beforeId", beforeId);
+        const response = await fetch(`/api/debates/${id}/file-activity?${query.toString()}`, { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          if (mode === "reset") {
+            setFileActivityError(payload.error?.message ?? "加载失败");
+            setFileActivityItems([]);
+            setFileActivityHasMore(false);
+            setSelectedFileActivityId("");
+            setFileActivityDetail(null);
+          }
+          return;
+        }
+        const nextItems = Array.isArray(payload.data) ? (payload.data as FileActivityListItem[]) : [];
+        const nextCounts =
+          payload.meta?.counts && typeof payload.meta.counts === "object"
+            ? {
+                read: Number(payload.meta.counts.read ?? 0) || 0,
+                write: Number(payload.meta.counts.write ?? 0) || 0
+              }
+            : { read: 0, write: 0 };
+        setFileActivityCounts(nextCounts);
+        setFileActivityItems((current) => (mode === "reset" ? nextItems : [...current, ...nextItems]));
+        setFileActivityHasMore(Boolean(payload.meta?.hasMore));
+        if (mode === "reset") {
+          setSelectedFileActivityId("");
+          setFileActivityDetail(null);
+          setFileActivityDetailLoading(false);
+        }
+      } finally {
+        if (mode === "reset") setFileActivityLoading(false);
+        if (mode === "more") setFileActivityLoadingMore(false);
+      }
+    },
+    [fileActivityAction, id]
+  );
+
+  const loadFileActivityDetail = useCallback(
+    async (entryId: string) => {
+      if (!id || !entryId) {
+        setFileActivityDetail(null);
+        return;
+      }
+      setFileActivityDetailLoading(true);
+      try {
+        const response = await fetch(`/api/debates/${id}/file-activity?entryId=${encodeURIComponent(entryId)}`, { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setFileActivityDetail(null);
+          return;
+        }
+        setFileActivityDetail((payload.data as FileActivityDetail) ?? null);
+      } finally {
+        setFileActivityDetailLoading(false);
+      }
+    },
+    [id]
+  );
+
+  useEffect(() => {
+    if (leftTab !== "file_activity") return;
+    void loadFileActivity("reset");
+  }, [fileActivityAction, leftTab, loadFileActivity]);
+
+  useEffect(() => {
+    if (leftTab !== "file_activity") return;
+    if (!selectedFileActivityId) return;
+    void loadFileActivityDetail(selectedFileActivityId);
+  }, [leftTab, loadFileActivityDetail, selectedFileActivityId]);
+
   useEffect(() => {
     if (!id) return;
     async function loadAgents() {
@@ -3567,6 +3795,10 @@ export default function DebateDetailPage() {
   useEffect(() => {
     liveMessageNumberRef.current = liveMessageNumber;
   }, [liveMessageNumber]);
+
+  useEffect(() => {
+    fileActivityItemsRef.current = fileActivityItems;
+  }, [fileActivityItems]);
 
   useEffect(() => {
     const debateStatus = debate?.status ?? "";
@@ -4424,14 +4656,16 @@ export default function DebateDetailPage() {
     { id: "status", label: "辩论状态", icon: "status" },
     { id: "participants", label: "参与者", icon: "participants" },
     { id: "workflow", label: "Workflow", icon: "workflow" },
-    { id: "memory", label: "文件", icon: "memory" }
+    { id: "memory", label: "文件", icon: "memory" },
+    { id: "file_activity", label: "文件记录", icon: "file_activity" }
   ];
 
   const leftTabTitle: Record<LeftTab, string> = {
     status: "辩论状态",
     participants: "参与者",
     workflow: "Workflow 规则",
-    memory: "文件"
+    memory: "文件",
+    file_activity: "文件记录"
   };
 
   allFilesActionsRef.current.openVirtualPath = (virtualPath: string) => void openDebateFileFromIndex(virtualPath);
@@ -4457,7 +4691,7 @@ export default function DebateDetailPage() {
   };
 
   return (
-    <div className="grid" style={{ gridTemplateColumns: "52px 320px 2fr 1fr", alignItems: "start" }}>
+    <div className="grid debatePageGrid" style={{ alignItems: "start" }}>
       {toast ? (
         <div
           className={`toast ${toast.type === "success" ? "toast-success" : "toast-error"}`}
@@ -4547,6 +4781,16 @@ export default function DebateDetailPage() {
           setDiffToVersion(questionHistory.at(-1)?.version ?? version);
         }}
       />
+      <FileActivityDetailDialog
+        open={leftTab === "file_activity" && Boolean(selectedFileActivityId)}
+        action={fileActivityAction}
+        detailLoading={fileActivityDetailLoading}
+        detail={fileActivityDetail}
+        onClose={() => {
+          setSelectedFileActivityId("");
+          setFileActivityDetail(null);
+        }}
+      />
       <FileInfoDialog
         open={allFileInfoOpen}
         loading={allFileInfoLoading}
@@ -4589,11 +4833,10 @@ export default function DebateDetailPage() {
       />
 
       <nav
-        className="panel"
+        className="panel debateSidebarRail debateViewportPanel"
         aria-label="左侧栏"
         style={{
           padding: 6,
-          maxHeight: "calc(100vh - 140px)",
           overflowY: "auto"
         }}
       >
@@ -4623,7 +4866,7 @@ export default function DebateDetailPage() {
         </div>
       </nav>
 
-      <section className="panel stack" style={{ height: "calc(100vh - 140px)", overflow: "hidden" }}>
+      <section className="panel stack debateSidebarPanel debateViewportPanel" style={{ overflow: "hidden" }}>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <strong style={{ fontSize: 14 }}>{leftTabTitle[leftTab]}</strong>
           <Link className="btn" href="/debates">
@@ -4684,6 +4927,28 @@ export default function DebateDetailPage() {
             loading={workflowRulesState.loading}
             onRefresh={() => void loadWorkflowRules()}
           />
+        ) : leftTab === "file_activity" ? (
+          debate.isOwner ? (
+            <FileActivityPanel
+              action={fileActivityAction}
+              counts={fileActivityCounts}
+              loading={fileActivityLoading}
+              error={fileActivityError}
+              items={fileActivityItems}
+              hasMore={fileActivityHasMore}
+              loadingMore={fileActivityLoadingMore}
+              onChangeAction={(action) => {
+                setFileActivityAction(action);
+                setSelectedFileActivityId("");
+                setFileActivityDetail(null);
+              }}
+              onRefresh={() => void loadFileActivity("reset")}
+              onLoadMore={() => void loadFileActivity("more")}
+              onSelectEntry={(entryId) => setSelectedFileActivityId(entryId)}
+            />
+          ) : (
+            <div className="muted">公开辩论不支持查看文件记录。</div>
+          )
         ) : debate.isOwner ? (
           <DebateFilesPanel
             selectedCount={selectedAllFileVirtualPaths.length}
@@ -4711,29 +4976,31 @@ export default function DebateDetailPage() {
         )}
       </section>
 
-      <DebateViewerPanel
-        viewer={viewer}
-        followLatest={followLatest}
-        activeTurnId={activeTurnId}
-        activeVoteRound={activeVoteRound}
-        agentCount={agentCount}
-        liveAgentName={liveAgentName}
-        liveDisplayRound={liveDisplayRound}
-        liveDisplayMessage={liveDisplayMessage}
-        liveStatus={liveStatus}
-        liveText={liveText}
-        viewerScrollRef={viewerScrollRef}
-        onToggleFollowLatest={() => setFollowLatest((current) => !current)}
-        onReturnToCurrent={() => {
-          setActiveLive(true);
-          setFollowLatest(true);
-          setActiveTurnId("");
-          setActiveVoteRound(null);
-        }}
-        onOpenDiagnostics={(turnNumber) => void openGenerationDiagnostics(turnNumber)}
-      />
+      <div className="debateViewerShell">
+        <DebateViewerPanel
+          viewer={viewer}
+          followLatest={followLatest}
+          activeTurnId={activeTurnId}
+          activeVoteRound={activeVoteRound}
+          agentCount={agentCount}
+          liveAgentName={liveAgentName}
+          liveDisplayRound={liveDisplayRound}
+          liveDisplayMessage={liveDisplayMessage}
+          liveStatus={liveStatus}
+          liveText={liveText}
+          viewerScrollRef={viewerScrollRef}
+          onToggleFollowLatest={() => setFollowLatest((current) => !current)}
+          onReturnToCurrent={() => {
+            setActiveLive(true);
+            setFollowLatest(true);
+            setActiveTurnId("");
+            setActiveVoteRound(null);
+          }}
+          onOpenDiagnostics={(turnNumber) => void openGenerationDiagnostics(turnNumber)}
+        />
+      </div>
 
-      <section className="panel stack" style={{ maxHeight: "calc(100vh - 140px)", overflowY: "auto" }}>
+      <section className="panel stack debateRoundsPanel debateViewportPanel" style={{ overflowY: "auto" }}>
         <div className="row" style={{ gap: 8 }}>
           {debate.isOwner && ["pending", "running", "paused"].includes(debate.status) ? (
             <button className="btn btn-primary" onClick={() => void toggleRun()}>

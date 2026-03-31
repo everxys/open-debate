@@ -91,6 +91,16 @@ export function getPool() {
   return globalPool.openDebatePool;
 }
 
+export async function ensureDbReady() {
+  const pool = getPool();
+  if (!globalPool.openDebateSchemaReady) {
+    globalPool.openDebateSchemaReady = ensureSchema(pool);
+  }
+  await globalPool.openDebateSchemaReady;
+  scheduleDebateRuntimeRecovery();
+  return pool;
+}
+
 async function ensureSchema(pool: Pool) {
   // Keep this minimal: make new columns backward-compatible with existing volumes.
   await pool.query("alter table users add column if not exists role text not null default 'user'");
@@ -107,6 +117,174 @@ async function ensureSchema(pool: Pool) {
   await pool.query("alter table debates add column if not exists runtime_notice_kind text null");
   await pool.query("alter table debates add column if not exists runtime_notice_message text null");
   await pool.query("alter table debates add column if not exists runtime_notice_at timestamptz null");
+  await pool.query(`
+    do $$
+    begin
+      if exists (
+        select 1 from information_schema.tables
+         where table_schema = 'public' and table_name = 'debate_files'
+      ) then
+        alter table debate_files add column if not exists version int not null default 1;
+      end if;
+    end $$;
+  `);
+  await pool.query(`
+    create table if not exists debate_file_versions (
+      id uuid primary key,
+      debate_id uuid not null,
+      path text not null,
+      version int not null,
+      content text not null,
+      mode text not null,
+      reason text null,
+      base_version int null,
+      created_by_debate_agent_id uuid null,
+      created_at timestamptz not null,
+      unique (debate_id, path, version)
+    )
+  `);
+  await pool.query("create index if not exists idx_debate_file_versions_debate_id_path_version on debate_file_versions (debate_id, path, version desc)");
+  await pool.query(`
+    create table if not exists debate_file_activity_logs (
+      id uuid primary key,
+      debate_id uuid not null,
+      debate_agent_id uuid not null,
+      turn_number int not null,
+      round_number int not null,
+      action text not null,
+      scope text not null,
+      path text not null,
+      target_debate_agent_id uuid null,
+      write_mode text null,
+      before_version int null,
+      after_version int null,
+      before_content text null,
+      after_content text null,
+      target_heading text null,
+      reason text null,
+      created_at timestamptz not null
+    )
+  `);
+  await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_created_at on debate_file_activity_logs (debate_id, created_at desc, id desc)");
+  await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_action_created_at on debate_file_activity_logs (debate_id, action, created_at desc, id desc)");
+  await pool.query(`
+    do $$
+    begin
+      if not exists (
+        select 1 from pg_constraint where conname = 'debate_file_versions_debate_id_fkey'
+      ) then
+        alter table debate_file_versions
+          add constraint debate_file_versions_debate_id_fkey
+          foreign key (debate_id) references debates(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'debate_file_versions_created_by_debate_agent_id_fkey'
+      ) then
+        alter table debate_file_versions
+          add constraint debate_file_versions_created_by_debate_agent_id_fkey
+          foreign key (created_by_debate_agent_id) references debate_agents(id) on delete set null;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'debate_file_activity_logs_debate_id_fkey'
+      ) then
+        alter table debate_file_activity_logs
+          add constraint debate_file_activity_logs_debate_id_fkey
+          foreign key (debate_id) references debates(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'debate_file_activity_logs_debate_agent_id_fkey'
+      ) then
+        alter table debate_file_activity_logs
+          add constraint debate_file_activity_logs_debate_agent_id_fkey
+          foreign key (debate_agent_id) references debate_agents(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'debate_file_activity_logs_target_debate_agent_id_fkey'
+      ) then
+        alter table debate_file_activity_logs
+          add constraint debate_file_activity_logs_target_debate_agent_id_fkey
+          foreign key (target_debate_agent_id) references debate_agents(id) on delete set null;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'debate_file_activity_logs_action_check'
+      ) then
+        alter table debate_file_activity_logs
+          add constraint debate_file_activity_logs_action_check
+          check (action in ('read', 'write', 'search', 'list', 'stat'));
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'debate_file_activity_logs_scope_check'
+      ) then
+        alter table debate_file_activity_logs
+          add constraint debate_file_activity_logs_scope_check
+          check (scope in ('debate', 'agent'));
+      end if;
+    exception when undefined_table then
+      null;
+    when duplicate_object then
+      null;
+    end $$;
+  `);
+  await pool.query(`
+    do $$
+    begin
+      if exists (
+        select 1 from pg_constraint where conname = 'debate_file_activity_logs_action_check'
+      ) then
+        alter table debate_file_activity_logs
+          drop constraint debate_file_activity_logs_action_check;
+      end if;
+      alter table debate_file_activity_logs
+        add constraint debate_file_activity_logs_action_check
+        check (action in ('read', 'write', 'search', 'list', 'stat'));
+    exception when undefined_table then
+      null;
+    when duplicate_object then
+      null;
+    end $$;
+  `);
+  await pool.query(`
+    do $$
+    begin
+      if exists (
+        select 1 from information_schema.tables
+         where table_schema = 'public' and table_name = 'debate_files'
+      ) then
+        insert into debate_file_versions (
+          id,
+          debate_id,
+          path,
+          version,
+          content,
+          mode,
+          reason,
+          base_version,
+          created_by_debate_agent_id,
+          created_at
+        )
+        select
+          gen_random_uuid(),
+          f.debate_id,
+          f.path,
+          1,
+          f.content,
+          'backfill',
+          'schema backfill',
+          null,
+          null,
+          coalesce(f.updated_at, f.created_at, now())
+        from debate_files f
+        where f.path like 'final/%'
+          and not exists (
+            select 1
+              from debate_file_versions v
+             where v.debate_id = f.debate_id
+               and v.path = f.path
+               and v.version = 1
+          );
+      end if;
+    end $$;
+  `);
   await pool.query(`
     create table if not exists retrieval_configs (
       id uuid primary key,
@@ -196,12 +374,7 @@ async function ensureSchema(pool: Pool) {
 }
 
 export async function query<T extends QueryResultRow>(sql: string, params: unknown[] = []) {
-  const pool = getPool();
-  if (!globalPool.openDebateSchemaReady) {
-    globalPool.openDebateSchemaReady = ensureSchema(pool);
-  }
-  await globalPool.openDebateSchemaReady;
-  scheduleDebateRuntimeRecovery();
+  const pool = await ensureDbReady();
 
   try {
     return await pool.query<T>(sql, params);
