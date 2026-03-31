@@ -34,3 +34,6 @@ dist/
 *.tsbuildinfo
 
 .npm-cache
+
+## plugin
+.VSCodeCounter/
