@@ -1,7 +1,7 @@
 import { decryptSecret, encryptSecret, maskSecret } from "@/lib/crypto";
 import { getPool, query } from "@/lib/db";
 import { AppError } from "@/lib/http";
-import { readSession } from "@/lib/session";
+import { requireSessionUser } from "@/lib/auth";
 import type { AgentRecord, Provider } from "@/lib/types";
 import {
   agentFileDeleteSchema,
@@ -59,13 +59,6 @@ function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
   };
 }
 
-/** Require authenticated session, throw if missing */
-async function requireSessionUser() {
-  const session = await readSession();
-  if (!session) throw new AppError("AUTH_REQUIRED", 401, "Authentication required");
-  return session;
-}
-
 /** Resolve API endpoint URL for provider health check */
 function resolveTestUrl(provider: Provider, baseUrl: string) {
   const normalized = baseUrl.replace(/\/+$/, "");
@@ -88,104 +81,124 @@ function resolveTestUrlCandidates(provider: Provider, baseUrl: string) {
   return Array.from(new Set(candidates)).map((c) => resolveTestUrl(provider, c));
 }
 
+function buildProviderRequestHeaders(provider: Provider, apiKey: string) {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (provider === "openai") {
+    headers.set("Authorization", `Bearer ${apiKey}`);
+  } else {
+    headers.set("x-api-key", apiKey);
+    headers.set("anthropic-version", "2023-06-01");
+  }
+  return headers;
+}
+
+function parseProviderResponseBody(contentType: string, text: string) {
+  if (!contentType.includes("application/json")) return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+async function callProviderEndpoint(input: {
+  provider: Provider;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  buildBody: (provider: Provider, model: string) => string;
+}) {
+  const urls = resolveTestUrlCandidates(input.provider, input.baseUrl);
+  const headers = buildProviderRequestHeaders(input.provider, input.apiKey);
+
+  for (let index = 0; index < urls.length; index += 1) {
+    const url = urls[index];
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: input.buildBody(input.provider, input.model)
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new AppError("AI_NETWORK_ERROR", 502, `Provider request failed for ${url}: ${message}`);
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    const text = await response.text().catch(() => "");
+    const parsed = parseProviderResponseBody(contentType, text);
+    const hasNextCandidate = index < urls.length - 1;
+    if (response.status === 404 && hasNextCandidate) continue;
+
+    return {
+      url,
+      status: response.status,
+      ok: response.ok,
+      contentType,
+      text,
+      parsed,
+      statusText: response.statusText
+    };
+  }
+
+  throw new AppError("AI_API_ERROR", 502, "Provider request failed");
+}
+
+function extractProviderErrorMessage(parsed: unknown) {
+  if (!parsed || typeof parsed !== "object") return null;
+  const body = parsed as Record<string, unknown>;
+  const openAiError = body.error as Record<string, unknown> | undefined;
+  const anthropicError = (body as { error?: Record<string, unknown> }).error;
+  return (
+    (typeof openAiError?.message === "string" && openAiError.message) ||
+    (typeof anthropicError?.message === "string" && anthropicError.message) ||
+    (typeof body.message === "string" && body.message) ||
+    null
+  );
+}
+
 async function callProviderHealthCheck(input: {
   provider: Provider;
   baseUrl: string;
   apiKey: string;
   model: string;
 }) {
-  const urls = resolveTestUrlCandidates(input.provider, input.baseUrl);
-  const headers = new Headers({ "Content-Type": "application/json" });
+  const response = await callProviderEndpoint({
+    ...input,
+    buildBody: (provider, model) =>
+      provider === "openai"
+        ? JSON.stringify({
+            model,
+            messages: [{ role: "user", content: "Reply with OK" }],
+            max_tokens: 8,
+            stream: false
+          })
+        : JSON.stringify({
+            model,
+            max_tokens: 16,
+            messages: [{ role: "user", content: "Reply with OK" }]
+          })
+  });
 
-  if (input.provider === "openai") {
-    headers.set("Authorization", `Bearer ${input.apiKey}`);
-  } else {
-    headers.set("x-api-key", input.apiKey);
-    headers.set("anthropic-version", "2023-06-01");
+  if (response.ok) {
+    return {
+      connected: true,
+      message: `${input.provider} API is reachable`
+    };
   }
 
-  let lastError: AppError | null = null;
-
-  for (let index = 0; index < urls.length; index += 1) {
-    const url = urls[index];
-    let response: Response;
-
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers,
-        body:
-          input.provider === "openai"
-            ? JSON.stringify({
-                model: input.model,
-                messages: [{ role: "user", content: "Reply with OK" }],
-                max_tokens: 8,
-                stream: false
-              })
-            : JSON.stringify({
-                model: input.model,
-                max_tokens: 16,
-                messages: [{ role: "user", content: "Reply with OK" }]
-              })
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new AppError(
-        "AI_NETWORK_ERROR",
-        502,
-        `Provider request failed for ${url}: ${message}`
-      );
-    }
-
-    if (response.ok) {
-      return {
-        connected: true,
-        message: `${input.provider} API is reachable`
-      };
-    }
-
-    const contentType = response.headers.get("content-type") ?? "";
-    const text = await response.text();
-    let extractedMessage: string | null = null;
-
-    if (contentType.includes("application/json")) {
-      try {
-        const parsed = JSON.parse(text) as Record<string, unknown>;
-        const openAiError = parsed.error as Record<string, unknown> | undefined;
-        const anthropicError = (parsed as { error?: Record<string, unknown> }).error;
-
-        extractedMessage =
-          (typeof openAiError?.message === "string" && openAiError.message) ||
-          (typeof anthropicError?.message === "string" && anthropicError.message) ||
-          (typeof parsed.message === "string" && parsed.message) ||
-          null;
-      } catch {
-        // ignore
-      }
-    }
-
-    const rawDetails = contentType.includes("application/json")
-      ? text.slice(0, 400)
-      : text.slice(0, 200);
-    const details = extractedMessage ?? rawDetails;
-
-    lastError = new AppError(
-      "AI_API_ERROR",
-      502,
-      `Provider test failed: ${input.provider} ${url} -> ${response.status} ${
-        details || response.statusText
-      }`
-    );
-
-    const hasNextCandidate = index < urls.length - 1;
-    if (response.status === 404 && hasNextCandidate) {
-      continue;
-    }
-
-    throw lastError;
-  }
-
-  throw lastError ?? new AppError("AI_API_ERROR", 502, "Provider test failed");
+  const rawDetails = response.contentType.includes("application/json")
+    ? response.text.slice(0, 400)
+    : response.text.slice(0, 200);
+  const details = extractProviderErrorMessage(response.parsed) ?? rawDetails;
+  throw new AppError(
+    "AI_API_ERROR",
+    502,
+    `Provider test failed: ${input.provider} ${response.url} -> ${response.status} ${
+      details || response.statusText
+    }`
+  );
 }
 
 function extractUsage(provider: Provider, parsed: unknown) {
@@ -202,10 +215,10 @@ function extractUsage(provider: Provider, parsed: unknown) {
     return { promptTokens: prompt, completionTokens: completion, totalTokens: total };
   }
 
-  const input = typeof usage.input_tokens === "number" ? usage.input_tokens : null;
-  const output = typeof usage.output_tokens === "number" ? usage.output_tokens : null;
-  if (input === null && output === null) return null;
-  return { inputTokens: input, outputTokens: output };
+  const inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : null;
+  const outputTokens = typeof usage.output_tokens === "number" ? usage.output_tokens : null;
+  if (inputTokens === null && outputTokens === null) return null;
+  return { inputTokens, outputTokens };
 }
 
 async function callProviderDebug(input: {
@@ -214,88 +227,49 @@ async function callProviderDebug(input: {
   apiKey: string;
   model: string;
 }) {
-  const urls = resolveTestUrlCandidates(input.provider, input.baseUrl);
-  const headers = new Headers({ "Content-Type": "application/json" });
+  const response = await callProviderEndpoint({
+    ...input,
+    buildBody: (provider, model) =>
+      provider === "openai"
+        ? JSON.stringify({
+            model,
+            messages: [{ role: "user", content: "OK" }],
+            // Keep this fast: we only need the provider's raw JSON envelope + usage (if present).
+            max_tokens: 1,
+            stream: false,
+            temperature: 0
+          })
+        : JSON.stringify({
+            model,
+            max_tokens: 1,
+            messages: [{ role: "user", content: "OK" }]
+          })
+  });
 
-  if (input.provider === "openai") {
-    headers.set("Authorization", `Bearer ${input.apiKey}`);
-  } else {
-    headers.set("x-api-key", input.apiKey);
-    headers.set("anthropic-version", "2023-06-01");
+  if (response.ok) {
+    const usage = extractUsage(input.provider, response.parsed);
+    return {
+      ok: true,
+      provider: input.provider,
+      url: response.url,
+      status: response.status,
+      hasUsage: Boolean(usage),
+      usage,
+      json: response.parsed,
+      rawText: response.text.length > 80_000 ? response.text.slice(0, 80_000) : response.text
+    };
   }
 
-  let lastError: AppError | null = null;
-
-  for (let index = 0; index < urls.length; index += 1) {
-    const url = urls[index];
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers,
-        body:
-          input.provider === "openai"
-            ? JSON.stringify({
-                model: input.model,
-                messages: [{ role: "user", content: "OK" }],
-                // Keep this fast: we only need the provider's raw JSON envelope + usage (if present).
-                max_tokens: 1,
-                stream: false,
-                temperature: 0
-              })
-            : JSON.stringify({
-                model: input.model,
-                max_tokens: 1,
-                messages: [{ role: "user", content: "OK" }]
-              })
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new AppError("AI_NETWORK_ERROR", 502, `Provider request failed for ${url}: ${message}`);
-    }
-
-    const contentType = response.headers.get("content-type") ?? "";
-    const text = await response.text().catch(() => "");
-
-    const parsed =
-      contentType.includes("application/json") ? ((() => {
-        try {
-          return JSON.parse(text) as unknown;
-        } catch {
-          return null;
-        }
-      })()) : null;
-
-    if (response.ok) {
-      const usage = extractUsage(input.provider, parsed);
-      return {
-        ok: true,
-        provider: input.provider,
-        url,
-        status: response.status,
-        hasUsage: Boolean(usage),
-        usage,
-        json: parsed,
-        rawText: text.length > 80_000 ? text.slice(0, 80_000) : text
-      };
-    }
-
-    const details = contentType.includes("application/json") ? text.slice(0, 400) : text.slice(0, 200);
-    lastError = new AppError(
-      "AI_API_ERROR",
-      502,
-      `Provider debug failed: ${input.provider} ${url} -> ${response.status} ${details || response.statusText}`
-    );
-
-    const hasNextCandidate = index < urls.length - 1;
-    if (response.status === 404 && hasNextCandidate) {
-      continue;
-    }
-
-    throw lastError;
-  }
-
-  throw lastError ?? new AppError("AI_API_ERROR", 502, "Provider debug failed");
+  const details = response.contentType.includes("application/json")
+    ? response.text.slice(0, 400)
+    : response.text.slice(0, 200);
+  throw new AppError(
+    "AI_API_ERROR",
+    502,
+    `Provider debug failed: ${input.provider} ${response.url} -> ${response.status} ${
+      details || response.statusText
+    }`
+  );
 }
 
 export async function listAgents() {

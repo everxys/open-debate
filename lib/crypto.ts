@@ -2,10 +2,22 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 
 const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 12;
+const DEV_FALLBACK_ENCRYPTION_KEY =
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/** Derive 256-bit key from env or fallback (for dev only) */
+function isProductionEnvironment() {
+  return process.env.NODE_ENV === "production";
+}
+
+/** Derive 256-bit key from env. Only local/dev environments may use the fallback key. */
 function getEncryptionKey(): Buffer {
-  const raw = process.env.ENCRYPTION_KEY ?? "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const raw = process.env.ENCRYPTION_KEY?.trim() || null;
+  if (!raw) {
+    if (isProductionEnvironment()) {
+      throw new Error("ENCRYPTION_KEY must be set in production");
+    }
+    return createHash("sha256").update(DEV_FALLBACK_ENCRYPTION_KEY).digest();
+  }
   return createHash("sha256").update(raw).digest();
 }
 
