@@ -1,5 +1,9 @@
 ## 2026-03-31
 
+- 运行时结构性重构继续推进：`lib/runtime-main.ts` 的 `callProvider()` 已下沉到真实的 `lib/runtime/provider-orchestration.ts`，把 provider prompt 组装、OpenAI / Anthropic tool loop、vote-close 后公告副作用、usage / diagnostics 归一化从主文件迁出；`runtime-main.ts` 继续保留稳定入口转发，对外行为、返回结构、工具调用顺序与投票后续处理保持不变
+- 运行时解环收口：`lib/runtime-main.ts` 不再静态 import `lib/runtime/provider-orchestration.ts`，`callProvider()` 改为懒加载转发，先消除 provider 编排与主运行时之间的运行时循环依赖；后续会继续把共享 helper 从 `runtime-main.ts` 逐步下沉成独立模块
+- 运行时共享层继续下沉：新增 `lib/runtime/provider-shared.ts`，把 provider 编排与主运行时共用的一组低风险 helper 提取出来，包括日志包装、prompt token 估算、输入裁剪、provider tool schema、基础 system prompt、响应格式指令、chunk 推送与选项摘要等；`lib/runtime/provider-orchestration.ts` 不再依赖这些实现仍留在 `runtime-main.ts` 中
+- 运行时结构性重构继续推进：`lib/runtime-main.ts` 把一批低耦合实现下沉到真实子模块，其中 `lib/runtime/context-inline.ts` 现在承接 context access 规则解析、prompt 预算裁剪与 phase snapshot；`lib/runtime/tools.ts` 现在承接官方投票读写流转与 debate 文件写入相关纯 helper。对外行为、投票文案、文件路径、落库顺序与 `runDebate()` 出口保持不变，目标是继续把超长运行时主文件收敛为编排层
 - 修复 recent-turn 窗口与席位数失配：运行时 recent context 之前被 `Math.min(8, ...)` 硬卡到最多 8 条消息，席位数超过 8 时甚至装不下一整轮最新发言；现在 recent window 至少覆盖最近完整一轮，避免大席位辩论里漏掉刚结束轮次的后半段发言
 - 运行时门面化拆分：把超长 `lib/runtime.ts` 整体迁到 `lib/runtime-main.ts`，将 `lib/runtime.ts` 收敛为 `runDebate()` 门面导出；同时新增 `lib/runtime/context-inline.ts`、`lib/runtime/tools.ts`、`lib/runtime/provider-orchestration.ts`、`lib/runtime/boundary-automation.ts` 作为按子域组织的内部出口，先把公共导入路径与文件职责边界拉直，后续再继续把 `runtime-main.ts` 内部实现逐块下沉
 - 安全修复：`lib/crypto.ts` 不再在生产环境静默回退到硬编码默认密钥；现在只有开发/本地环境允许 fallback，生产环境缺少 `ENCRYPTION_KEY` 会直接报错，同时同步更新 `docs/DEPLOYMENT.md` 说明
