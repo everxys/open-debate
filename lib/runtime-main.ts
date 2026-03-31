@@ -4359,11 +4359,15 @@ export async function callProvider(
   const apiKey = decryptSecret(agent.apiKeyEncrypted);
   const promptHardMaxChars = getPromptHardMaxChars(agent);
   const recentTurnMin = await loadContextWindowMinTurnNumberForDebateAgent(userId, debate.id, debateAgentId);
+  const recentTurnLimit = Math.max(
+    Math.max(1, participantCount),
+    Math.min(8, Math.max(4, Math.max(1, participantCount)))
+  );
   const recentTurnRows = await loadRecentTurnRows(
     userId,
     debate.id,
     participantCount,
-    Math.min(8, Math.max(4, Math.max(1, participantCount))),
+    recentTurnLimit,
     recentTurnMin
   );
   const recentTurnsInline = formatRecentTurnsInline(recentTurnRows, participantCount, recentTurnMin);

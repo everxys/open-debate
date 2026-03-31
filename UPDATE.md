@@ -1,5 +1,6 @@
 ## 2026-03-31
 
+- 修复 recent-turn 窗口与席位数失配：运行时 recent context 之前被 `Math.min(8, ...)` 硬卡到最多 8 条消息，席位数超过 8 时甚至装不下一整轮最新发言；现在 recent window 至少覆盖最近完整一轮，避免大席位辩论里漏掉刚结束轮次的后半段发言
 - 运行时门面化拆分：把超长 `lib/runtime.ts` 整体迁到 `lib/runtime-main.ts`，将 `lib/runtime.ts` 收敛为 `runDebate()` 门面导出；同时新增 `lib/runtime/context-inline.ts`、`lib/runtime/tools.ts`、`lib/runtime/provider-orchestration.ts`、`lib/runtime/boundary-automation.ts` 作为按子域组织的内部出口，先把公共导入路径与文件职责边界拉直，后续再继续把 `runtime-main.ts` 内部实现逐块下沉
 - 安全修复：`lib/crypto.ts` 不再在生产环境静默回退到硬编码默认密钥；现在只有开发/本地环境允许 fallback，生产环境缺少 `ENCRYPTION_KEY` 会直接报错，同时同步更新 `docs/DEPLOYMENT.md` 说明
 - Prompt 性能优化（安全收敛版）：`lib/runtime.ts` 继续优化 prompt 装配成本，但明确弃用 retrieval TTL 缓存；`planPromptContext()` 改为一次预分桶后按固定顺序消费，`recent turns` 改成先取结构化 rows、最后再格式化，OpenAI / Anthropic 路径里的 `systemInline` 也收敛成单次构造复用
