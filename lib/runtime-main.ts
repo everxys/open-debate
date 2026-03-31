@@ -3857,6 +3857,7 @@ export async function runDebate(id: string, userId: string) {
         lastKnownPhase = phaseSnapshotBeforeTurn;
       }
       if (debate.maxTurns > 0 && completedSpeakingRounds >= debate.maxTurns) {
+        const consensusReachedBeforeTurn = Boolean(debate.consensusReached);
         const requiresFinalizationPhase = requiresWorkflowFinalizationPhaseForCompletion(workflowBeforeTurn);
         const requiresOutputs = requiresWorkflowOutputsForCompletion(workflowBeforeTurn);
         const earliestCompletionRound = getWorkflowEarliestCompletionRound(workflowBeforeTurn);
@@ -3868,6 +3869,7 @@ export async function runDebate(id: string, userId: string) {
             })
           : [];
         if (
+          consensusReachedBeforeTurn &&
           (!requiresFinalizationPhase || phaseBeforeTurn?.kind === "finalization") &&
           currentRoundNumberBeforeTurn >= earliestCompletionRound &&
           missingDeliverables.length === 0
@@ -3884,6 +3886,8 @@ export async function runDebate(id: string, userId: string) {
           await finishDebate(id, "stopped", `max turns reached before workflow minimum completion round ${earliestCompletionRound}`, {
             phase: lastKnownPhase
           });
+        } else if (!consensusReachedBeforeTurn) {
+          await finishDebate(id, "stopped", "max turns reached before consensus was reached", { phase: lastKnownPhase });
         } else {
           await finishDebate(id, "stopped", "max turns reached before consolidation phase", { phase: lastKnownPhase });
         }

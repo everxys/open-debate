@@ -18,6 +18,8 @@ import {
   FINALIZATION_VOTE_REJECT,
   getWorkflowEarliestFinalizationVoteRound,
   getWorkflowElectionStartRound,
+  isFinalizationApproveChoice,
+  isFinalizationRejectChoice,
   loadDebateWorkflow,
   OfficialVote,
   OpenOfficialVote,
@@ -726,8 +728,8 @@ export async function toolVoteClose(input: { userId: string; debateId: string; p
     for (const ballot of openVote.ballots ?? []) {
       counts.set(ballot.choice, (counts.get(ballot.choice) ?? 0) + 1);
     }
-    const agreeCount = counts.get(FINALIZATION_VOTE_APPROVE) ?? 0;
-    const disagreeCount = counts.get(FINALIZATION_VOTE_REJECT) ?? 0;
+    const agreeCount = (openVote.ballots ?? []).filter((ballot) => isFinalizationApproveChoice(String(ballot.choice ?? ""))).length;
+    const disagreeCount = (openVote.ballots ?? []).filter((ballot) => isFinalizationRejectChoice(String(ballot.choice ?? ""))).length;
     const totalBallots = (openVote.ballots ?? []).length;
     const missingVotes = Math.max(0, input.participantCount - totalBallots);
     const requireUnanimous = workflow?.phaseMachine.transitionRules.finalization.requireUnanimousVote ?? true;

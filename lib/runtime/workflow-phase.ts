@@ -147,9 +147,19 @@ export type ClosedOfficialVote = Extract<OfficialVote, { status: "closed" }>;
 
 export const FINALIZATION_VOTE_APPROVE = "同意进入收束阶段";
 export const FINALIZATION_VOTE_REJECT = "不同意，继续讨论";
+export const LEGACY_FINALIZATION_VOTE_APPROVE = "同意进入 Phase 3";
+export const LEGACY_FINALIZATION_VOTE_REJECT = "不同意，继续 Phase 2";
 
 export function buildFinalizationVoteOptions() {
   return [FINALIZATION_VOTE_APPROVE, FINALIZATION_VOTE_REJECT];
+}
+
+export function isFinalizationApproveChoice(choice: string) {
+  return choice === FINALIZATION_VOTE_APPROVE || choice === LEGACY_FINALIZATION_VOTE_APPROVE;
+}
+
+export function isFinalizationRejectChoice(choice: string) {
+  return choice === FINALIZATION_VOTE_REJECT || choice === LEGACY_FINALIZATION_VOTE_REJECT;
 }
 
 export function safeJsonParse<T>(text: string): T | null {
