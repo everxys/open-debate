@@ -107,6 +107,9 @@ export type DebateWorkflowConfig = {
     requiredFiles?: Array<{
       path?: string;
       ownerRole?: string | null;
+      draftRole?: string | null;
+      reviewRole?: string | null;
+      finalRole?: string | null;
       description?: string | null;
       minChars?: number | null;
       minMarkdownHeadings?: number | null;
@@ -216,6 +219,9 @@ export type NormalizedDebateWorkflow = {
     requiredFiles: Array<{
       path: string;
       ownerRole: string | null;
+      draftRole: WorkflowDeliverableRole | null;
+      reviewRole: WorkflowDeliverableRole | null;
+      finalRole: WorkflowDeliverableRole | null;
       description: string | null;
       minChars: number | null;
       minMarkdownHeadings: number | null;
@@ -261,6 +267,7 @@ export type NormalizedDebateWorkflow = {
   };
 };
 
+export type WorkflowDeliverableRole = "Host" | "Supervisor" | "Specialist";
 export type NormalizedWorkflowRequiredFile = NormalizedDebateWorkflow["deliverables"]["requiredFiles"][number];
 export type NormalizedWorkflowContextAccessRule = NormalizedDebateWorkflow["contextAccess"]["alwaysRead"][number];
 export type NormalizedWorkflowPhaseGateRule = NormalizedDebateWorkflow["contextAccess"]["unlockAfterPhase"][number];
@@ -371,7 +378,9 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
       requiredFiles: [
         {
           path: "final/01-story-core.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "核心卖点、主题、核心冲突、故事承诺",
           minChars: 1200,
           minMarkdownHeadings: 4,
@@ -379,7 +388,9 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         },
         {
           path: "final/02-characters.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "主角、关键配角、反派的人物卡与成长弧",
           minChars: 2200,
           minMarkdownHeadings: 8,
@@ -387,7 +398,9 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         },
         {
           path: "final/03-world-and-rules.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "世界观、关键设定、限制条件、代价与规则",
           minChars: 1800,
           minMarkdownHeadings: 5,
@@ -395,7 +408,9 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         },
         {
           path: "final/04-plot-architecture.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "三幕结构、关键事件、高潮设计、结局方向",
           minChars: 2600,
           minMarkdownHeadings: 7,
@@ -403,7 +418,9 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         },
         {
           path: "final/05-chapter-outline.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "章节级细纲，每章包含目标、冲突、转折、结果与钩子",
           minChars: 5000,
           minMarkdownHeadings: 16,
@@ -411,7 +428,9 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         },
         {
           path: "final/06-foreshadowing-ledger.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "伏笔、埋点、回收位置和作用",
           minChars: 1800,
           minMarkdownHeadings: 6,
@@ -419,7 +438,9 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         },
         {
           path: "final/novel_outline_v2.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "总汇总稿，整合人物、设定、结构与章节细纲",
           minChars: 7000,
           minMarkdownHeadings: 10,
@@ -449,10 +470,17 @@ export function formatRequiredDeliverableSummary(
   file: NormalizedWorkflowRequiredFile,
   style: "plain" | "display" = "plain"
 ) {
+  const roleSummary = [
+    file.draftRole ? `起草：${file.draftRole}` : "",
+    file.reviewRole ? `审查：${file.reviewRole}` : "",
+    file.finalRole ? `定稿：${file.finalRole}` : ""
+  ]
+    .filter(Boolean)
+    .join(" / ");
   if (style === "display") {
     return [
       file.path,
-      file.ownerRole ? `（${file.ownerRole}）` : "",
+      roleSummary ? `（${roleSummary}）` : "",
       file.minChars ? `［至少 ${file.minChars} 字符］` : "",
       file.minMarkdownHeadings ? `［至少 ${file.minMarkdownHeadings} 个标题］` : "",
       file.requiredSnippets.length ? `［包含 ${file.requiredSnippets.join("/")}］` : ""
@@ -460,7 +488,9 @@ export function formatRequiredDeliverableSummary(
   }
 
   const details: string[] = [];
-  if (file.ownerRole) details.push(`owner=${file.ownerRole}`);
+  if (file.draftRole) details.push(`draft=${file.draftRole}`);
+  if (file.reviewRole) details.push(`review=${file.reviewRole}`);
+  if (file.finalRole) details.push(`final=${file.finalRole}`);
   if (file.minChars) details.push(`minChars=${file.minChars}`);
   if (file.minMarkdownHeadings) details.push(`minHeadings=${file.minMarkdownHeadings}`);
   if (file.requiredSnippets.length) details.push(`required=${file.requiredSnippets.join("/")}`);
@@ -473,6 +503,49 @@ function toTrimmedString(value: unknown) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function normalizeWorkflowDeliverableRole(value: unknown): WorkflowDeliverableRole | null {
+  const trimmed = toTrimmedString(value);
+  if (trimmed === "Host" || trimmed === "Supervisor" || trimmed === "Specialist") {
+    return trimmed;
+  }
+  return null;
+}
+
+function resolveRequiredFileRoles(input: {
+  ownerRole: string | null;
+  draftRole: WorkflowDeliverableRole | null;
+  reviewRole: WorkflowDeliverableRole | null;
+  finalRole: WorkflowDeliverableRole | null;
+}) {
+  if (input.draftRole || input.reviewRole || input.finalRole) {
+    return {
+      draftRole: input.draftRole,
+      reviewRole: input.reviewRole,
+      finalRole: input.finalRole
+    };
+  }
+  if (input.ownerRole === "Host") {
+    return {
+      draftRole: "Specialist" as const,
+      reviewRole: "Supervisor" as const,
+      finalRole: "Host" as const
+    };
+  }
+  const normalizedOwner = normalizeWorkflowDeliverableRole(input.ownerRole);
+  if (normalizedOwner) {
+    return {
+      draftRole: normalizedOwner,
+      reviewRole: normalizedOwner === "Supervisor" ? "Host" : "Supervisor",
+      finalRole: normalizedOwner === "Specialist" ? "Specialist" : "Host"
+    };
+  }
+  return {
+    draftRole: null,
+    reviewRole: null,
+    finalRole: null
+  };
 }
 
 function toPositiveInt(value: unknown) {
@@ -846,9 +919,19 @@ function normalizeDeliverables(value: unknown) {
       const fileObj = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : null;
       const path = normalizeWorkflowFilePath(fileObj?.path);
       if (!path) return null;
+      const ownerRole = fileObj?.ownerRole === null ? null : toTrimmedString(fileObj?.ownerRole);
+      const resolvedRoles = resolveRequiredFileRoles({
+        ownerRole,
+        draftRole: normalizeWorkflowDeliverableRole(fileObj?.draftRole),
+        reviewRole: normalizeWorkflowDeliverableRole(fileObj?.reviewRole),
+        finalRole: normalizeWorkflowDeliverableRole(fileObj?.finalRole)
+      });
       return {
         path,
-        ownerRole: fileObj?.ownerRole === null ? null : toTrimmedString(fileObj?.ownerRole),
+        ownerRole,
+        draftRole: resolvedRoles.draftRole,
+        reviewRole: resolvedRoles.reviewRole,
+        finalRole: resolvedRoles.finalRole,
         description: fileObj?.description === null ? null : toTrimmedString(fileObj?.description),
         minChars: toPositiveIntOrNull(fileObj?.minChars),
         minMarkdownHeadings: toPositiveIntOrNull(fileObj?.minMarkdownHeadings),
@@ -865,6 +948,9 @@ function normalizeDeliverables(value: unknown) {
       ): item is {
         path: string;
         ownerRole: string | null;
+        draftRole: WorkflowDeliverableRole | null;
+        reviewRole: WorkflowDeliverableRole | null;
+        finalRole: WorkflowDeliverableRole | null;
         description: string | null;
         minChars: number | null;
         minMarkdownHeadings: number | null;
@@ -1155,6 +1241,9 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
       requiredFiles: normalized.deliverables.requiredFiles.map((file) => ({
         path: file.path,
         ownerRole: file.ownerRole,
+        draftRole: file.draftRole,
+        reviewRole: file.reviewRole,
+        finalRole: file.finalRole,
         description: file.description,
         minChars: file.minChars,
         minMarkdownHeadings: file.minMarkdownHeadings,

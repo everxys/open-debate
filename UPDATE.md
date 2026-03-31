@@ -363,3 +363,4 @@
 - 收敛“文件记录”的写入口径与文案：写入页明确为“AI写入”，不再暗示系统内部写文件也会进入记录；现有 UI 不新增系统写入子 tab，直接保留 `读取 / AI写入` 两级结构。
 - 修正选举投票轮的落盘兜底问题：保存发言时不再只依赖内存里的 `electionBallotSummary`，而是会优先从真实 `votes/open.json` 反查本席位已提交的 ballot；这样即使工具调用摘要在生成链路里丢失，也会稳定展示正式票型和投票理由，而不是退回“仅完成投票”的泛化文案。
 - 修正“文件记录”tab 被自动切换的问题：移除列表加载后的自动跳转逻辑，`读取 / AI写入` 现在只响应用户手动点击，不会因为另一侧有数据就擅自切回去。
+- 三类角色分工写入：`requiredFiles` 新增 `draftRole / reviewRole / finalRole`，旧的 `ownerRole=Host` 会自动归一化成 `Specialist 起草 / Supervisor 审查 / Host 定稿`；runtime 现在会按 `Host / Supervisor / Specialist` 注入不同写作职责与待补写清单，文件记录页也会显示当前写入者角色类型和轻量诊断标签，降低 Host 包办全部 final 文件的倾向。

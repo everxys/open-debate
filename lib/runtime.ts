@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
 import { decryptSecret } from "@/lib/crypto";
+import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type DebateParticipantRoleType } from "@/lib/debate-role-types";
 import { ensureDbReady, query } from "@/lib/db";
 import { emitDebateLiveEvent, setDebateLiveProgress, clearDebateLiveProgress } from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
@@ -12,6 +13,7 @@ import {
   formatRequiredDeliverableSummary,
   safeParseWorkflowJson,
   type NormalizedDebateWorkflow,
+  type NormalizedWorkflowRequiredFile,
   type NormalizedWorkflowContextAccessRule,
   type WorkflowContextAccessScope,
   type WorkflowPhaseKind
@@ -1244,14 +1246,9 @@ function buildBaseSystemPrompt(_agent: AgentRecord, overrideSystemPrompt?: strin
 function buildFileToolInstructions(input: {
   enableVoting: boolean;
   allowedOutputPaths: string[];
-  requiredFiles: Array<{
-    path: string;
-    ownerRole: string | null;
-    description: string | null;
-    minChars: number | null;
-    minMarkdownHeadings: number | null;
-      requiredSnippets: string[];
-    }>;
+  requiredFiles: NormalizedWorkflowRequiredFile[];
+  currentRoleType: DebateParticipantRoleType;
+  pendingRequiredFiles: NormalizedWorkflowRequiredFile[];
   contextAccessLines?: string[];
 }) {
   const allowedPathsText = input.allowedOutputPaths.length > 0 ? input.allowedOutputPaths.join(", ") : "final/, outputs/";
@@ -1285,6 +1282,36 @@ function buildFileToolInstructions(input: {
       }
     }
     lines.push("  - The debate is not complete until every required deliverable has been written.");
+  }
+
+  lines.push("");
+  lines.push(`Current delivery role: ${input.currentRoleType}`);
+  if (input.currentRoleType === "Host") {
+    lines.push("- Host responsibility: decide, unify, merge versions, and produce the final canonical draft.");
+    lines.push("- Do not package every missing first draft yourself. Push Specialists to write and expand missing deliverables first.");
+    lines.push('- Use mode="replace" on final/* mainly for true final unification, not as the default way to start a file from scratch.');
+  } else if (input.currentRoleType === "Supervisor") {
+    lines.push("- Supervisor responsibility: spot gaps, demand rework, and verify structure/logic/quality.");
+    lines.push("- Do not default to primary drafting. Prefer review-oriented fixes, comments, and section-level corrections.");
+    lines.push('- When you do write, prefer mode="section_merge" to correct weak sections instead of rewriting the whole deliverable.');
+  } else {
+    lines.push("- Specialist responsibility: actively write or expand deliverable files. Do not stop at verbal suggestions.");
+    lines.push("- If required deliverables are empty, thin, or structurally incomplete, you should prioritize debate_files_write.");
+    lines.push('- For existing final/* drafts, read first and then use mode="section_merge" or mode="append" to expand them safely.');
+  }
+
+  if (input.pendingRequiredFiles.length > 0) {
+    lines.push("");
+    lines.push(
+      input.currentRoleType === "Host"
+        ? "Current deliverable gaps for you to coordinate and later unify:"
+        : input.currentRoleType === "Supervisor"
+          ? "Current deliverable gaps you should audit and push others to fix:"
+          : "Shared Specialist backlog: these deliverables still need real writing or expansion:"
+    );
+    for (const file of input.pendingRequiredFiles.slice(0, 12)) {
+      lines.push(`- ${formatRequiredDeliverableSummary(file, "plain")}`);
+    }
   }
 
   if (input.enableVoting) {
@@ -4919,6 +4946,13 @@ async function callProvider(
   const workflow = await loadDebateWorkflow(userId, debate.id);
   const allowedOutputPaths = workflow?.deliverables.allowedPaths ?? ["final/", "outputs/"];
   const requiredDeliverables = workflow?.deliverables.requiredFiles ?? [];
+  const pendingDeliverables = await listMissingRequiredDeliverables({
+    userId,
+    debateId: debate.id,
+    workflow
+  });
+  const roleAssignments = await loadDebateParticipantRoleTypes(userId, debate.id);
+  const currentRoleType = getDebateParticipantRoleType(roleAssignments, debateAgentId);
   const responseFormatPolicy = workflow?.promptPolicies.responseFormat ?? {
     requireMarkdown: true,
     forbidRawJson: true
@@ -5151,6 +5185,8 @@ async function callProvider(
         enableVoting: enableVotingTools,
         allowedOutputPaths,
         requiredFiles: requiredDeliverables,
+        currentRoleType,
+        pendingRequiredFiles: pendingDeliverables,
         contextAccessLines
       })
     ];
@@ -5550,6 +5586,8 @@ async function callProvider(
       enableVoting: enableVotingTools,
       allowedOutputPaths,
       requiredFiles: requiredDeliverables,
+      currentRoleType,
+      pendingRequiredFiles: pendingDeliverables,
       contextAccessLines
     })
   ];

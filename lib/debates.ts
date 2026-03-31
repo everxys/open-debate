@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 
+import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type DebateParticipantRoleType } from "@/lib/debate-role-types";
 import { query } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
@@ -28,6 +29,29 @@ function createUniqueDisplayName(used: Set<string>) {
   const fallback = `席位-${randomUUID().slice(0, 8)}`;
   used.add(fallback);
   return fallback;
+}
+
+function buildFileActivityDiagnosticLabels(input: {
+  actorRoleType: DebateParticipantRoleType;
+  summary: { added: number; deleted: number; changed: number };
+  beforeContent: string;
+  afterContent: string;
+  writeMode: string | null;
+}) {
+  const labels: string[] = [];
+  const growth = Math.max(0, input.afterContent.length - input.beforeContent.length);
+  if (input.actorRoleType === "Host") {
+    if (input.writeMode === "replace" || input.summary.changed >= 12 || growth >= 1800) {
+      labels.push("定稿中");
+    } else if (input.summary.added > 0 || input.summary.deleted > 0) {
+      labels.push("整合中");
+    }
+  } else if (input.actorRoleType === "Supervisor") {
+    if (input.summary.added >= 10 || growth >= 1200 || input.summary.changed >= 8) {
+      labels.push("审查角色参与写入");
+    }
+  }
+  return labels;
 }
 
 const DEFAULT_WORKFLOW_JSON = JSON.stringify(
@@ -136,7 +160,9 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
       requiredFiles: [
         {
           path: "final/01-story-core.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "核心卖点、主题、核心冲突、故事承诺",
           minChars: 1200,
           minMarkdownHeadings: 4,
@@ -144,7 +170,9 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
         },
         {
           path: "final/02-characters.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "主角、关键配角、反派的人物卡与成长弧",
           minChars: 2200,
           minMarkdownHeadings: 8,
@@ -152,7 +180,9 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
         },
         {
           path: "final/03-world-and-rules.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "世界观、关键设定、限制条件、代价与规则",
           minChars: 1800,
           minMarkdownHeadings: 5,
@@ -160,7 +190,9 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
         },
         {
           path: "final/04-plot-architecture.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "三幕或多幕结构、关键反转、冲突升级与收束",
           minChars: 2600,
           minMarkdownHeadings: 7,
@@ -168,7 +200,9 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
         },
         {
           path: "final/05-chapter-outline.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "章节级细纲，每章包含目标、冲突、转折、结果、钩子",
           minChars: 5000,
           minMarkdownHeadings: 16,
@@ -176,7 +210,9 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
         },
         {
           path: "final/06-foreshadowing-ledger.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "伏笔与回收表，标明埋点、回收位置、作用",
           minChars: 1800,
           minMarkdownHeadings: 6,
@@ -184,7 +220,9 @@ const DEFAULT_WORKFLOW_JSON = JSON.stringify(
         },
         {
           path: "final/novel_outline_v2.md",
-          ownerRole: "Host",
+          draftRole: "Specialist",
+          reviewRole: "Supervisor",
+          finalRole: "Host",
           description: "最终总细纲汇总稿，引用并整合上述文件",
           minChars: 7000,
           minMarkdownHeadings: 10,
@@ -1485,6 +1523,7 @@ export async function listDebateFileActivity(
     const hasMore = result.rows.length > limit;
     const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
     const counts = { read: 0, write: 0 };
+    const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debateId);
     for (const row of countsResult.rows) {
       if (row.action === "read" || row.action === "write") {
         counts[row.action] = Number(row.count ?? 0);
@@ -1492,12 +1531,15 @@ export async function listDebateFileActivity(
     }
     return {
       items: rows.map((row) => {
+        const beforeContent = String(row.before_content ?? "");
+        const afterContent = String(row.after_content ?? "");
         const summary =
           row.action === "write"
             ? summarizeLineDiffRows(
-                buildLineDiffRows(String(row.before_content ?? ""), String(row.after_content ?? ""))
+                buildLineDiffRows(beforeContent, afterContent)
               )
             : { added: 0, deleted: 0, changed: 0 };
+        const actorRoleType = getDebateParticipantRoleType(roleAssignments, String(row.debate_agent_id));
         return {
           id: String(row.id),
           action: row.action,
@@ -1515,6 +1557,17 @@ export async function listDebateFileActivity(
           targetHeading: row.target_heading ? String(row.target_heading) : null,
           reason: row.reason ? String(row.reason) : null,
           agentName: row.actor_seat_name ? String(row.actor_seat_name) : String(row.actor_name ?? "Unknown"),
+          actorRoleType,
+          diagnosticLabels:
+            row.action === "write"
+              ? buildFileActivityDiagnosticLabels({
+                  actorRoleType,
+                  summary,
+                  beforeContent,
+                  afterContent,
+                  writeMode: row.write_mode ? String(row.write_mode) : null
+                })
+              : [],
           summary
         };
       }),
@@ -1597,6 +1650,8 @@ export async function getDebateFileActivityDetail(debateId: string, entryId: str
     const afterContent = String(row.after_content ?? "");
     const diffRows = row.action === "write" ? buildLineDiffRows(beforeContent, afterContent) : [];
     const summary = summarizeLineDiffRows(diffRows);
+    const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debateId);
+    const actorRoleType = getDebateParticipantRoleType(roleAssignments, String(row.debate_agent_id));
 
     return {
       id: String(row.id),
@@ -1617,6 +1672,17 @@ export async function getDebateFileActivityDetail(debateId: string, entryId: str
       targetHeading: row.target_heading ? String(row.target_heading) : null,
       reason: row.reason ? String(row.reason) : null,
       agentName: row.actor_seat_name ? String(row.actor_seat_name) : String(row.actor_name ?? "Unknown"),
+      actorRoleType,
+      diagnosticLabels:
+        row.action === "write"
+          ? buildFileActivityDiagnosticLabels({
+              actorRoleType,
+              summary,
+              beforeContent,
+              afterContent,
+              writeMode: row.write_mode ? String(row.write_mode) : null
+            })
+          : [],
       diffRows,
       summary
     };

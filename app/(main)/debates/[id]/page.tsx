@@ -217,6 +217,8 @@ type FileActivityListItem = {
   targetHeading: string | null;
   reason: string | null;
   agentName: string;
+  actorRoleType: "Host" | "Supervisor" | "Specialist";
+  diagnosticLabels: string[];
   summary: { added: number; deleted: number; changed: number };
 };
 
@@ -238,6 +240,12 @@ function formatFileActivityEntryAction(action: FileActivityEntryAction) {
   if (action === "list") return "列表";
   if (action === "stat") return "查看";
   return "读取";
+}
+
+function formatFileActivityRoleType(roleType: FileActivityListItem["actorRoleType"]) {
+  if (roleType === "Host") return "Host";
+  if (roleType === "Supervisor") return "Supervisor";
+  return "Specialist";
 }
 
 const WORKFLOW_RULES_DISABLED_MARKDOWN = [
@@ -2444,6 +2452,21 @@ function FileActivityPanel(props: {
               </div>
               <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 6 }}>
                 <span className="muted">{item.agentName}</span>
+                <span
+                  className="softBox"
+                  style={{
+                    padding: "2px 8px",
+                    fontSize: 12,
+                    background:
+                      item.actorRoleType === "Host"
+                        ? "rgba(37, 99, 235, 0.1)"
+                        : item.actorRoleType === "Supervisor"
+                          ? "rgba(217, 119, 6, 0.12)"
+                          : "rgba(22, 163, 74, 0.12)"
+                  }}
+                >
+                  {formatFileActivityRoleType(item.actorRoleType)}
+                </span>
                 <span className="muted">{`Round ${item.roundNumber}`}</span>
                 <span className="muted">{`Turn ${item.turnNumber}`}</span>
               </div>
@@ -2463,6 +2486,15 @@ function FileActivityPanel(props: {
                   <span style={{ color: "rgb(22, 163, 74)", fontWeight: 600 }}>{`+${item.summary.added}`}</span>
                   <span style={{ color: "rgb(220, 38, 38)", fontWeight: 600 }}>{`-${item.summary.deleted}`}</span>
                   <span style={{ color: "rgb(37, 99, 235)", fontWeight: 600 }}>{`~${item.summary.changed}`}</span>
+                  {item.diagnosticLabels.map((label) => (
+                    <span
+                      key={`${item.id}:${label}`}
+                      className="softBox"
+                      style={{ padding: "2px 8px", fontSize: 12, background: "rgba(15, 23, 42, 0.06)" }}
+                    >
+                      {label}
+                    </span>
+                  ))}
                 </div>
               ) : null}
             </button>
@@ -2511,6 +2543,16 @@ function FileActivityDetailDialog(props: {
                 </div>
                 <div className="muted">
                   {props.detail.agentName} · Round {props.detail.roundNumber} · Turn {props.detail.turnNumber}
+                </div>
+                <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                  <span className="softBox" style={{ padding: "2px 8px", fontSize: 12 }}>
+                    {formatFileActivityRoleType(props.detail.actorRoleType)}
+                  </span>
+                  {props.detail.diagnosticLabels.map((label) => (
+                    <span key={label} className="softBox" style={{ padding: "2px 8px", fontSize: 12 }}>
+                      {label}
+                    </span>
+                  ))}
                 </div>
                 <div className="muted">
                   {props.detail.createdAt ? new Date(props.detail.createdAt).toLocaleString() : ""}
