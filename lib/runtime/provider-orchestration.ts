@@ -432,6 +432,13 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
       },
       { key: "workflowOpening", priority: 0, category: "core", preferredMaxChars: 12_000, content: workflowOpeningInline },
       { key: "workflowPhase", priority: 0, category: "core", preferredMaxChars: 14_000, content: workflowPhaseInline },
+      {
+        key: "contextAccess",
+        priority: 0,
+        category: "core",
+        preferredMaxChars: 4_000,
+        content: contextAccessLines.length > 0 ? contextAccessLines.join("\n") : null
+      },
       { key: "workflowIdeaBank", priority: 2, category: "optional", preferredMaxChars: 8_000, content: workflowIdeaBankInline },
       { key: "votingRule", priority: 0, category: "core", preferredMaxChars: 1_500, content: votingRuleInline },
       {

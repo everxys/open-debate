@@ -150,6 +150,7 @@ export function buildContextAccessSummaryLines(input: {
     for (const rule of resolvedRules.locked) {
       lines.push(`  - [${rule.scope}] ${rule.pathPrefix} · unlock=${rule.phaseKind}${rule.label ? ` · ${rule.label}` : ""}`);
     }
+    lines.push("- IMPORTANT: Locked paths are unavailable in the current phase. Do not try to read them now; wait until they are unlocked.");
   }
 
   return lines;
@@ -165,7 +166,7 @@ export function describeContextAccessDenied(
   const resolvedRules = resolveContextAccessRules(workflow, currentPhaseKind);
   const lockedRule = matchContextAccessRule(resolvedRules.locked, scope, path);
   if (lockedRule) {
-    return `LOCKED_UNTIL_PHASE: ${path} requires phase ${lockedRule.phaseKind}`;
+    return `LOCKED_UNTIL_PHASE: ${path} requires phase ${lockedRule.phaseKind}. Do not retry in the current phase.`;
   }
   return `ACCESS_DENIED: ${path} is not allowed by workflow.contextAccess`;
 }

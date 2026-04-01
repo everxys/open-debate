@@ -723,9 +723,9 @@ function getWorkflowSummarizerConfig(workflow: NormalizedDebateWorkflow | null) 
   return workflow.summarizer;
 }
 
-function getTurnSummaryPath(workflow: NormalizedDebateWorkflow | null, turnNumber: number) {
+function getTurnSummaryPath(workflow: NormalizedDebateWorkflow | null, roundNumber: number, turnNumber: number) {
   const baseDir = workflow?.summarizer.outputPaths.turnSummaryDir || TURN_SUMMARY_DIR;
-  return `${baseDir}turn-${turnNumber}.md`;
+  return `${baseDir}round-${roundNumber}/turn-${turnNumber}.md`;
 }
 
 function getRoundSummaryPath(workflow: NormalizedDebateWorkflow | null, roundNumber: number) {
@@ -839,14 +839,43 @@ function buildDefaultRoundSummaryPrompt(input: {
     ...input.turnSummaries.map(
       (item) => `\n\n### Turn ${item.turnNumber} · ${item.agentName}\n${trimToChars(item.content, 6_000)}`
     ),
-    "\n\nWrite a Markdown round summary with exactly these sections:",
+    "\n\nWrite a detailed Markdown round summary with exactly these sections:",
     "## 本轮关键推进",
     "## 本轮关键动作/状态变化",
     "## 本轮沉淀出的候选方案或结果",
     "## 本轮遗留风险",
     "## 下一轮最该继续推进的点",
-    "\nIf this round is mostly voting, announcements, file consolidation, or other procedural work, summarize those state changes directly instead of forcing discussion-style consensus and disagreement. Only summarize this round. Do not re-summarize the whole debate."
+    "\nWithin each section, prefer multiple concise bullets over a single vague paragraph. Cover each turn's real contribution when it matters, make clear which changes were procedural versus substantive, and spell out what advanced, what stalled, and what still blocks progress. If this round is mostly voting, announcements, file consolidation, or other procedural work, summarize those state changes directly instead of forcing discussion-style consensus and disagreement. Only summarize this round. Do not re-summarize the whole debate."
   ].join("").trim();
+}
+
+async function writeSummarizerDebateFile(input: {
+  userId: string;
+  debateId: string;
+  debateAgentId: string;
+  turnNumber: number;
+  roundNumber: number;
+  path: string;
+  content: string;
+  reason: "summarizer:turn_summary" | "summarizer:round_summary" | "summarizer:facts_board";
+  now: string;
+}) {
+  const beforeContent = await readDebateFile(input.userId, input.debateId, input.path);
+  await upsertDebateFile(input.debateId, input.path, input.content, input.now);
+  await recordDebateFileActivity({
+    debateId: input.debateId,
+    debateAgentId: input.debateAgentId,
+    turnNumber: input.turnNumber,
+    roundNumber: input.roundNumber,
+    action: "write",
+    scope: "debate",
+    path: input.path,
+    writeMode: "replace",
+    beforeContent,
+    afterContent: input.content,
+    reason: input.reason,
+    now: input.now
+  });
 }
 
 function buildDefaultFactsBoardPrompt(input: {
@@ -904,6 +933,7 @@ async function updateSummaryJob(
 export async function generateTurnSummary(input: {
   userId: string;
   debateId: string;
+  debateAgentId: string;
   debateQuestion: string;
   workflow: NormalizedDebateWorkflow | null;
   roundNumber: number;
@@ -956,8 +986,18 @@ export async function generateTurnSummary(input: {
       });
       return { ok: false, error: "empty_summary" };
     }
-    const path = getTurnSummaryPath(input.workflow, input.turnNumber);
-    await upsertDebateFile(input.debateId, path, `${content.trim()}\n`, input.now);
+    const path = getTurnSummaryPath(input.workflow, input.roundNumber, input.turnNumber);
+    await writeSummarizerDebateFile({
+      userId: input.userId,
+      debateId: input.debateId,
+      debateAgentId: input.debateAgentId,
+      turnNumber: input.turnNumber,
+      roundNumber: input.roundNumber,
+      path,
+      content: `${content.trim()}\n`,
+      reason: "summarizer:turn_summary",
+      now: input.now
+    });
     try {
       await indexDebateContextChunk({
         userId: input.userId,
@@ -1023,7 +1063,11 @@ async function listRoundTurnSummaries(input: {
   const items: Array<{ turnNumber: number; agentName: string; content: string }> = [];
   for (const row of turnRows.rows) {
     const turnNumber = Number(row.turn_number);
-    const content = await readDebateFile(input.userId, input.debateId, getTurnSummaryPath(input.workflow, turnNumber));
+    const content = await readDebateFile(
+      input.userId,
+      input.debateId,
+      getTurnSummaryPath(input.workflow, input.roundNumber, turnNumber)
+    );
     if (!content?.trim()) continue;
     items.push({
       turnNumber,
@@ -1037,6 +1081,7 @@ async function listRoundTurnSummaries(input: {
 export async function refreshFactsBoardFromSummaries(input: {
   userId: string;
   debateId: string;
+  debateAgentId: string;
   debateQuestion: string;
   workflow: NormalizedDebateWorkflow | null;
   sourceLabel: string;
@@ -1091,7 +1136,17 @@ export async function refreshFactsBoardFromSummaries(input: {
       });
       return { ok: false, error: "empty_facts_board" };
     }
-    await upsertDebateFile(input.debateId, boardPath, `${content.trim()}\n`, input.now);
+    await writeSummarizerDebateFile({
+      userId: input.userId,
+      debateId: input.debateId,
+      debateAgentId: input.debateAgentId,
+      turnNumber: input.turnNumber ?? 0,
+      roundNumber: input.roundNumber ?? 0,
+      path: boardPath,
+      content: `${content.trim()}\n`,
+      reason: "summarizer:facts_board",
+      now: input.now
+    });
     try {
       await indexDebateContextChunk({
         userId: input.userId,
@@ -1556,7 +1611,7 @@ function extractDirectoryFileSummary(path: string, content: string) {
   if (normalizedPath === CONTEXT_SEGMENT_PATH) return "本席位分段检查点，用于长辩论续跑。";
   if (normalizedPath === CONTEXT_WINDOW_PATH) return "上下文窗口配置，用于限制回看历史范围。";
   if (normalizedPath === AGENT_DIRECTORY_PATH.toLowerCase()) return "本席位目录索引，说明文件路径、目录和用途。";
-  if (normalizedPath.startsWith("debate/turn_summaries/")) return "逐回摘要文件，由独立总结器在每回结束后生成。";
+  if (normalizedPath.startsWith("debate/turn_summaries/")) return "逐回摘要文件，由独立总结器在每回结束后按 round/turn 分层生成。";
   if (normalizedPath.startsWith("debate/round_summaries/")) return "逐轮摘要文件，由独立总结器在轮末基于回摘要生成。";
   if (normalizedPath.startsWith("debate/answers/")) return "原始发言归档，按轮和回合拆分保存完整发言内容。";
   if (normalizedPath === SHARED_FACTS_PATH.toLowerCase()) return "结构化事实板，聚合当前已确认共识、候选方案、风险和缺口。";
@@ -4116,6 +4171,7 @@ export async function maybeGenerateVoteAnnouncementWithSeat1(input: {
 export async function generateRoundSummary(input: {
   userId: string;
   debate: { id: string; question: string };
+  debateAgentId: string;
   workflow: NormalizedDebateWorkflow | null;
   participantCount: number;
   endedRound: number;
@@ -4166,7 +4222,7 @@ export async function generateRoundSummary(input: {
           turnSummaries
         })
       ),
-      maxTokens: 1000
+      maxTokens: 1600
     });
     if (!content) {
       await updateSummaryJob(input.debate.id, {
@@ -4180,7 +4236,17 @@ export async function generateRoundSummary(input: {
       return { ok: false, error: "empty_round_summary" };
     }
     const roundPath = getRoundSummaryPath(input.workflow, input.endedRound);
-    await upsertDebateFile(input.debate.id, roundPath, `${content.trim()}\n`, input.now);
+    await writeSummarizerDebateFile({
+      userId: input.userId,
+      debateId: input.debate.id,
+      debateAgentId: input.debateAgentId,
+      turnNumber: input.endedRound * Math.max(1, input.participantCount),
+      roundNumber: input.endedRound,
+      path: roundPath,
+      content: `${content.trim()}\n`,
+      reason: "summarizer:round_summary",
+      now: input.now
+    });
     try {
       await indexDebateContextChunk({
         userId: input.userId,
@@ -4730,6 +4796,7 @@ export async function runDebate(id: string, userId: string) {
         const turnSummary = await generateTurnSummary({
           userId,
           debateId: id,
+          debateAgentId: String(currentParticipant.id),
           debateQuestion: debate.question,
           workflow,
           roundNumber,
@@ -4742,6 +4809,7 @@ export async function runDebate(id: string, userId: string) {
           await refreshFactsBoardFromSummaries({
             userId,
             debateId: id,
+            debateAgentId: String(currentParticipant.id),
             debateQuestion: debate.question,
             workflow,
             sourceLabel: `turn-${messageNumber}`,
@@ -4911,6 +4979,7 @@ export async function runDebate(id: string, userId: string) {
             await generateRoundSummary({
               userId,
               debate: { id: debate.id, question: debate.question },
+              debateAgentId: String(currentParticipant.id),
               workflow,
               participantCount,
               endedRound,
@@ -4928,6 +4997,7 @@ export async function runDebate(id: string, userId: string) {
                 await refreshFactsBoardFromSummaries({
                   userId,
                   debateId: id,
+                  debateAgentId: String(currentParticipant.id),
                   debateQuestion: debate.question,
                   workflow,
                   sourceLabel: `round-${endedRound}`,

@@ -23,7 +23,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     }
 
     const actionRaw = url.searchParams.get("action");
-    const action = actionRaw === "read" || actionRaw === "write" ? actionRaw : undefined;
+    const action = actionRaw === "read" || actionRaw === "write" || actionRaw === "summarizer_write" ? actionRaw : undefined;
     const path = url.searchParams.get("path") ?? undefined;
     const beforeId = url.searchParams.get("beforeId") ?? undefined;
     const limit = toOptionalPositiveInt(url.searchParams.get("limit")) ?? undefined;

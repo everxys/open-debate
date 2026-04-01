@@ -224,7 +224,12 @@ function isMissingTableError(error: unknown, table: string) {
 }
 
 type DebateFileActivityAction = "read" | "write" | "search" | "list" | "stat";
+type DebateFileActivityFilter = "read" | "write" | "summarizer_write";
 type DebateFileActivityScope = "debate" | "agent";
+
+function isSummarizerActivityReason(reason: string | null | undefined) {
+  return typeof reason === "string" && reason.startsWith("summarizer:");
+}
 
 function isMissingColumnError(error: unknown, column: string) {
   if (typeof error !== "object" || error === null) return false;
@@ -1344,7 +1349,7 @@ export async function readDebateAgentFile(debateId: string, debateAgentId: strin
 export async function listDebateFileActivity(
   debateId: string,
   options?: {
-    action?: DebateFileActivityAction;
+    action?: DebateFileActivityFilter;
     path?: string;
     limit?: number;
     beforeId?: string;
@@ -1358,7 +1363,8 @@ export async function listDebateFileActivity(
 
   const requestedLimit = typeof options?.limit === "number" && Number.isFinite(options.limit) ? Math.floor(options.limit) : 40;
   const limit = Math.min(Math.max(requestedLimit, 1), 100);
-  const action = options?.action === "read" || options?.action === "write" ? options.action : null;
+  const action =
+    options?.action === "read" || options?.action === "write" || options?.action === "summarizer_write" ? options.action : null;
   const path = typeof options?.path === "string" && options.path.trim() ? options.path.trim() : null;
   const beforeId = typeof options?.beforeId === "string" && options.beforeId.trim() ? options.beforeId.trim() : null;
 
@@ -1418,7 +1424,8 @@ export async function listDebateFileActivity(
         where l.debate_id = $1
           and (
             $2::text is null
-            or ($2::text = 'write' and l.action = 'write')
+            or ($2::text = 'write' and l.action = 'write' and (l.reason is null or l.reason not like 'summarizer:%'))
+            or ($2::text = 'summarizer_write' and l.action = 'write' and l.reason like 'summarizer:%')
             or ($2::text = 'read' and l.action <> 'write')
           )
           and ($3::text is null or l.path = $3::text)
@@ -1436,24 +1443,35 @@ export async function listDebateFileActivity(
       [debateId, action, path, beforeId, limit + 1]
     );
 
-    const countsResult = await query<{ action: DebateFileActivityAction; count: number }>(
+    const countsResult = await query<{ action: string; count: number }>(
       `
-        select case when action = 'write' then 'write' else 'read' end as action, count(*)::int as count
+        select
+          case
+            when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
+            when action = 'write' then 'write'
+            else 'read'
+          end as action,
+          count(*)::int as count
           from debate_file_activity_logs
          where debate_id = $1
-         group by case when action = 'write' then 'write' else 'read' end
+         group by
+          case
+            when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
+            when action = 'write' then 'write'
+            else 'read'
+          end
       `,
       [debateId]
     );
 
     const hasMore = result.rows.length > limit;
     const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
-    const counts = { read: 0, write: 0 };
+    const counts = { read: 0, write: 0, summarizerWrite: 0 };
     const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debateId);
     for (const row of countsResult.rows) {
-      if (row.action === "read" || row.action === "write") {
-        counts[row.action] = Number(row.count ?? 0);
-      }
+      if (row.action === "read") counts.read = Number(row.count ?? 0);
+      if (row.action === "write") counts.write = Number(row.count ?? 0);
+      if (row.action === "summarizer_write") counts.summarizerWrite = Number(row.count ?? 0);
     }
     return {
       items: rows.map((row) => {
@@ -1466,6 +1484,7 @@ export async function listDebateFileActivity(
               )
             : { added: 0, deleted: 0, changed: 0 };
         const actorRoleType = getDebateParticipantRoleType(roleAssignments, String(row.debate_agent_id));
+        const isSummarizer = isSummarizerActivityReason(row.reason ? String(row.reason) : null);
         return {
           id: String(row.id),
           action: row.action,
@@ -1482,8 +1501,8 @@ export async function listDebateFileActivity(
           afterVersion: row.after_version === null ? null : Number(row.after_version),
           targetHeading: row.target_heading ? String(row.target_heading) : null,
           reason: row.reason ? String(row.reason) : null,
-          agentName: row.actor_seat_name ? String(row.actor_seat_name) : String(row.actor_name ?? "Unknown"),
-          actorRoleType,
+          agentName: isSummarizer ? "独立总结器" : row.actor_seat_name ? String(row.actor_seat_name) : String(row.actor_name ?? "Unknown"),
+          actorRoleType: isSummarizer ? "Summarizer" : actorRoleType,
           diagnosticLabels:
             row.action === "write"
               ? buildFileActivityDiagnosticLabels({
@@ -1578,6 +1597,7 @@ export async function getDebateFileActivityDetail(debateId: string, entryId: str
     const summary = summarizeLineDiffRows(diffRows);
     const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debateId);
     const actorRoleType = getDebateParticipantRoleType(roleAssignments, String(row.debate_agent_id));
+    const isSummarizer = isSummarizerActivityReason(row.reason ? String(row.reason) : null);
 
     return {
       id: String(row.id),
@@ -1597,8 +1617,8 @@ export async function getDebateFileActivityDetail(debateId: string, entryId: str
       afterContent,
       targetHeading: row.target_heading ? String(row.target_heading) : null,
       reason: row.reason ? String(row.reason) : null,
-      agentName: row.actor_seat_name ? String(row.actor_seat_name) : String(row.actor_name ?? "Unknown"),
-      actorRoleType,
+      agentName: isSummarizer ? "独立总结器" : row.actor_seat_name ? String(row.actor_seat_name) : String(row.actor_name ?? "Unknown"),
+      actorRoleType: isSummarizer ? "Summarizer" : actorRoleType,
       diagnosticLabels:
         row.action === "write"
           ? buildFileActivityDiagnosticLabels({

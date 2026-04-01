@@ -24,3 +24,11 @@
 - 修正文档中的过时系统描述：`docs/PROJECT_KNOWLEDGE_BASE.md`、`docs/FAULT.md` 已改为“复杂 phase、选举、收束投票、角色职责都来自 workflow”，不再把 `Phase 3` 或三角色写成平台内建概念。
 - 继续细化真实小说策略的质量门槛：为原先还只靠 `minChars / minMarkdownHeadings / requiredSnippets` 的世界观、历史、阵营、主线骨架、人物关系、关键场景文件补齐 `qualityChecks`，并已同步回数据库中的真实 `debate/workflow.json`。
 - 修复 review 暴露的两个一致性问题：关闭共识检查时，完成判定允许正常结束但不会再把 `consensus_reached` 误写成“已达成”；同时默认轻量 workflow 下状态面板也不再额外显示阶段快照。
+- 2026-04-01: round summary 默认提示词加厚，强调按回覆盖本轮关键推进/动作/风险；turn summaries 改为按 `debate/turn_summaries/round-<n>/turn-<m>.md` 分层存储，避免单目录爆满；文件记录新增“总结器写入”筛选，可单独查看独立总结器对回摘要、轮摘要和 `facts/board.md` 的写入活动。
+- 2026-04-01: 强化 workflow 的上下文访问提示。当前阶段被锁定的共享文件现在会在 prompt 里明确标注“不要尝试读取，等解锁后再读”，同时把真实策略 `民主集中制共识算法（先赛马，再相马）` 的 opening prompt 也改成了同样语义，避免 AI 在投票前浪费回合去试读尚未开放的 `debate/*` 文件。
+- 2026-04-01: 从 git 历史恢复一批之前删除但仍有参考价值的 `NOVEL_GODMODE_*` 文档，统一放到 `docs/restored_novel_godmode/`，并新增目录索引说明，避免它们继续混在当前主线 docs 里。
+- 2026-04-01: 将当前数据库中策略 `民主集中制共识算法（先赛马，再相马）` 的角色文件按原始 tree 结构导出到 `docs/strategy_snapshot_democratic_centralism_current/`。每个角色单独一个目录，保留原始文件路径，并补充 `ROLE_META.md` / `system_prompt.md` 便于离线查看当前策略快照。
+- 2026-04-01: 策略详情页新增“下载文件夹 / 上传文件夹覆盖”，支持把当前策略导出为保留 tree 结构的 ZIP 文件夹包，并通过选择本地文件夹整体覆盖当前策略；同时新增策略文件夹导入导出的 manifest 结构。
+- 2026-04-01: 合并当前“民主集中制共识算法（先赛马，再相马）”策略与 `docs/restored_novel_godmode/` 中的高价值旧内容，新增 `docs/merged_democratic_centralism_strategy/` 作为策略源文件，并已把增强后的 `workflow`、`protocol/*`、`templates/debate_question.md` 回写到数据库中的当前策略。
+- 2026-04-01: 继续把 `NOVEL_GODMODE_MASTER_PROMPT` 中未完全吸收的内容增强回当前策略：补强故事总前提、点子分层规则、事件/角色/终局失败判据、总结器的审判视角；新增 `protocol/40_idea_ledger_and_outline.md` 并同步到数据库中的当前策略。
+- 2026-04-01: 对当前神作策略做了一轮不降质瘦身，压缩 `openingPrompt` 和部分 protocol / question 中的重复语义，保留核心高压目标，把细规则更多收束到 `protocol/*`，并同步回数据库中的当前策略。

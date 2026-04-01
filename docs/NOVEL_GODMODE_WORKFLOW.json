@@ -10,40 +10,41 @@
         "id": "phase-1",
         "title": "Phase 1 · 议员实战演练",
         "kind": "analysis",
-        "description": "前两轮只做世界规则、胜负结构、人物功能分工与高优先级风险分析，不允许急着收尾。",
+        "description": "只解决作品的终极命题、故事承诺、底层规则、关键风险和候选能力暴露；不允许提前进入点子筛选与收尾。",
         "minRounds": null,
-        "injectedPrompt": "【Phase 1】当前仍处于主持人与监管者选举之前的分析阶段。本阶段只能做独立分析、提出候选建议、说明谁适合主持人或监管者以及理由，但禁止正式投票，禁止写“我投谁”，禁止提前宣布谁当选。所有席位现在都还只是议员，真正投票只能等进入 Phase 1.5 后再进行。"
+        "injectedPrompt": "【Phase 1】当前仍处于主持人与监管者选举之前的分析阶段。当前唯一目标不是写创作圣经细节，而是先把作品的方向、边界、评价标准和失败风险讨论清楚。推荐按以下子任务顺序推进：1）终极命题与故事承诺；2）世界规则、胜负规则、底层限制；3）这类题材最容易失败的地方；4）当前最值得优先打磨的方向；5）谁更适合当 Host / Supervisor 以及理由。当前轮只应推进其中一个子任务，不要一轮里同时讲命题、人物、事件、章节、终局。此阶段严禁正式投票，严禁写“我投谁”，严禁假装已经进入点子筛选。原始点子库在这个阶段不是当前主战场，除非 workflow 已明确解锁，否则不要浪费回合提前尝试读取。"
       },
       {
         "id": "phase-1-5",
         "title": "Phase 1.5 · 主持人与监管者选举",
         "kind": "election",
-        "description": "用一整轮完成主持人与监管者选举；如果本轮未选出结果，则先回到 Phase 1 补充一轮全员发言，再重新进入本阶段。",
+        "description": "用一整轮完成 Host 与 Supervisor 选举；若未形成结果，则必须先回到 Phase 1 补新的观点、新证据、新取舍，再重启选举。",
         "minRounds": null,
-        "injectedPrompt": "【Phase 1.5】当前是主持人与监管者的正式选举轮。你必须基于前面 Phase 1 已经出现的表现来判断谁适合做主持人、谁适合做监管者，并把判断依据讲清楚。禁止借投票继续推进新设定、新主线或新事件。若本轮无法形成明确结果，下一轮会先回到 Phase 1 继续补充一轮全员发言，然后系统再发起下一次 Phase 1.5 选举。"
+        "injectedPrompt": "【Phase 1.5】当前是 Host 与 Supervisor 的正式选举轮。你必须基于 Phase 1 中真实表现出来的能力来判断：谁更适合整合全局、持续收敛、推动阶段前进；谁更适合找漏洞、拦伪强、阻止低质量收尾。此轮不要借投票继续扩写大量新设定，不要把投票伪装成继续讨论。投票必须附清楚理由，若未形成明确结果，下一轮会先回到 Phase 1 补新的观点、新证据、新取舍，再重新进入选举。"
       },
       {
         "id": "phase-2",
         "title": "Phase 2 · 动态轮换讨论",
         "kind": "deliberation",
-        "description": "用长轮次反复打磨核心诡计、五大事件、人物关系与分卷结构，优先提高点子密度与互锁强度。",
+        "description": "长轮次分块推进：点子筛选、主线骨架、人物系统、核心事件、关系弧线、终局伏笔、分卷结构、章节展开，默认一次只打一个块。",
         "minRounds": null,
-        "injectedPrompt": "【Phase 2】当前是动态轮换讨论阶段。每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子。禁止一口气平铺很多点子名，然后每个只给一句判断。你必须主动做取舍，只挑当前最值得推进、最有机会说服对手的少数点子深讲。对每个点子，都要尽量讲清：它具体是什么、你为什么优先选它、它怎样运作、它比前案强在哪里、别人可能怎样反驳、你准备怎么回应。重点不是报更多点子，而是拿少数几个点子讲出完整、细致、能说服别人的思考过程。"
+        "injectedPrompt": "【Phase 2】当前是动态轮换讨论阶段。重点不是“继续讨论”，而是按子任务逐块推进创作圣经。主持人每轮必须宣布当前唯一子任务；若主持人没有明确宣布，则默认按以下顺序推进：1）原始点子筛选与重组；2）主线骨架与终局真相；3）七位外来天才与本土天才生态；4）五大核心事件；5）人物弧线 / 纯爱线 / 背叛线 / 宿敌线；6）终局布局链与伏笔回收；7）分卷结构与长篇强度递增；8）章节级展开。单轮只推进当前子任务，不允许为了显得推进多而同时平铺很多块。每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子。对每个保留或新增点子，都尽量讲清它如何服务主线、替代什么旧方案、别人可能怎样反驳。"
       },
       {
         "id": "phase-2-5",
         "title": "Phase 2.5 · Phase 3 入场表决",
         "kind": "finalization_vote",
-        "description": "正式进入 Phase 3 前，先统一判断是否已经具备收束条件，并完成官方入场表决。",
+        "description": "正式进入 Phase 3 前，必须先判断当前是否真的具备收束资格，不能把局部共识误判为已经成熟。",
         "minRounds": null,
-        "injectedPrompt": "【Phase 2.5】当前是进入 Phase 3 前的正式入场表决阶段。你要先判断：现有争议是否已经收束、关键结构是否已经稳定、主要文件是否具备被汇总的前提。如果支持进入 Phase 3，必须明确说明为什么现在已经成熟；如果反对，也必须明确指出仍未解决的硬缺口。禁止只表态不解释。只有全员同意，下一轮才正式进入 Phase 3。"
+        "injectedPrompt": "【Phase 2.5】当前是进入 Phase 3 前的正式表决阶段。你要先判断：关键子任务是否已经被打到足够稳定，主要文件是否具备整合前提，是否仍存在结构性硬缺口，是否还有明显伪强内容、空泛内容、不可复盘内容。如果支持进入 Phase 3，必须说明为什么现在已经从“继续探索”转成了“适合整合与校验”；如果反对，也必须指出仍未解决的硬缺口。禁止只表态不解释。"
       },
       {
         "id": "phase-3",
         "title": "Phase 3 · 共识收敛与最终交付",
         "kind": "finalization",
-        "description": "进入章节级扩写、伏笔台账校验、关键场景与终局回收，不满足厚度与密度门槛不得结束。",
-        "minRounds": null
+        "description": "收敛、审查、补洞、回收、交付。进入本阶段后重点不再是自由发散，而是清理最弱一笔并确保二刷成立。",
+        "minRounds": null,
+        "injectedPrompt": "【Phase 3】当前是共识收敛与最终交付阶段。此阶段的优先子任务是：1）交付文件总检查；2）当前最弱一笔清除；3）伏笔与终局回收自检；4）逻辑闭环与二刷成立性检查；5）最终总汇总稿整合。不要回到大规模自由发散，不要用新设定掩盖旧漏洞，不要因为快结束了就降低质量标准。你现在更像在做整合、审校、补洞、交付，而不是重新开一场新的泛讨论。"
       }
     ],
     "transitionRules": {
@@ -64,7 +65,10 @@
   },
   "election": {
     "startRound": 3,
-    "roles": ["Host", "Supervisor"],
+    "roles": [
+      "Host",
+      "Supervisor"
+    ],
     "speakingOrder": {
       "firstRole": "Host",
       "lastRole": "Supervisor"
@@ -74,19 +78,19 @@
     "Host": {
       "label": "Host",
       "category": "coordinator",
-      "summary": "负责仲裁分歧、统一方向、收敛版本，并在最终阶段整合成全局成稿。",
+      "summary": "负责定义当前轮唯一子任务、仲裁分歧、推进阶段前进、统一最终口径并整合成稿；Host 应收敛，不应长期包办全部初稿。",
       "writingPolicy": "coordinate"
     },
     "Supervisor": {
       "label": "Supervisor",
       "category": "reviewer",
-      "summary": "负责指出逻辑漏洞、结构缺口、空泛内容和返工要求，防止低质量收尾。",
+      "summary": "负责持续拦下伪高智商、伪伏笔、伪人物成长、空泛堆字和只靠解释成立的高潮；Supervisor 的职责不是泛泛提醒，而是像质量审判者一样指出当前最虚的一笔。",
       "writingPolicy": "review"
     },
     "Specialist": {
       "label": "Specialist",
       "category": "contributor",
-      "summary": "负责持续产出角色、事件、伏笔、章节等具体文件内容，不能只停留在口头建议。",
+      "summary": "负责把讨论真正落成具体文件内容，持续承担事件、人物、伏笔、章节等模块的主写工作，不能只停留在口头建议。",
       "writingPolicy": "contribute"
     }
   },
@@ -131,7 +135,7 @@
     "requireAllSeats": true
   },
   "promptPolicies": {
-    "openingPrompt": "整场讨论必须尽量说人话。禁止只丢简短结论、标签或速记句。后发言者的首要任务不是顺着前一个人的结论做轻量补充，而是主动寻找更强、更狠、更完整的替代方案；只要你判断前案不够好，就应该直接提出新方案，必要时可以整体推翻前案并重建。每次发言最多只允许重点讨论 5 个点子，默认更推荐只打 1 到 3 个最关键的点子；禁止一次丢出很多点子却每个都只讲一句。只要提出一个方案、观点或投票理由，都要尽量讲清楚它具体是什么、为什么更强、会带来什么影响、你是怎么推到这一步的，让其他人一眼看懂你的意思。另外，在 Phase 1 和 Phase 1 之前严禁提前投票、严禁写“我投谁”、严禁提前宣布主持人或监管者；那只能在正式进入 Phase 1.5 后发生。如果 debate/ 目录下存在共享工作文件，你应该主动把它们当作当前讨论的一部分来读取和利用，尤其是原始点子池、筛选结果、事件映射、被淘汰或合并记录、以及新发明点子记录；常见文件可能包括 `debate/raw_idea_bank.md`、`debate/idea_s_tier.md`、`debate/idea_a_tier.md`、`debate/idea_rejected_or_merged.md`、`debate/idea_event_mappings.md`、`debate/idea_newly_invented.md`。这些只是共享工作文件约定，不是最终交付文件；如果它们存在，就优先把它们读懂、比较、筛选、合并，并把结论继续落到共享工作文件或最终交付里。",
+    "openingPrompt": "你们正在共同创作一部“天才群像 + 异世界规则博弈 + 超长线终极布局”的长篇小说，并且默认按“神作工厂模式”推进：不追求尽快完成，不接受平庸方案，不接受表面很强但复盘站不住的内容。最终目标不是短细纲，而是一套足以支撑百万字作品的完整创作圣经，让读者觉得它像外星人写出来的作品。\n\n故事总前提必须长期保持：7 位外来天才被召唤到新世界；这个世界存在大量更强、更成熟、更危险的本土天才；故事走向是“不解 -> 试探 -> 布局 -> 联手 -> 恶斗 -> 失控 -> 巨大骗局揭晓 -> 全员反抗终局布局者 -> 打破游戏规则”；这是群像智斗史诗，不是单主角爽文。最终局面不是廉价的全灭，也不是轻松幸福结局，而是经历巨大牺牲后、以高代价换来的新生。\n\n题材硬边界：整体必须以智斗、可解释规则、可复盘机制为主导。禁止修仙、魔法、灵力、神谕、宿命神迹、不可证伪的超自然力量成为核心解题手段；即使出现看似神秘的现象，也应优先设计为可推理、可实验、可验证、可复盘的科学、工程、制度、心理、信息机制。所有奇迹感都应主要来自高密度智斗、极限计算、系统设计、组织控制、认知操纵或科技黑箱，而不是玄幻设定本身。\n\n学科武器库必须真正进入事件结构，而不是堆术语。真正强的方案，应尽量让多套知识体系彼此互锁，而不是只靠单一设定。核心天才不应是窄专家，而应普遍具备跨学科能力，同时各自拥有 1 到 2 个压倒性的主场方法论。\n\n后发言者的首要任务不是顺着前案做轻量补充，而是优先寻找更强、更狠、更完整的替代方案。点子必须长期按三层理解：大点子统治全书骨架与终局真相；中点子驱动单个事件或单条主线；小点子负责记忆点、余味和二刷快感。不是点子越多越好，而是大点子克制、中点子互锁、小点子极密。\n\n必须长期警惕以下失败：事件第一次看热闹、第二次看不成立；角色只是“另一个聪明人”；高潮只能靠解释成立；伏笔看似很多其实大多是后补。只要某个方向有这些症状，就应优先怀疑它，而不是护着它。\n\n详细执行规则、阶段推进、点子台账、质量审判和文件写作约束，以 `protocol/*` 为准。当前若有共享工作文件，也只在 workflow 明确允许且当前阶段已解锁时再读，不要提前浪费回合尝试读取。",
     "round1Fairness": true,
     "responseFormat": {
       "requireMarkdown": true,
@@ -153,20 +157,37 @@
     ]
   },
   "deliverables": {
-    "allowedPaths": ["final/", "outputs/"],
+    "allowedPaths": [
+      "final/",
+      "outputs/"
+    ],
     "requiredFiles": [
       {
         "path": "final/01-core-premise.md",
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "核心命题、核心卖点、故事承诺、终局震撼来源",
+        "description": "核心命题、故事承诺、终局震撼来源。最容易失败点：写成空泛口号、概念很大却不能统领全书。",
         "minChars": 6000,
         "minMarkdownHeadings": 10,
-        "requiredSnippets": ["核心命题", "核心卖点", "故事承诺", "终局震撼"],
+        "requiredSnippets": [
+          "核心命题",
+          "核心卖点",
+          "故事承诺",
+          "终局震撼"
+        ],
         "qualityChecks": {
-          "requiredSections": ["核心命题", "核心卖点", "故事承诺", "终局震撼"],
-          "requiredTerms": ["主题", "冲突", "代价"],
+          "requiredSections": [
+            "核心命题",
+            "核心卖点",
+            "故事承诺",
+            "终局震撼"
+          ],
+          "requiredTerms": [
+            "主题",
+            "冲突",
+            "代价"
+          ],
           "minBulletItems": 8
         }
       },
@@ -175,18 +196,35 @@
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "世界规则、胜负规则、代价系统、游戏边界、破局条件",
+        "description": "世界规则、胜负规则、代价系统、游戏边界、破局条件。最容易失败点：背景设定很多，但对主线和智斗没有真正约束力。",
         "minChars": 15000,
         "minMarkdownHeadings": 18,
-        "requiredSnippets": ["世界规则", "胜负规则", "代价", "破局条件"],
+        "requiredSnippets": [
+          "世界规则",
+          "胜负规则",
+          "代价",
+          "破局条件"
+        ],
         "qualityChecks": {
-          "requiredSections": ["世界规则", "胜负规则", "代价", "破局条件"],
-          "requiredTerms": ["限制", "漏洞", "利用", "边界"],
+          "requiredSections": [
+            "世界规则",
+            "胜负规则",
+            "代价",
+            "破局条件"
+          ],
+          "requiredTerms": [
+            "限制",
+            "漏洞",
+            "利用",
+            "边界"
+          ],
           "minBulletItems": 16,
           "counters": [
             {
               "label": "rule-blocks",
-              "patterns": ["规则"],
+              "patterns": [
+                "规则"
+              ],
               "minCount": 6
             }
           ]
@@ -200,15 +238,34 @@
         "description": "时代断层、历史隐秘、旧文明残响、关键灾变时间线",
         "minChars": 12000,
         "minMarkdownHeadings": 14,
-        "requiredSnippets": ["时代", "历史", "灾变", "时间线"],
+        "requiredSnippets": [
+          "时代",
+          "历史",
+          "灾变",
+          "时间线"
+        ],
         "qualityChecks": {
-          "requiredSections": ["时代", "历史", "灾变", "时间线"],
-          "requiredTerms": ["断层", "遗留", "隐秘", "影响"],
+          "requiredSections": [
+            "时代",
+            "历史",
+            "灾变",
+            "时间线"
+          ],
+          "requiredTerms": [
+            "断层",
+            "遗留",
+            "隐秘",
+            "影响"
+          ],
           "minBulletItems": 12,
           "counters": [
             {
               "label": "timeline-points",
-              "patterns": ["年", "时期", "阶段"],
+              "patterns": [
+                "年",
+                "时期",
+                "阶段"
+              ],
               "minCount": 6
             }
           ]
@@ -222,15 +279,33 @@
         "description": "主要阵营、权力结构、面具组织、利益链与制衡关系",
         "minChars": 12000,
         "minMarkdownHeadings": 14,
-        "requiredSnippets": ["阵营", "权力结构", "组织", "制衡"],
+        "requiredSnippets": [
+          "阵营",
+          "权力结构",
+          "组织",
+          "制衡"
+        ],
         "qualityChecks": {
-          "requiredSections": ["阵营", "权力结构", "组织", "制衡"],
-          "requiredTerms": ["利益", "冲突", "依附", "威胁"],
+          "requiredSections": [
+            "阵营",
+            "权力结构",
+            "组织",
+            "制衡"
+          ],
+          "requiredTerms": [
+            "利益",
+            "冲突",
+            "依附",
+            "威胁"
+          ],
           "minBulletItems": 14,
           "counters": [
             {
               "label": "factions",
-              "patterns": ["阵营", "组织"],
+              "patterns": [
+                "阵营",
+                "组织"
+              ],
               "minCount": 6
             }
           ]
@@ -241,18 +316,37 @@
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "7 位外来天才的能力、人设、软肋、执念、镜像关系、最终命运",
+        "description": "7 位外来天才的能力、人设、软肋、执念、镜像关系、最终命运。最容易失败点：写成多个版本的“聪明人”，但缺乏不可替代性。",
         "minChars": 18000,
         "minMarkdownHeadings": 22,
-        "requiredSnippets": ["能力标签", "情感软肋", "行动逻辑", "个人执念", "最终命运"],
+        "requiredSnippets": [
+          "能力标签",
+          "情感软肋",
+          "行动逻辑",
+          "个人执念",
+          "最终命运"
+        ],
         "qualityChecks": {
-          "requiredSections": ["能力标签", "情感软肋", "行动逻辑", "个人执念", "最终命运"],
-          "requiredTerms": ["镜像", "关系", "最强时刻", "最脆弱时刻"],
+          "requiredSections": [
+            "能力标签",
+            "情感软肋",
+            "行动逻辑",
+            "个人执念",
+            "最终命运"
+          ],
+          "requiredTerms": [
+            "镜像",
+            "关系",
+            "最强时刻",
+            "最脆弱时刻"
+          ],
           "minBulletItems": 24,
           "counters": [
             {
               "label": "character-blocks",
-              "patterns": ["外来天才"],
+              "patterns": [
+                "外来天才"
+              ],
               "minCount": 7
             }
           ]
@@ -266,15 +360,30 @@
         "description": "18 位本土天才的职能定位、压迫感层级、出场价值与事件挂靠",
         "minChars": 22000,
         "minMarkdownHeadings": 24,
-        "requiredSnippets": ["本土天才", "定位", "压迫感", "事件挂靠"],
+        "requiredSnippets": [
+          "本土天才",
+          "定位",
+          "压迫感",
+          "事件挂靠"
+        ],
         "qualityChecks": {
-          "requiredSections": ["定位", "压迫感", "事件挂靠"],
-          "requiredTerms": ["阵营", "作用", "威胁"],
+          "requiredSections": [
+            "定位",
+            "压迫感",
+            "事件挂靠"
+          ],
+          "requiredTerms": [
+            "阵营",
+            "作用",
+            "威胁"
+          ],
           "minBulletItems": 30,
           "counters": [
             {
               "label": "local-geniuses",
-              "patterns": ["本土天才"],
+              "patterns": [
+                "本土天才"
+              ],
               "minCount": 18
             }
           ]
@@ -285,18 +394,38 @@
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "唯一主线骨架、真主角、假 boss、真 boss、终局布局者与关键阶段转折",
+        "description": "唯一主线骨架、真主角、假 boss、真 boss、终局布局者与关键阶段转折。最容易失败点：反转很大，但主要靠解释而不是前文积累成立。",
         "minChars": 15000,
         "minMarkdownHeadings": 16,
-        "requiredSnippets": ["主线", "真主角", "假 boss", "真 boss", "终局布局者"],
+        "requiredSnippets": [
+          "主线",
+          "真主角",
+          "假 boss",
+          "真 boss",
+          "终局布局者"
+        ],
         "qualityChecks": {
-          "requiredSections": ["主线", "真主角", "假 boss", "真 boss", "终局布局者"],
-          "requiredTerms": ["转折", "误导", "揭示", "终局"],
+          "requiredSections": [
+            "主线",
+            "真主角",
+            "假 boss",
+            "真 boss",
+            "终局布局者"
+          ],
+          "requiredTerms": [
+            "转折",
+            "误导",
+            "揭示",
+            "终局"
+          ],
           "minBulletItems": 14,
           "counters": [
             {
               "label": "spine-turns",
-              "patterns": ["转折", "阶段"],
+              "patterns": [
+                "转折",
+                "阶段"
+              ],
               "minCount": 6
             }
           ]
@@ -307,17 +436,33 @@
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "五大核心事件设计，每个事件必须包含目标、误导、反制、代价、余波",
+        "description": "五大核心事件设计。每个事件都必须同时具备目标、误导、反制、代价、余波和与终局的挂接，不能只是大场面拼盘。",
         "minChars": 25000,
         "minMarkdownHeadings": 30,
-        "requiredSnippets": ["事件目标", "信息差", "误导", "反制", "代价", "余波"],
+        "requiredSnippets": [
+          "事件目标",
+          "信息差",
+          "误导",
+          "反制",
+          "代价",
+          "余波"
+        ],
         "qualityChecks": {
-          "requiredSections": ["事件目标", "信息差", "误导", "反制", "代价", "余波"],
+          "requiredSections": [
+            "事件目标",
+            "信息差",
+            "误导",
+            "反制",
+            "代价",
+            "余波"
+          ],
           "minBulletItems": 18,
           "counters": [
             {
               "label": "event-blocks",
-              "patterns": ["事件"],
+              "patterns": [
+                "事件"
+              ],
               "minCount": 5
             }
           ]
@@ -328,23 +473,43 @@
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "核心诡计设计库，要求高密度中小点子、互锁链条与可复盘性",
+        "description": "核心诡计设计库，要求高密度中小点子、互锁链条与可复盘性。最容易失败点：点子很多，但彼此不咬合，或只靠单层信息差硬撑。",
         "minChars": 30000,
         "minMarkdownHeadings": 32,
-        "requiredSnippets": ["大点子", "中点子", "小点子", "可复盘", "互锁"],
+        "requiredSnippets": [
+          "大点子",
+          "中点子",
+          "小点子",
+          "可复盘",
+          "互锁"
+        ],
         "qualityChecks": {
-          "requiredSections": ["大点子", "中点子", "小点子", "可复盘", "互锁"],
-          "requiredTerms": ["误导", "反制", "信息差"],
+          "requiredSections": [
+            "大点子",
+            "中点子",
+            "小点子",
+            "可复盘",
+            "互锁"
+          ],
+          "requiredTerms": [
+            "误导",
+            "反制",
+            "信息差"
+          ],
           "minBulletItems": 24,
           "counters": [
             {
               "label": "big-ideas",
-              "patterns": ["大点子"],
+              "patterns": [
+                "大点子"
+              ],
               "minCount": 5
             },
             {
               "label": "mid-ideas",
-              "patterns": ["中点子"],
+              "patterns": [
+                "中点子"
+              ],
               "minCount": 10
             }
           ]
@@ -355,18 +520,39 @@
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "纯爱线、宿敌线、三人组/二人组、背叛线、镜像人物关系",
+        "description": "纯爱线、宿敌线、三人组/二人组、背叛线、镜像人物关系。最容易失败点：关系很多，但缺乏势均力敌与真正会改变命运的张力。",
         "minChars": 12000,
         "minMarkdownHeadings": 16,
-        "requiredSnippets": ["纯爱", "宿敌", "背叛", "镜像", "关系变化"],
+        "requiredSnippets": [
+          "纯爱",
+          "宿敌",
+          "背叛",
+          "镜像",
+          "关系变化"
+        ],
         "qualityChecks": {
-          "requiredSections": ["纯爱", "宿敌", "背叛", "镜像", "关系变化"],
-          "requiredTerms": ["信任", "裂痕", "转向", "代价"],
+          "requiredSections": [
+            "纯爱",
+            "宿敌",
+            "背叛",
+            "镜像",
+            "关系变化"
+          ],
+          "requiredTerms": [
+            "信任",
+            "裂痕",
+            "转向",
+            "代价"
+          ],
           "minBulletItems": 16,
           "counters": [
             {
               "label": "relationship-lines",
-              "patterns": ["关系", "背叛", "宿敌"],
+              "patterns": [
+                "关系",
+                "背叛",
+                "宿敌"
+              ],
               "minCount": 8
             }
           ]
@@ -377,13 +563,29 @@
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "分卷结构、每卷主题、卷末悬念、卷级高潮与强度递增曲线",
+        "description": "分卷结构、每卷主题、卷末悬念、卷级高潮与强度递增曲线。最容易失败点：卷级框架完整，但越写越弱、强度前高后低。",
         "minChars": 18000,
         "minMarkdownHeadings": 18,
-        "requiredSnippets": ["卷一", "卷二", "卷三", "卷主题", "卷末悬念"],
+        "requiredSnippets": [
+          "卷一",
+          "卷二",
+          "卷三",
+          "卷主题",
+          "卷末悬念"
+        ],
         "qualityChecks": {
-          "requiredSections": ["卷一", "卷二", "卷三", "卷主题", "卷末悬念"],
-          "requiredTerms": ["高潮", "升级", "节奏"],
+          "requiredSections": [
+            "卷一",
+            "卷二",
+            "卷三",
+            "卷主题",
+            "卷末悬念"
+          ],
+          "requiredTerms": [
+            "高潮",
+            "升级",
+            "节奏"
+          ],
           "minBulletItems": 12
         }
       },
@@ -392,18 +594,37 @@
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "第一大卷章节细纲与人物入场设计",
+        "description": "第一大卷章节细纲与人物入场设计。最容易失败点：章节很多，但大量章节只是信息搬运。",
         "minChars": 25000,
         "minMarkdownHeadings": 28,
-        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "人物推进"],
+        "requiredSnippets": [
+          "章节目标",
+          "冲突",
+          "转折",
+          "结果",
+          "钩子",
+          "人物推进"
+        ],
         "qualityChecks": {
-          "requiredSections": ["章节目标", "冲突", "转折", "结果", "钩子", "人物推进"],
-          "requiredTerms": ["主线", "铺垫"],
+          "requiredSections": [
+            "章节目标",
+            "冲突",
+            "转折",
+            "结果",
+            "钩子",
+            "人物推进"
+          ],
+          "requiredTerms": [
+            "主线",
+            "铺垫"
+          ],
           "minBulletItems": 20,
           "counters": [
             {
               "label": "chapters",
-              "patterns": ["章节"],
+              "patterns": [
+                "章节"
+              ],
               "minCount": 10
             }
           ]
@@ -417,15 +638,34 @@
         "description": "第二大卷章节细纲与局势升级设计",
         "minChars": 25000,
         "minMarkdownHeadings": 28,
-        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "伏笔"],
+        "requiredSnippets": [
+          "章节目标",
+          "冲突",
+          "转折",
+          "结果",
+          "钩子",
+          "伏笔"
+        ],
         "qualityChecks": {
-          "requiredSections": ["章节目标", "冲突", "转折", "结果", "钩子", "伏笔"],
-          "requiredTerms": ["升级", "反制"],
+          "requiredSections": [
+            "章节目标",
+            "冲突",
+            "转折",
+            "结果",
+            "钩子",
+            "伏笔"
+          ],
+          "requiredTerms": [
+            "升级",
+            "反制"
+          ],
           "minBulletItems": 20,
           "counters": [
             {
               "label": "chapters",
-              "patterns": ["章节"],
+              "patterns": [
+                "章节"
+              ],
               "minCount": 10
             }
           ]
@@ -439,15 +679,34 @@
         "description": "第三大卷章节细纲与终局战前布局设计",
         "minChars": 25000,
         "minMarkdownHeadings": 28,
-        "requiredSnippets": ["章节目标", "冲突", "转折", "结果", "钩子", "终局关联"],
+        "requiredSnippets": [
+          "章节目标",
+          "冲突",
+          "转折",
+          "结果",
+          "钩子",
+          "终局关联"
+        ],
         "qualityChecks": {
-          "requiredSections": ["章节目标", "冲突", "转折", "结果", "钩子", "终局关联"],
-          "requiredTerms": ["终局", "回收"],
+          "requiredSections": [
+            "章节目标",
+            "冲突",
+            "转折",
+            "结果",
+            "钩子",
+            "终局关联"
+          ],
+          "requiredTerms": [
+            "终局",
+            "回收"
+          ],
           "minBulletItems": 20,
           "counters": [
             {
               "label": "chapters",
-              "patterns": ["章节"],
+              "patterns": [
+                "章节"
+              ],
               "minCount": 10
             }
           ]
@@ -458,18 +717,35 @@
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "伏笔总台账，标明埋点、回收位置、作用、二刷价值、错觉设计",
+        "description": "伏笔总台账，标明埋点、回收位置、作用、二刷价值、错觉设计。最容易失败点：表面像伏笔，实则只是后补解释。",
         "minChars": 20000,
         "minMarkdownHeadings": 20,
-        "requiredSnippets": ["伏笔", "埋点", "回收", "作用", "二刷价值"],
+        "requiredSnippets": [
+          "伏笔",
+          "埋点",
+          "回收",
+          "作用",
+          "二刷价值"
+        ],
         "qualityChecks": {
-          "requiredSections": ["伏笔", "埋点", "回收", "作用", "二刷价值"],
-          "requiredTerms": ["错觉", "误导"],
+          "requiredSections": [
+            "伏笔",
+            "埋点",
+            "回收",
+            "作用",
+            "二刷价值"
+          ],
+          "requiredTerms": [
+            "错觉",
+            "误导"
+          ],
           "minBulletItems": 18,
           "counters": [
             {
               "label": "foreshadow-links",
-              "patterns": ["伏笔"],
+              "patterns": [
+                "伏笔"
+              ],
               "minCount": 12
             }
           ]
@@ -480,18 +756,38 @@
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "关键场景库、雨戏、大屠杀、恐怖桥段、名台词、哲理句、记忆点场景",
+        "description": "关键场景库、雨戏、大屠杀、恐怖桥段、名台词、哲理句、记忆点场景。最容易失败点：场景看着热闹，却缺乏真正的情绪刺穿力和回响。",
         "minChars": 12000,
         "minMarkdownHeadings": 16,
-        "requiredSnippets": ["雨戏", "大屠杀", "恐怖", "名台词", "哲理"],
+        "requiredSnippets": [
+          "雨戏",
+          "大屠杀",
+          "恐怖",
+          "名台词",
+          "哲理"
+        ],
         "qualityChecks": {
-          "requiredSections": ["雨戏", "大屠杀", "恐怖", "名台词", "哲理"],
-          "requiredTerms": ["记忆点", "情绪", "画面", "回响"],
+          "requiredSections": [
+            "雨戏",
+            "大屠杀",
+            "恐怖",
+            "名台词",
+            "哲理"
+          ],
+          "requiredTerms": [
+            "记忆点",
+            "情绪",
+            "画面",
+            "回响"
+          ],
           "minBulletItems": 18,
           "counters": [
             {
               "label": "scene-blocks",
-              "patterns": ["场景", "名台词"],
+              "patterns": [
+                "场景",
+                "名台词"
+              ],
               "minCount": 8
             }
           ]
@@ -502,28 +798,67 @@
         "draftRole": "Specialist",
         "reviewRole": "Supervisor",
         "finalRole": "Host",
-        "description": "最终总汇总稿，整合创作圣经并做全局逻辑自检",
+        "description": "最终总汇总稿，整合创作圣经并做全局逻辑自检。最容易失败点：看起来完整，但大量关键结论只能靠解释成立。",
         "minChars": 40000,
         "minMarkdownHeadings": 24,
-        "requiredSnippets": ["核心命题", "世界规则", "人物", "五大事件", "分卷结构", "逻辑自检"],
+        "requiredSnippets": [
+          "核心命题",
+          "世界规则",
+          "人物",
+          "五大事件",
+          "分卷结构",
+          "逻辑自检"
+        ],
         "qualityChecks": {
-          "requiredSections": ["核心命题", "世界规则", "人物", "五大事件", "分卷结构", "逻辑自检"],
-          "requiredTerms": ["终局", "伏笔", "回收"],
+          "requiredSections": [
+            "核心命题",
+            "世界规则",
+            "人物",
+            "五大事件",
+            "分卷结构",
+            "逻辑自检"
+          ],
+          "requiredTerms": [
+            "终局",
+            "伏笔",
+            "回收"
+          ],
           "minBulletItems": 24,
           "counters": [
             {
               "label": "event-coverage",
-              "patterns": ["事件"],
+              "patterns": [
+                "事件"
+              ],
               "minCount": 5
             },
             {
               "label": "volume-coverage",
-              "patterns": ["卷"],
+              "patterns": [
+                "卷"
+              ],
               "minCount": 3
             }
           ]
         }
       }
     ]
+  },
+  "summarizer": {
+    "enabled": true,
+    "perTurn": true,
+    "perRound": true,
+    "factsBoard": true,
+    "aiAgentId": null,
+    "outputPaths": {
+      "turnSummaryDir": "debate/turn_summaries/",
+      "roundSummaryDir": "debate/round_summaries/",
+      "factsBoardPath": "facts/board.md"
+    },
+    "prompts": {
+      "turnSummary": "你是这场辩论的独立总结器。你的任务不是继续辩论，而是把“刚刚结束的这一回”压缩成一份高信息密度的回摘要。\n\n要求：\n1. 只保留本回真正有用的信息，不要为了凑格式硬编“新增主张”或“新增方案”。\n2. 先判断本回是否真的推进了当前阶段的当前子任务；如果没有推进，必须明确指出它是绕题、重复、空泛，还是主要在做流程动作。\n3. 如果这一回主要是在投票、公告、收束、文件落库、检查点确认或其他流程动作，就重点总结“做了什么动作、状态发生了什么变化、这会怎样影响后续辩论”。\n4. 如果本回涉及点子筛选，尽量指出它主要是在处理大点子 / 中点子 / 小点子哪一层。\n5. 如果本回推进了事件、角色、终局或章节，尽量指出本回最容易翻车的风险是什么。\n6. 不要大段摘抄原文，不要空泛夸赞，不要写场面话。\n\n输出必须严格使用以下结构：\n## 当前子任务是否被推进\n## 本回关键信息\n## 本回动作/状态更新\n## 本回最弱一笔 / 风险\n## 下一轮最该继续推进的点",
+      "roundSummary": "你是独立总结器。你的任务是基于“本轮已有的逐回摘要”，生成一份更详细、可直接阅读的轮摘要。\n\n要求：\n1. 只基于本轮的 turn summaries 工作，不要回顾整场长历史。\n2. 轮摘要不仅要说明本轮说了什么，还要判断本轮到底把当前阶段推进到了哪个子任务、哪些推进是真实的、哪些只是重复讨论。\n3. 如果本轮主要是投票、公告、文件落库、检查点或流程推进，不要硬写成“新增主张”；应明确写出发生了什么动作、状态如何变化、对后续有什么影响。\n4. 尽量指出本轮讨论主要打的是大点子 / 中点子 / 小点子哪一层，以及有没有把不同层级混在一起导致失焦。\n5. 需要指出本轮的最强一笔、最弱一笔，以及当前最危险的质量风险：伪高智商、伪伏笔、伪人物成长、空泛堆字、只靠解释成立的高潮。\n6. 如果当前仍处于选举前，要观察哪个席位最像 Host 候选、哪个最像 Supervisor 候选。\n7. 不要大段摘抄原文，不要空泛赞美，不要写漂亮废话。\n\n请严格输出以下 Markdown 结构：\n## 本轮推进到的阶段 / 子任务\n## 本轮关键推进\n## 本轮主要处理的点子层级\n## 本轮关键动作 / 状态变化\n## 本轮最强一笔\n## 本轮最弱一笔\n## 本轮遗留风险\n## Host / Supervisor 候选观察\n## 下一轮最该继续推进的点",
+      "factsBoard": "你是这场辩论的独立总结器。你的任务是把现有 facts/board.md 重写成“结构化工作板”，不是把新内容附在最后面。\n\n要求：\n1. 必须做去重、合并、替换，不要保留逐 Turn 摘录。\n2. 既要记录讨论形成的稳定内容，也要记录投票、公告、文件收束等流程动作带来的关键状态变化。\n3. 优先保留对后续推进最有用的信息，并删除已被推翻或失效的旧条目。\n4. 必须显式记录当前最弱一笔和下一轮必须继续打磨的点。\n5. 表达要短、硬、清楚，适合后续 AI 快速续跑。\n\n输出必须严格使用以下结构：\n## 已确认共识\n## 候选方案\n## 未决问题\n## 高风险漏洞\n## 当前最弱一笔\n## 下一轮必须继续打磨的点"
+    }
   }
 }

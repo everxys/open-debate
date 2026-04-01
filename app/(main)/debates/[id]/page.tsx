@@ -211,7 +211,7 @@ type AllFileInfoState = {
 
 type QuestionDiffRow = LineDiffRow;
 
-type FileActivityAction = "read" | "write";
+type FileActivityAction = "read" | "write" | "summarizer_write";
 type FileActivityEntryAction = "read" | "write" | "search" | "list" | "stat";
 
 type FileActivityListItem = {
@@ -246,6 +246,7 @@ type FileActivityDetail = FileActivityListItem & {
 type FileActivityCounts = {
   read: number;
   write: number;
+  summarizerWrite: number;
 };
 
 function formatFileActivityEntryAction(action: FileActivityEntryAction) {
@@ -1350,8 +1351,26 @@ function DebateFilesPanel(props: {
   onCloseContextMenu: () => void;
   onOpenFileInfo: (virtualPath: string) => void;
 }) {
+  const treeRootRef = useRef<HTMLDivElement | null>(null);
+  const [treeHeight, setTreeHeight] = useState(320);
+
+  useEffect(() => {
+    const element = treeRootRef.current;
+    if (!element) return;
+
+    const syncHeight = () => {
+      const nextHeight = Math.max(240, Math.floor(element.clientHeight - 12));
+      setTreeHeight((current) => (current === nextHeight ? current : nextHeight));
+    };
+
+    syncHeight();
+    const observer = new ResizeObserver(() => syncHeight());
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <div className="panel stack">
+    <div className="panel stack" style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
       <DebateFilesToolbar
         selectedCount={props.selectedCount}
         downloading={props.downloading}
@@ -1364,8 +1383,13 @@ function DebateFilesPanel(props: {
       ) : !props.hasFiles ? (
         <div className="muted">暂无文件（通常需要至少一轮发言后才会逐步生成）。</div>
       ) : (
-        <div className="treeRoot" style={{ maxHeight: "calc(100vh - 260px)" }} onContextMenu={props.onRootContextMenu}>
-          <Tree<FsNode> data={props.tree} width="100%" height={560} indent={18} rowHeight={34} openByDefault={false}>
+        <div
+          ref={treeRootRef}
+          className="treeRoot"
+          style={{ flex: 1, minHeight: 0, maxHeight: "none", overflow: "hidden", padding: 0 }}
+          onContextMenu={props.onRootContextMenu}
+        >
+          <Tree<FsNode> data={props.tree} width="100%" height={treeHeight} indent={18} rowHeight={34} openByDefault={false}>
             {props.renderNode}
           </Tree>
         </div>
@@ -2542,6 +2566,14 @@ function FileActivityPanel(props: {
           >
             {`AI写入${props.counts.write > 0 ? ` (${props.counts.write})` : ""}`}
           </button>
+          <button
+            className="btn"
+            type="button"
+            style={props.action === "summarizer_write" ? { borderColor: "rgba(38, 99, 235, 0.55)", background: "rgba(38, 99, 235, 0.08)" } : undefined}
+            onClick={() => props.onChangeAction("summarizer_write")}
+          >
+            {`总结器写入${props.counts.summarizerWrite > 0 ? ` (${props.counts.summarizerWrite})` : ""}`}
+          </button>
         </div>
       </div>
       {props.loading ? <div className="muted">加载中...</div> : null}
@@ -2551,12 +2583,16 @@ function FileActivityPanel(props: {
           {props.items.length === 0 ? (
             <div className="muted">
               {props.action === "read"
-                ? props.counts.write > 0
-                  ? `当前还没有读取记录，但已记录 ${props.counts.write} 条 AI 写入，切到“AI写入”即可查看。`
+                ? props.counts.write > 0 || props.counts.summarizerWrite > 0
+                  ? `当前还没有读取记录，但已有写入记录；可切到“AI写入”或“总结器写入”查看。`
                   : "尚未开始记录文件读取历史（仅统计功能上线后的操作）。"
-                : props.counts.read > 0
-                  ? `当前还没有 AI 写入记录，但已记录 ${props.counts.read} 条读取，切到“读取”即可查看。`
-                  : "尚未开始记录文件 AI 写入历史（仅统计功能上线后的操作）。"}
+                : props.action === "write"
+                  ? props.counts.read > 0 || props.counts.summarizerWrite > 0
+                    ? `当前还没有普通 AI 写入记录；可切到“读取”或“总结器写入”查看。`
+                    : "尚未开始记录普通 AI 写入历史（仅统计功能上线后的操作）。"
+                  : props.counts.read > 0 || props.counts.write > 0
+                    ? `当前还没有总结器写入记录；可切到“读取”或“AI写入”查看。`
+                    : "尚未开始记录总结器写入历史（仅统计功能上线后的操作）。"}
             </div>
           ) : null}
           {props.items.map((item) => (
@@ -2567,8 +2603,18 @@ function FileActivityPanel(props: {
               style={{
                 textAlign: "left",
                 padding: "12px 14px",
-                borderColor: props.action === "write" ? "rgba(148, 163, 184, 0.3)" : "rgba(59, 130, 246, 0.18)",
-                background: props.action === "write" ? "rgba(248, 250, 252, 0.96)" : "rgba(239, 246, 255, 0.55)"
+                borderColor:
+                  props.action === "read"
+                    ? "rgba(59, 130, 246, 0.18)"
+                    : props.action === "summarizer_write"
+                      ? "rgba(124, 58, 237, 0.24)"
+                      : "rgba(148, 163, 184, 0.3)",
+                background:
+                  props.action === "read"
+                    ? "rgba(239, 246, 255, 0.55)"
+                    : props.action === "summarizer_write"
+                      ? "rgba(245, 243, 255, 0.92)"
+                      : "rgba(248, 250, 252, 0.96)"
               }}
               onClick={() => props.onSelectEntry(item.id)}
             >
@@ -2582,7 +2628,7 @@ function FileActivityPanel(props: {
                     padding: "2px 8px",
                     fontSize: 12,
                     background:
-                      props.action === "write"
+                      props.action !== "read"
                         ? "rgba(15, 23, 42, 0.05)"
                         : item.action === "read"
                           ? "rgba(37, 99, 235, 0.1)"
@@ -2593,7 +2639,7 @@ function FileActivityPanel(props: {
                               : "rgba(20, 184, 166, 0.12)"
                   }}
                 >
-                  {props.action === "write" ? "AI写入" : formatFileActivityEntryAction(item.action)}
+                  {props.action === "write" ? "AI写入" : props.action === "summarizer_write" ? "总结器写入" : formatFileActivityEntryAction(item.action)}
                 </span>
               </div>
               <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 6 }}>
@@ -2604,7 +2650,9 @@ function FileActivityPanel(props: {
                     padding: "2px 8px",
                     fontSize: 12,
                     background:
-                      item.actorRoleType === "Host"
+                      item.actorRoleType === "Summarizer"
+                        ? "rgba(124, 58, 237, 0.14)"
+                        : item.actorRoleType === "Host"
                         ? "rgba(37, 99, 235, 0.1)"
                         : item.actorRoleType === "Supervisor"
                           ? "rgba(217, 119, 6, 0.12)"
@@ -2623,7 +2671,7 @@ function FileActivityPanel(props: {
                 {item.scope === "agent" ? ` · seat file${item.targetSeatName ? ` · ${item.targetSeatName}` : ""}` : " · shared file"}
               </div>
               {props.action === "read" ? <div className="muted" style={{ marginTop: 6 }}>点击查看详细信息</div> : null}
-              {props.action === "write" ? (
+              {props.action !== "read" ? (
                 <div className="row" style={{ gap: 10, flexWrap: "wrap", marginTop: 8, alignItems: "center" }}>
                   <span className="muted">
                     {(item.beforeVersion ?? 0) > 0 || (item.afterVersion ?? 0) > 0
@@ -2675,7 +2723,7 @@ function FileActivityDetailDialog(props: {
         style={{ width: "min(1120px, 100%)", maxHeight: "calc(100dvh - 48px)", overflow: "hidden" }}
       >
         <div className="row debateModalHeader" style={{ justifyContent: "space-between" }}>
-          <strong>{props.action === "read" ? "读取详情" : "AI写入详情"}</strong>
+          <strong>{props.action === "read" ? "读取详情" : props.action === "summarizer_write" ? "总结器写入详情" : "AI写入详情"}</strong>
           <button className="btn" type="button" onClick={props.onClose}>
             关闭
           </button>
@@ -2707,7 +2755,7 @@ function FileActivityDetailDialog(props: {
                   {props.detail.scope === "agent" ? ` · seat file${props.detail.targetSeatName ? ` · ${props.detail.targetSeatName}` : ""}` : " · shared file"}
                   {props.action === "read" ? ` · ${formatFileActivityEntryAction(props.detail.action)}` : ""}
                 </div>
-                {props.action === "write" ? (
+                {props.action !== "read" ? (
                   <div className="muted">
                     {`v${props.detail.beforeVersion ?? 0} -> v${props.detail.afterVersion ?? 0}`}
                     {props.detail.writeMode ? ` · ${props.detail.writeMode}` : ""}
@@ -2716,7 +2764,7 @@ function FileActivityDetailDialog(props: {
                   </div>
                 ) : null}
               </div>
-              {props.action === "write" ? (
+              {props.action !== "read" ? (
                 <div className="muted">
                   <span style={{ color: "rgb(22, 163, 74)" }}>+{props.detail.summary.added}</span>
                   {" / "}
@@ -2725,7 +2773,7 @@ function FileActivityDetailDialog(props: {
                   <span style={{ color: "rgb(37, 99, 235)" }}>~{props.detail.summary.changed}</span>
                 </div>
               ) : null}
-              {props.action === "write" ? (
+              {props.action !== "read" ? (
                 <TwoPaneDiffView rows={props.detail.diffRows} emptyText="本次写入没有产生可展示的差异。" height="min(68dvh, calc(100dvh - 240px))" />
               ) : (
                 <div className="panel stack" style={{ minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
@@ -3097,7 +3145,7 @@ export default function DebateDetailPage() {
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffRows, setDiffRows] = useState<QuestionDiffRow[]>([]);
   const [fileActivityAction, setFileActivityAction] = useState<FileActivityAction>("write");
-  const [fileActivityCounts, setFileActivityCounts] = useState<FileActivityCounts>({ read: 0, write: 0 });
+  const [fileActivityCounts, setFileActivityCounts] = useState<FileActivityCounts>({ read: 0, write: 0, summarizerWrite: 0 });
   const [fileActivityLoading, setFileActivityLoading] = useState(false);
   const [fileActivityLoadingMore, setFileActivityLoadingMore] = useState(false);
   const [fileActivityError, setFileActivityError] = useState("");
@@ -3910,9 +3958,10 @@ export default function DebateDetailPage() {
           payload.meta?.counts && typeof payload.meta.counts === "object"
             ? {
                 read: Number(payload.meta.counts.read ?? 0) || 0,
-                write: Number(payload.meta.counts.write ?? 0) || 0
+                write: Number(payload.meta.counts.write ?? 0) || 0,
+                summarizerWrite: Number(payload.meta.counts.summarizerWrite ?? 0) || 0
               }
-            : { read: 0, write: 0 };
+            : { read: 0, write: 0, summarizerWrite: 0 };
         setFileActivityCounts(nextCounts);
         setFileActivityItems((current) => (mode === "reset" ? nextItems : [...current, ...nextItems]));
         setFileActivityHasMore(Boolean(payload.meta?.hasMore));

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 
 import { RoleFilesManagerColumns } from "@/components/strategies/role-files-manager";
 import { useAutoDismissToast } from "@/components/ui/use-toast";
@@ -93,6 +93,10 @@ type WorkflowPromptDialogState =
       value: string;
       phaseIndex?: number;
     };
+
+type FileWithWebkitRelativePath = File & {
+  webkitRelativePath?: string;
+};
 
 function createClientId() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
@@ -229,6 +233,8 @@ export default function StrategyDetailPage() {
   const [isDuplicatingRole, setIsDuplicatingRole] = useState(false);
   const [isFavoriting, setIsFavoriting] = useState(false);
   const [isForking, setIsForking] = useState(false);
+  const [isExportingFolder, setIsExportingFolder] = useState(false);
+  const [isImportingFolder, setIsImportingFolder] = useState(false);
   const [workflowOpeningPrompt, setWorkflowOpeningPrompt] = useState("");
   const [workflowPhasePrompts, setWorkflowPhasePrompts] = useState<WorkflowPhasePrompt[]>([]);
   const [workflowPhasePromptsLoading, setWorkflowPhasePromptsLoading] = useState(false);
@@ -259,6 +265,7 @@ export default function StrategyDetailPage() {
   const [workflowContextAccessLoading, setWorkflowContextAccessLoading] = useState(false);
   const [workflowContextAccessSaving, setWorkflowContextAccessSaving] = useState(false);
   const [workflowSummarizerSaving, setWorkflowSummarizerSaving] = useState(false);
+  const folderImportInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -378,6 +385,69 @@ export default function StrategyDetailPage() {
       }
     } finally {
       setIsForking(false);
+    }
+  }
+
+  async function downloadStrategyFolder() {
+    if (!id || isExportingFolder) return;
+    setIsExportingFolder(true);
+    try {
+      const response = await fetch(`/api/strategies/${id}/download`, { method: "GET" });
+      if (!response.ok) {
+        const payload = await readPayload(response);
+        showToast("error", payload.error?.message ?? "下载失败");
+        return;
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get("content-disposition") ?? "";
+      const matched = disposition.match(/filename="([^"]+)"/i);
+      const filename = matched?.[1] ?? `strategy-${id}.zip`;
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+    } finally {
+      setIsExportingFolder(false);
+    }
+  }
+
+  function openStrategyFolderImport() {
+    folderImportInputRef.current?.click();
+  }
+
+  async function onStrategyFolderPicked(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []) as FileWithWebkitRelativePath[];
+    event.target.value = "";
+    if (!id || files.length <= 0 || isImportingFolder) return;
+
+    const ok = window.confirm("确认用所选文件夹覆盖当前策略？这会替换当前策略的角色、System Prompt、workflow 和所有角色文件。");
+    if (!ok) return;
+
+    setIsImportingFolder(true);
+    try {
+      const formData = new FormData();
+      for (const file of files) {
+        const relativePath = file.webkitRelativePath?.trim() || file.name;
+        formData.append("files", file);
+        formData.append("paths", relativePath);
+      }
+      const response = await fetch(`/api/strategies/${id}/import-folder`, {
+        method: "POST",
+        body: formData
+      });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "导入失败");
+        return;
+      }
+      showToast("success", "已用文件夹覆盖当前策略");
+      await load();
+    } finally {
+      setIsImportingFolder(false);
     }
   }
 
@@ -949,6 +1019,14 @@ export default function StrategyDetailPage() {
       ) : null}
 
       <section className="panel">
+        <input
+          ref={folderImportInputRef}
+          type="file"
+          multiple
+          onChange={(event) => void onStrategyFolderPicked(event)}
+          style={{ display: "none" }}
+          {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+        />
         <div className="row" style={{ justifyContent: "space-between" }}>
           <div>
             <h2 style={{ margin: 0 }}>策略</h2>
@@ -958,6 +1036,14 @@ export default function StrategyDetailPage() {
             <Link className="btn btn-primary" href={`/debates/new?strategyId=${detail.id}`}>
               使用策略
             </Link>
+            <button className="btn" disabled={isExportingFolder} onClick={() => void downloadStrategyFolder()}>
+              {isExportingFolder ? "导出中..." : "下载文件夹"}
+            </button>
+            {detail.canEdit ? (
+              <button className="btn" disabled={isImportingFolder} onClick={openStrategyFolderImport}>
+                {isImportingFolder ? "导入中..." : "上传文件夹覆盖"}
+              </button>
+            ) : null}
             {!detail.canEdit ? (
               <>
                 <button className="btn" disabled={isFavoriting} onClick={() => void toggleFavorite()}>
