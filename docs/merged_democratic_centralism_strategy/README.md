@@ -14,4 +14,5 @@
 - `protocol/20_output_templates.md`
 - `protocol/30_election_and_veto.md`
 - `protocol/40_idea_ledger_and_outline.md`
+- `protocol/50_arsenal_and_methods.md`
 - `templates/debate_question.md`

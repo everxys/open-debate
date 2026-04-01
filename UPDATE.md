@@ -32,3 +32,4 @@
 - 2026-04-01: 合并当前“民主集中制共识算法（先赛马，再相马）”策略与 `docs/restored_novel_godmode/` 中的高价值旧内容，新增 `docs/merged_democratic_centralism_strategy/` 作为策略源文件，并已把增强后的 `workflow`、`protocol/*`、`templates/debate_question.md` 回写到数据库中的当前策略。
 - 2026-04-01: 继续把 `NOVEL_GODMODE_MASTER_PROMPT` 中未完全吸收的内容增强回当前策略：补强故事总前提、点子分层规则、事件/角色/终局失败判据、总结器的审判视角；新增 `protocol/40_idea_ledger_and_outline.md` 并同步到数据库中的当前策略。
 - 2026-04-01: 对当前神作策略做了一轮不降质瘦身，压缩 `openingPrompt` 和部分 protocol / question 中的重复语义，保留核心高压目标，把细规则更多收束到 `protocol/*`，并同步回数据库中的当前策略。
+- 2026-04-01: 继续把 `NOVEL_GODMODE_MASTER_PROMPT` 中缺失的高价值约束分层吸收回当前策略：新增 `protocol/50_arsenal_and_methods.md`，补回精简三层学科武器库、角色主场方法论、二刷成立级质量审判、阶段伪推进提醒，并同步到数据库中的当前策略。
