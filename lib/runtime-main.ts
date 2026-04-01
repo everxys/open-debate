@@ -1141,14 +1141,16 @@ export async function persistAnswerAfterTurn(input: {
   content: string;
   now: string;
 }) {
-  const answersPath = `${ANSWERS_DIR}round-${input.roundNumber}.md`;
-  const current = (await readDebateFile(input.userId, input.debateId, answersPath)) ?? "";
+  const answersPath = `${ANSWERS_DIR}round-${input.roundNumber}/turn-${input.turnNumber}.md`;
   const lines: string[] = [];
-  lines.push(`## Turn ${input.turnNumber} · Round ${input.roundNumber} · ${input.agentName} · ${input.now}`);
+  lines.push(`# Turn ${input.turnNumber} · Round ${input.roundNumber}`);
+  lines.push("");
+  lines.push(`- Speaker: ${input.agentName}`);
+  lines.push(`- Timestamp: ${input.now}`);
+  lines.push("");
   lines.push(input.content.trim());
   lines.push("");
-  const next = appendWithTrim(current, lines.join("\n"));
-  await upsertDebateFile(input.debateId, answersPath, next, input.now);
+  await upsertDebateFile(input.debateId, answersPath, lines.join("\n"), input.now);
 }
 
 export function sleep(ms: number) {
@@ -1556,7 +1558,7 @@ function extractDirectoryFileSummary(path: string, content: string) {
   if (normalizedPath === AGENT_DIRECTORY_PATH.toLowerCase()) return "本席位目录索引，说明文件路径、目录和用途。";
   if (normalizedPath.startsWith("debate/turn_summaries/")) return "逐回摘要文件，由独立总结器在每回结束后生成。";
   if (normalizedPath.startsWith("debate/round_summaries/")) return "逐轮摘要文件，由独立总结器在轮末基于回摘要生成。";
-  if (normalizedPath.startsWith("debate/answers/")) return "原始发言归档，按轮拆分保存完整发言内容。";
+  if (normalizedPath.startsWith("debate/answers/")) return "原始发言归档，按轮和回合拆分保存完整发言内容。";
   if (normalizedPath === SHARED_FACTS_PATH.toLowerCase()) return "结构化事实板，聚合当前已确认共识、候选方案、风险和缺口。";
   if (normalizedPath.startsWith("prompts/")) return "席位附加提示词或行为规则。";
   if (normalizedPath.startsWith("notes/")) return "席位工作笔记或补充说明。";
