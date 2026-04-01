@@ -73,6 +73,7 @@ import {
   loadDebateParticipantsInline,
   loadDebateSeatInline,
   loadRecentTurnRows,
+  refreshDebateAgentDirectoryFile,
   loadSharedFactsBoardInline,
   loadWorkflowIdeaBankInline,
   maybeGenerateVoteAnnouncementWithSeat1,
@@ -322,6 +323,13 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
   const turnInRound = ((input.messageNumber - 1) % Math.max(1, input.participantCount)) + 1;
   const roundStart = (input.roundNumber - 1) * Math.max(1, input.participantCount) + 1;
   const roundEnd = input.roundNumber * Math.max(1, input.participantCount);
+  await refreshDebateAgentDirectoryFile({
+    userId: input.userId,
+    debateId: input.debate.id,
+    debateAgentId: input.debateAgentId,
+    agentId: input.agent.id,
+    now: implicitReadAudit.now
+  });
   const enableVotingTools = Boolean(openVoteInline) || isOfficialVotingAllowed(workflow, input.roundNumber);
   const electionStartRound = getWorkflowElectionStartRound(workflow);
   const votingRuleInline = workflow?.enabled
@@ -504,18 +512,26 @@ async function buildSharedSystemParts(context: ProviderPromptContext, overrideSy
       contextAccessLines: context.contextAccessLines
     })
   ];
-  const inline = hasContextAccessRules(context.workflow)
-    ? await loadContextAccessAutoReadInline({
-        userId: context.userId,
-        debateId: context.debate.id,
-        debateAgentId: context.debateAgentId,
-        agentId: context.agent.id,
-        workflow: context.workflow,
-        currentPhaseKind: context.currentPhase?.kind ?? null,
-        audit: context.implicitReadAudit
-      })
-    : await loadDebateAgentFilesInline(context.userId, context.debateAgentId, context.agent.id, 18_000, context.implicitReadAudit);
-  if (inline) systemParts.push(inline);
+  const agentFilesInline = await loadDebateAgentFilesInline(
+    context.userId,
+    context.debateAgentId,
+    context.agent.id,
+    18_000,
+    context.implicitReadAudit
+  );
+  if (agentFilesInline) systemParts.push(agentFilesInline);
+  if (hasContextAccessRules(context.workflow)) {
+    const contextAutoReadInline = await loadContextAccessAutoReadInline({
+      userId: context.userId,
+      debateId: context.debate.id,
+      debateAgentId: context.debateAgentId,
+      agentId: context.agent.id,
+      workflow: context.workflow,
+      currentPhaseKind: context.currentPhase?.kind ?? null,
+      audit: context.implicitReadAudit
+    });
+    if (contextAutoReadInline) systemParts.push(contextAutoReadInline);
+  }
   if (context.messageNumber > context.participantCount) {
     const memoryInline = await loadDebateAgentMemoryInline(context.userId, context.debateAgentId, 10_000, context.implicitReadAudit);
     if (memoryInline) systemParts.push(memoryInline);

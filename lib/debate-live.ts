@@ -19,8 +19,22 @@ export type DebateLiveProgress = {
   updatedAt: string;
 };
 
+export type DebateSummaryJobStatus = "pending" | "running" | "failed" | "completed";
+
+export type DebateSummaryJob = {
+  key: string;
+  kind: "turn_summary" | "round_summary" | "facts_board";
+  status: DebateSummaryJobStatus;
+  label: string;
+  turnNumber: number | null;
+  roundNumber: number | null;
+  message: string | null;
+  updatedAt: string;
+};
+
 export type DebateLiveEvent =
   | { type: "turn_start"; progress: DebateLiveProgress }
+  | { type: "summary_job"; debateId: string; job: DebateSummaryJob }
   | { type: "status"; debateId: string; message: string; at: string }
   | { type: "chunk"; debateId: string; turnNumber: number; agentName: string; text: string; at: string }
   | { type: "turn_end"; debateId: string; turnNumber: number; agentName: string; at: string };
@@ -28,6 +42,7 @@ export type DebateLiveEvent =
 type Store = {
   emitter: EventEmitter;
   progressByDebateId: Map<string, DebateLiveProgress>;
+  summaryJobsByDebateId: Map<string, Map<string, DebateSummaryJob>>;
 };
 
 function getStore(): Store {
@@ -35,7 +50,8 @@ function getStore(): Store {
   if (!anyGlobal.__openDebateLive) {
     anyGlobal.__openDebateLive = {
       emitter: new EventEmitter(),
-      progressByDebateId: new Map()
+      progressByDebateId: new Map(),
+      summaryJobsByDebateId: new Map()
     };
     anyGlobal.__openDebateLive.emitter.setMaxListeners(200);
   }
@@ -43,11 +59,19 @@ function getStore(): Store {
 }
 
 export function getDebateLiveProgress(debateId: string) {
-  return getStore().progressByDebateId.get(debateId) ?? null;
+  const store = getStore();
+  return {
+    progress: store.progressByDebateId.get(debateId) ?? null,
+    summaryJobs: [...(store.summaryJobsByDebateId.get(debateId)?.values() ?? [])].sort((left, right) =>
+      left.updatedAt.localeCompare(right.updatedAt)
+    )
+  };
 }
 
 export function clearDebateLiveProgress(debateId: string) {
-  getStore().progressByDebateId.delete(debateId);
+  const store = getStore();
+  store.progressByDebateId.delete(debateId);
+  store.summaryJobsByDebateId.delete(debateId);
 }
 
 export function setDebateLiveProgress(progress: Omit<DebateLiveProgress, "updatedAt"> & { updatedAt?: string }) {
@@ -62,6 +86,31 @@ export function setDebateLiveProgress(progress: Omit<DebateLiveProgress, "update
 
 export function emitDebateLiveEvent(debateId: string, event: DebateLiveEvent) {
   getStore().emitter.emit(`debate:${debateId}`, event);
+}
+
+export function setDebateSummaryJob(
+  debateId: string,
+  job: Omit<DebateSummaryJob, "updatedAt"> & { updatedAt?: string }
+) {
+  const store = getStore();
+  const jobs = store.summaryJobsByDebateId.get(debateId) ?? new Map<string, DebateSummaryJob>();
+  const next: DebateSummaryJob = {
+    ...job,
+    updatedAt: job.updatedAt ?? new Date().toISOString()
+  };
+  jobs.set(next.key, next);
+  store.summaryJobsByDebateId.set(debateId, jobs);
+  store.emitter.emit(`debate:${debateId}`, { type: "summary_job", debateId, job: next } satisfies DebateLiveEvent);
+}
+
+export function clearDebateSummaryJob(debateId: string, key: string) {
+  const store = getStore();
+  const jobs = store.summaryJobsByDebateId.get(debateId);
+  if (!jobs) return;
+  jobs.delete(key);
+  if (jobs.size <= 0) {
+    store.summaryJobsByDebateId.delete(debateId);
+  }
 }
 
 export function subscribeDebateLiveEvents(

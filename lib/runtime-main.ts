@@ -4,10 +4,18 @@ import type { PoolClient } from "pg";
 import { decryptSecret } from "@/lib/crypto";
 import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type DebateParticipantRoleType } from "@/lib/debate-role-types";
 import { ensureDbReady, query } from "@/lib/db";
-import { emitDebateLiveEvent, setDebateLiveProgress, clearDebateLiveProgress } from "@/lib/debate-live";
+import {
+  clearDebateLiveProgress,
+  clearDebateSummaryJob,
+  emitDebateLiveEvent,
+  setDebateLiveProgress,
+  setDebateSummaryJob
+} from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
 import { indexDebateContextChunk, retrieveRelevantHistory, splitTextIntoRetrievalChunks } from "@/lib/retrieval";
 import {
+  AGENT_DIRECTORY_PATH,
+  ANSWERS_DIR,
   CONTEXT_GENERATION_DIAGNOSTICS_PATH,
   CONTEXT_SEGMENT_PATH,
   CONTEXT_USAGE_BASELINE_PATH,
@@ -26,8 +34,10 @@ import {
   MEMORY_SUMMARY_REFRESH_EVERY_TURNS,
   PROMPT_HARD_MAX_CHARS_ANTHROPIC,
   QUESTION_LATEST_DIFF_PATH,
+  ROUND_SUMMARY_DIR,
   SEATS_PENDING_REORDER_PATH,
   SHARED_FACTS_PATH,
+  TURN_SUMMARY_DIR,
   VOTE_ANNOUNCEMENT_PATH,
   VOTE_ANNOUNCEMENT_PREFIX,
   VOTE_DIRECTIVE_JSON_PATH,
@@ -706,68 +716,439 @@ export async function persistMemoryAfterTurn(input: {
   }
 }
 
-export async function persistSharedFactsAfterTurn(input: {
+function getWorkflowSummarizerConfig(workflow: NormalizedDebateWorkflow | null) {
+  if (!workflow?.enabled || !workflow.summarizer.enabled) return null;
+  const aiAgentId = workflow.summarizer.aiAgentId?.trim() || "";
+  if (!aiAgentId) return null;
+  return workflow.summarizer;
+}
+
+function getTurnSummaryPath(workflow: NormalizedDebateWorkflow | null, turnNumber: number) {
+  const baseDir = workflow?.summarizer.outputPaths.turnSummaryDir || TURN_SUMMARY_DIR;
+  return `${baseDir}turn-${turnNumber}.md`;
+}
+
+function getRoundSummaryPath(workflow: NormalizedDebateWorkflow | null, roundNumber: number) {
+  const baseDir = workflow?.summarizer.outputPaths.roundSummaryDir || ROUND_SUMMARY_DIR;
+  return `${baseDir}round-${roundNumber}.md`;
+}
+
+function getFactsBoardPath(workflow: NormalizedDebateWorkflow | null) {
+  return workflow?.summarizer.outputPaths.factsBoardPath || SHARED_FACTS_PATH;
+}
+
+async function loadWorkflowSummarizerAgent(userId: string, workflow: NormalizedDebateWorkflow | null) {
+  const summarizer = getWorkflowSummarizerConfig(workflow);
+  if (!summarizer) return null;
+  const result = await query<Record<string, unknown>>(
+    "select * from ai_agents where id = $1 and user_id = $2 and deleted_at is null limit 1",
+    [summarizer.aiAgentId, userId]
+  );
+  if ((result.rowCount ?? 0) !== 1) return null;
+  return {
+    summarizer,
+    agent: normalizeAgentRow(result.rows[0])
+  };
+}
+
+async function callWorkflowSummarizerMarkdown(input: {
   userId: string;
   debateId: string;
+  workflow: NormalizedDebateWorkflow | null;
+  systemTask: string;
+  userPrompt: string;
+  maxTokens?: number;
+}) {
+  const runtime = await loadWorkflowSummarizerAgent(input.userId, input.workflow);
+  if (!runtime) return null;
+  const apiKey = decryptSecret(runtime.agent.apiKeyEncrypted);
+  const url = resolveChatUrl(runtime.agent);
+  const system = [buildBaseSystemPrompt(runtime.agent, null), input.systemTask, "Output only Markdown for humans; no tool calls."]
+    .join("\n\n")
+    .trim();
+  if (runtime.agent.provider === "openai") {
+    const response = await openAiChatOnce({
+      url,
+      apiKey,
+      body: {
+        model: runtime.agent.model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: input.userPrompt }
+        ],
+        ...(input.maxTokens ? { max_tokens: input.maxTokens } : {})
+      }
+    });
+    return String(response.content ?? "").trim() || null;
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify({
+      model: runtime.agent.model,
+      max_tokens: input.maxTokens ?? 1000,
+      system,
+      messages: [{ role: "user", content: input.userPrompt }]
+    })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new AppError("AI_API_ERROR", 502, JSON.stringify(payload).slice(0, 400));
+  }
+  const blocks = (payload.content ?? []) as Array<Record<string, unknown>>;
+  return blocks
+    .filter((block) => block.type === "text")
+    .map((block) => String((block as { text?: unknown }).text ?? ""))
+    .join("\n")
+    .trim();
+}
+
+function buildDefaultTurnSummaryPrompt(input: {
+  debateQuestion: string;
+  roundNumber: number;
   turnNumber: number;
   agentName: string;
   content: string;
-  structuredOutput: StructuredOutput | null;
+}) {
+  return [
+    `Debate question:\n${input.debateQuestion}`,
+    `\n\nCurrent turn metadata:\n- Round ${input.roundNumber}\n- Turn ${input.turnNumber}\n- Speaker: ${input.agentName}`,
+    `\n\nTurn content:\n${trimToChars(input.content, 16_000)}`,
+    "\n\nWrite a Markdown turn summary with exactly these sections:",
+    "## 本回关键信息",
+    "## 本回动作/状态更新",
+    "## 对讨论推进的影响",
+    "## 仍未解决的问题",
+    "\nIf this turn is mainly a vote, announcement, file write, checkpoint, or other procedural/action turn, do not force fake 'new claims'. Summarize the action taken, the state change, and what it means for the debate. If a section truly has no content, say so briefly instead of inventing material. Do not quote long passages."
+  ].join("").trim();
+}
+
+function buildDefaultRoundSummaryPrompt(input: {
+  debateQuestion: string;
+  roundNumber: number;
+  turnSummaries: Array<{ turnNumber: number; agentName: string; content: string }>;
+}) {
+  return [
+    `Debate question:\n${input.debateQuestion}`,
+    `\n\nRound ${input.roundNumber} turn summaries:`,
+    ...input.turnSummaries.map(
+      (item) => `\n\n### Turn ${item.turnNumber} · ${item.agentName}\n${trimToChars(item.content, 6_000)}`
+    ),
+    "\n\nWrite a Markdown round summary with exactly these sections:",
+    "## 本轮关键推进",
+    "## 本轮关键动作/状态变化",
+    "## 本轮沉淀出的候选方案或结果",
+    "## 本轮遗留风险",
+    "## 下一轮最该继续推进的点",
+    "\nIf this round is mostly voting, announcements, file consolidation, or other procedural work, summarize those state changes directly instead of forcing discussion-style consensus and disagreement. Only summarize this round. Do not re-summarize the whole debate."
+  ].join("").trim();
+}
+
+function buildDefaultFactsBoardPrompt(input: {
+  debateQuestion: string;
+  existingBoard: string | null;
+  sourceLabel: string;
+  sourceSummary: string;
+}) {
+  return [
+    `Debate question:\n${input.debateQuestion}`,
+    `\n\nCurrent facts board:\n${input.existingBoard?.trim() || "(empty board)"}`,
+    `\n\nNew summary source (${input.sourceLabel}):\n${trimToChars(input.sourceSummary, 10_000)}`,
+    "\n\nRewrite the full facts board in Markdown with exactly these sections:",
+    "## 已确认共识",
+    "## 候选方案",
+    "## 未决问题",
+    "## 高风险漏洞",
+    "## 关键文件缺口",
+    "\nMerge duplicates, remove stale points that were clearly superseded, and keep each bullet concise."
+  ].join("").trim();
+}
+
+function combineSummarizerPrompt(customPrompt: string | null | undefined, basePrompt: string) {
+  const trimmed = customPrompt?.trim();
+  if (!trimmed) return basePrompt;
+  return [`Summary instructions:\n${trimmed}`, basePrompt].join("\n\n---\n\n").trim();
+}
+
+async function updateSummaryJob(
+  debateId: string,
+  job: {
+    key: string;
+    kind: "turn_summary" | "round_summary" | "facts_board";
+    label: string;
+    turnNumber?: number | null;
+    roundNumber?: number | null;
+    status: "running" | "failed" | "completed";
+    message: string | null;
+  }
+) {
+  setDebateSummaryJob(debateId, {
+    key: job.key,
+    kind: job.kind,
+    label: job.label,
+    turnNumber: job.turnNumber ?? null,
+    roundNumber: job.roundNumber ?? null,
+    status: job.status,
+    message: job.message
+  });
+  if (job.status === "completed") {
+    clearDebateSummaryJob(debateId, job.key);
+  }
+}
+
+export async function generateTurnSummary(input: {
+  userId: string;
+  debateId: string;
+  debateQuestion: string;
+  workflow: NormalizedDebateWorkflow | null;
+  roundNumber: number;
+  turnNumber: number;
+  agentName: string;
+  content: string;
   now: string;
 }) {
-  if (!ENABLE_DEBATE_MEMORY) return;
+  const summarizer = getWorkflowSummarizerConfig(input.workflow);
+  if (!summarizer || !summarizer.perTurn) return { ok: false, skipped: true };
 
-  const current = (await readDebateFile(input.userId, input.debateId, SHARED_FACTS_PATH)) ?? "";
-  const output = input.structuredOutput;
-  const lines: string[] = [];
-  lines.push(`## Turn ${input.turnNumber} · ${input.agentName} · ${input.now}`);
-  if (output?.proposed_solution) {
-    lines.push(`- Proposed: ${trimToChars(output.proposed_solution, 240)}`);
-  }
-  if ((output?.arguments ?? []).length > 0) {
-    lines.push("- Arguments:");
-    for (const arg of output?.arguments ?? []) {
-      lines.push(`  - [${arg.type}] ${trimToChars(String(arg.content ?? ""), 240)}`);
-    }
-  } else {
-    lines.push(`- Excerpt: ${trimToChars(input.content.replace(/\s+/g, " ").trim(), 260)}`);
-  }
-  lines.push("");
+  const key = `turn_summary:${input.turnNumber}`;
+  await updateSummaryJob(input.debateId, {
+    key,
+    kind: "turn_summary",
+    label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
+    turnNumber: input.turnNumber,
+    roundNumber: input.roundNumber,
+    status: "running",
+    message: "AI 总结中..."
+  });
 
-  const next = appendWithTrim(current, lines.join("\n"));
-  await upsertDebateFile(input.debateId, SHARED_FACTS_PATH, next, input.now);
   try {
-    await indexDebateContextChunk({
+    const content = await callWorkflowSummarizerMarkdown({
       userId: input.userId,
       debateId: input.debateId,
-      chunkKey: "shared_facts:board",
-      sourceType: "shared_facts",
-      sourcePath: SHARED_FACTS_PATH,
-      turnNumberStart: input.turnNumber,
-      turnNumberEnd: input.turnNumber,
-      content: next,
-      now: input.now
+      workflow: input.workflow,
+      systemTask: "SYSTEM TASK: Summarize the just-finished turn into a high-signal turn summary.",
+      userPrompt: combineSummarizerPrompt(
+        summarizer.prompts.turnSummary,
+        buildDefaultTurnSummaryPrompt({
+          debateQuestion: input.debateQuestion,
+          roundNumber: input.roundNumber,
+          turnNumber: input.turnNumber,
+          agentName: input.agentName,
+          content: input.content
+        })
+      ),
+      maxTokens: 900
     });
-  } catch {
-    // retrieval indexing is best-effort
+    if (!content) {
+      await updateSummaryJob(input.debateId, {
+        key,
+        kind: "turn_summary",
+        label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
+        turnNumber: input.turnNumber,
+        roundNumber: input.roundNumber,
+        status: "failed",
+        message: "回摘要生成失败"
+      });
+      return { ok: false, error: "empty_summary" };
+    }
+    const path = getTurnSummaryPath(input.workflow, input.turnNumber);
+    await upsertDebateFile(input.debateId, path, `${content.trim()}\n`, input.now);
+    try {
+      await indexDebateContextChunk({
+        userId: input.userId,
+        debateId: input.debateId,
+        chunkKey: `turn_summary:${input.turnNumber}`,
+        sourceType: "turn_summary",
+        sourcePath: path,
+        turnNumberStart: input.turnNumber,
+        turnNumberEnd: input.turnNumber,
+        roundNumber: input.roundNumber,
+        content,
+        now: input.now
+      });
+    } catch {
+    }
+    await updateSummaryJob(input.debateId, {
+      key,
+      kind: "turn_summary",
+      label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
+      turnNumber: input.turnNumber,
+      roundNumber: input.roundNumber,
+      status: "completed",
+      message: "回摘要已完成"
+    });
+    return { ok: true, path, content };
+  } catch (error) {
+    await updateSummaryJob(input.debateId, {
+      key,
+      kind: "turn_summary",
+      label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
+      turnNumber: input.turnNumber,
+      roundNumber: input.roundNumber,
+      status: "failed",
+      message: "回摘要生成失败"
+    });
+    await logRuntimeEvent("warn", "turn summary generation failed", { debateId: input.debateId, error: describeRuntimeError(error) });
+    return { ok: false, error };
+  }
+}
+
+async function listRoundTurnSummaries(input: {
+  userId: string;
+  debateId: string;
+  workflow: NormalizedDebateWorkflow | null;
+  roundNumber: number;
+  participantCount: number;
+}) {
+  const startTurn = (input.roundNumber - 1) * input.participantCount + 1;
+  const endTurn = input.roundNumber * input.participantCount;
+  const turnRows = await query<{ turn_number: number; speaker_name: string | null }>(
+    `
+      select t.turn_number,
+             coalesce(da.display_name, a.name) as speaker_name
+        from debate_turns t
+        join ai_agents a on a.id = t.ai_agent_id
+        left join debate_agents da on da.id = t.debate_agent_id
+       where t.debate_id = $1
+         and t.turn_number between $2 and $3
+       order by t.turn_number asc
+    `,
+    [input.debateId, startTurn, endTurn]
+  );
+  const items: Array<{ turnNumber: number; agentName: string; content: string }> = [];
+  for (const row of turnRows.rows) {
+    const turnNumber = Number(row.turn_number);
+    const content = await readDebateFile(input.userId, input.debateId, getTurnSummaryPath(input.workflow, turnNumber));
+    if (!content?.trim()) continue;
+    items.push({
+      turnNumber,
+      agentName: String(row.speaker_name ?? `Turn-${turnNumber}`),
+      content: content.trim()
+    });
+  }
+  return items;
+}
+
+export async function refreshFactsBoardFromSummaries(input: {
+  userId: string;
+  debateId: string;
+  debateQuestion: string;
+  workflow: NormalizedDebateWorkflow | null;
+  sourceLabel: string;
+  sourceSummary: string;
+  turnNumber?: number | null;
+  roundNumber?: number | null;
+  now: string;
+}) {
+  if (!ENABLE_DEBATE_MEMORY) return { ok: false, skipped: true };
+  const summarizer = getWorkflowSummarizerConfig(input.workflow);
+  if (!summarizer || !summarizer.factsBoard) return { ok: false, skipped: true };
+
+  const key = input.turnNumber ? `facts_board:turn:${input.turnNumber}` : `facts_board:round:${input.roundNumber ?? 0}`;
+  await updateSummaryJob(input.debateId, {
+    key,
+    kind: "facts_board",
+    label: "结构化事实板",
+    turnNumber: input.turnNumber ?? null,
+    roundNumber: input.roundNumber ?? null,
+    status: "running",
+    message: "AI 总结中..."
+  });
+
+  try {
+    const boardPath = getFactsBoardPath(input.workflow);
+    const current = await readDebateFile(input.userId, input.debateId, boardPath);
+    const content = await callWorkflowSummarizerMarkdown({
+      userId: input.userId,
+      debateId: input.debateId,
+      workflow: input.workflow,
+      systemTask: "SYSTEM TASK: Rewrite the debate facts board into a concise structured board.",
+      userPrompt: combineSummarizerPrompt(
+        summarizer.prompts.factsBoard,
+        buildDefaultFactsBoardPrompt({
+          debateQuestion: input.debateQuestion,
+          existingBoard: current,
+          sourceLabel: input.sourceLabel,
+          sourceSummary: input.sourceSummary
+        })
+      ),
+      maxTokens: 1200
+    });
+    if (!content) {
+      await updateSummaryJob(input.debateId, {
+        key,
+        kind: "facts_board",
+        label: "结构化事实板",
+        turnNumber: input.turnNumber ?? null,
+        roundNumber: input.roundNumber ?? null,
+        status: "failed",
+        message: "事实板整理失败"
+      });
+      return { ok: false, error: "empty_facts_board" };
+    }
+    await upsertDebateFile(input.debateId, boardPath, `${content.trim()}\n`, input.now);
+    try {
+      await indexDebateContextChunk({
+        userId: input.userId,
+        debateId: input.debateId,
+        chunkKey: "shared_facts:board",
+        sourceType: "shared_facts",
+        sourcePath: boardPath,
+        turnNumberStart: input.turnNumber ?? undefined,
+        turnNumberEnd: input.turnNumber ?? undefined,
+        roundNumber: input.roundNumber ?? undefined,
+        content,
+        now: input.now
+      });
+    } catch {
+    }
+    await updateSummaryJob(input.debateId, {
+      key,
+      kind: "facts_board",
+      label: "结构化事实板",
+      turnNumber: input.turnNumber ?? null,
+      roundNumber: input.roundNumber ?? null,
+      status: "completed",
+      message: "事实板已更新"
+    });
+    return { ok: true, path: boardPath, content };
+  } catch (error) {
+    await updateSummaryJob(input.debateId, {
+      key,
+      kind: "facts_board",
+      label: "结构化事实板",
+      turnNumber: input.turnNumber ?? null,
+      roundNumber: input.roundNumber ?? null,
+      status: "failed",
+      message: "事实板整理失败"
+    });
+    await logRuntimeEvent("warn", "facts board refresh failed", { debateId: input.debateId, error: describeRuntimeError(error) });
+    return { ok: false, error };
   }
 }
 
 export async function persistAnswerAfterTurn(input: {
   userId: string;
   debateId: string;
+  roundNumber: number;
   turnNumber: number;
   agentName: string;
   content: string;
   now: string;
 }) {
-  const current = (await readDebateFile(input.userId, input.debateId, "debate/answers.md")) ?? "";
+  const answersPath = `${ANSWERS_DIR}round-${input.roundNumber}.md`;
+  const current = (await readDebateFile(input.userId, input.debateId, answersPath)) ?? "";
   const lines: string[] = [];
-  lines.push(`## Turn ${input.turnNumber} · ${input.agentName} · ${input.now}`);
+  lines.push(`## Turn ${input.turnNumber} · Round ${input.roundNumber} · ${input.agentName} · ${input.now}`);
   lines.push(input.content.trim());
   lines.push("");
   const next = appendWithTrim(current, lines.join("\n"));
-  await upsertDebateFile(input.debateId, "debate/answers.md", next, input.now);
+  await upsertDebateFile(input.debateId, answersPath, next, input.now);
 }
 
 export function sleep(ms: number) {
@@ -1009,6 +1390,14 @@ export function appendWorkflowSummaryLines(lines: string[], workflow: Normalized
       lines.push(`  - ${formatRequiredDeliverableSummary(file, "plain")}`);
     }
   }
+  if (workflow.summarizer.enabled) {
+    lines.push(
+      `- summarizer: enabled; perTurn=${workflow.summarizer.perTurn ? "yes" : "no"}; perRound=${workflow.summarizer.perRound ? "yes" : "no"}; factsBoard=${workflow.summarizer.factsBoard ? "yes" : "no"}`
+    );
+    lines.push(
+      `- summarizer outputs: turn=${workflow.summarizer.outputPaths.turnSummaryDir}; round=${workflow.summarizer.outputPaths.roundSummaryDir}; facts=${workflow.summarizer.outputPaths.factsBoardPath}`
+    );
+  }
   if (
     workflow.contextAccess.alwaysRead.length > 0 ||
     workflow.contextAccess.readWhenNeeded.length > 0 ||
@@ -1079,6 +1468,224 @@ export async function loadAgentFilesInline(
   }
 }
 
+type SeatFileSource = "debate" | "agent";
+type SeatFileEntry = {
+  path: string;
+  content: string;
+  source: SeatFileSource;
+};
+
+function normalizeSeatFilePath(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\/+/, "").trim();
+}
+
+function isAgentDirectoryPath(path: string) {
+  return normalizeSeatFilePath(path).toLowerCase() === AGENT_DIRECTORY_PATH.toLowerCase();
+}
+
+async function listRawDebateSeatFiles(userId: string, debateAgentId: string, prefix = "") {
+  try {
+    const prefixLike = `${prefix}%`;
+    const result = await query<{ path: string; content: string }>(
+      `
+        select f.path, f.content
+          from debate_agent_files f
+          join debate_agents da on da.id = f.debate_agent_id
+          join debates d on d.id = da.debate_id
+         where f.debate_agent_id = $1 and d.user_id = $2 and f.path like $3
+         order by f.path asc
+      `,
+      [debateAgentId, userId, prefixLike]
+    );
+    return result.rows.map((row) => ({
+      path: String(row.path ?? ""),
+      content: String(row.content ?? ""),
+      source: "debate" as const
+    }));
+  } catch (error) {
+    if (isMissingTableError(error, "debate_agent_files")) return [] as SeatFileEntry[];
+    throw error;
+  }
+}
+
+async function listRawAgentFiles(userId: string, agentId: string, prefix = "") {
+  try {
+    const prefixLike = `${prefix}%`;
+    const result = await query<{ path: string; content: string }>(
+      `
+        select f.path, f.content
+        from ai_agent_files f
+        join ai_agents a on a.id = f.ai_agent_id
+        where f.ai_agent_id = $1 and a.user_id = $2 and f.path like $3
+        order by f.path asc
+      `,
+      [agentId, userId, prefixLike]
+    );
+    return result.rows.map((row) => ({
+      path: String(row.path ?? ""),
+      content: String(row.content ?? ""),
+      source: "agent" as const
+    }));
+  } catch (error) {
+    if (getPgErrorCode(error) === "42P01") return [] as SeatFileEntry[];
+    throw error;
+  }
+}
+
+async function listMergedSeatFiles(userId: string, debateAgentId: string, agentId: string, prefix = "") {
+  const [agentFiles, debateFiles] = await Promise.all([
+    listRawAgentFiles(userId, agentId, prefix),
+    listRawDebateSeatFiles(userId, debateAgentId, prefix)
+  ]);
+  const merged = new Map<string, SeatFileEntry>();
+  for (const file of agentFiles) {
+    merged.set(normalizeSeatFilePath(file.path), file);
+  }
+  for (const file of debateFiles) {
+    merged.set(normalizeSeatFilePath(file.path), file);
+  }
+  return [...merged.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function extractDirectoryFileSummary(path: string, content: string) {
+  const normalizedPath = normalizeSeatFilePath(path).toLowerCase();
+  if (normalizedPath === MEMORY_SUMMARY_PATH) return "本席位长期记忆摘要，由系统定期压缩维护。";
+  if (normalizedPath === MEMORY_LOG_PATH) return "本席位历史记忆日志，按回合追加。";
+  if (normalizedPath === CONTEXT_SEGMENT_PATH) return "本席位分段检查点，用于长辩论续跑。";
+  if (normalizedPath === CONTEXT_WINDOW_PATH) return "上下文窗口配置，用于限制回看历史范围。";
+  if (normalizedPath === AGENT_DIRECTORY_PATH.toLowerCase()) return "本席位目录索引，说明文件路径、目录和用途。";
+  if (normalizedPath.startsWith("debate/turn_summaries/")) return "逐回摘要文件，由独立总结器在每回结束后生成。";
+  if (normalizedPath.startsWith("debate/round_summaries/")) return "逐轮摘要文件，由独立总结器在轮末基于回摘要生成。";
+  if (normalizedPath.startsWith("debate/answers/")) return "原始发言归档，按轮拆分保存完整发言内容。";
+  if (normalizedPath === SHARED_FACTS_PATH.toLowerCase()) return "结构化事实板，聚合当前已确认共识、候选方案、风险和缺口。";
+  if (normalizedPath.startsWith("prompts/")) return "席位附加提示词或行为规则。";
+  if (normalizedPath.startsWith("notes/")) return "席位工作笔记或补充说明。";
+
+  const trimmed = content.replace(/\r\n/g, "\n").trim();
+  if (!trimmed) return "空文件或待补充。";
+  const firstHeading = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => /^#{1,6}\s+\S/.test(line));
+  if (firstHeading) {
+    return firstHeading.replace(/^#{1,6}\s+/, "").trim().slice(0, 80);
+  }
+  const firstLine = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && !/^```/.test(line));
+  if (!firstLine) return "文件已存在。";
+  return firstLine.slice(0, 100);
+}
+
+async function listSharedDebateFilesForDirectory(userId: string, debateId: string) {
+  try {
+    const result = await query<{ path: string; content: string }>(
+      `
+        select f.path, f.content
+          from debate_files f
+          join debates d on d.id = f.debate_id
+         where f.debate_id = $1 and d.user_id = $2
+         order by f.path asc
+      `,
+      [debateId, userId]
+    );
+    return result.rows.map((row) => ({
+      path: normalizeSeatFilePath(String(row.path ?? "")),
+      content: String(row.content ?? "")
+    }));
+  } catch (error) {
+    if (isMissingTableError(error, "debate_files")) return [] as Array<{ path: string; content: string }>;
+    throw error;
+  }
+}
+
+function buildSharedFolderDirectoryLines(rows: Array<{ path: string; content: string }>) {
+  if (rows.length === 0) {
+    return ["## Shared Workspace", "- 当前还没有共享文件。"];
+  }
+
+  const folderMap = new Map<string, Array<{ path: string; content: string }>>();
+  for (const row of rows) {
+    const normalizedPath = normalizeSeatFilePath(row.path);
+    const [folder] = normalizedPath.split("/", 1);
+    const bucket = folderMap.get(folder) ?? [];
+    bucket.push({ ...row, path: normalizedPath });
+    folderMap.set(folder, bucket);
+  }
+
+  const describeFolder = (folder: string) => {
+    if (folder === "debate") return "共享工作文件，例如点子池、筛选结果、事件映射和中间讨论稿。";
+    if (folder === "final") return "最终交付文件，完成判定通常会看这里。";
+    if (folder === "outputs") return "其他共享输出文件。";
+    if (folder === "facts") return "结构化事实板与共享工作板。";
+    if (folder === "votes") return "官方投票状态、指令和历史结果。";
+    if (folder === "question") return "题目差异和问题变更记录。";
+    if (folder === "context") return "运行时上下文、窗口和检查点。";
+    return "共享文件夹。";
+  };
+
+  const noisyPrefixes = ["votes/round-", "context/usage", "context/generation_diagnostics"];
+  const lines = ["## Shared Workspace"];
+  for (const folder of [...folderMap.keys()].sort()) {
+    const rowsInFolder = folderMap.get(folder) ?? [];
+    lines.push(`- \`${folder}/\`：${describeFolder(folder)}（${rowsInFolder.length} 个文件）`);
+    const visibleRows = rowsInFolder
+      .filter((row) => !noisyPrefixes.some((prefix) => row.path.startsWith(prefix)))
+      .slice(0, 8);
+    for (const row of visibleRows) {
+      lines.push(`  - \`${row.path}\`：${extractDirectoryFileSummary(row.path, row.content)}`);
+    }
+    if (rowsInFolder.length > visibleRows.length) {
+      lines.push(`  - 其余 ${rowsInFolder.length - visibleRows.length} 个文件未展开。`);
+    }
+  }
+  return lines;
+}
+
+function buildSeatDirectoryContent(input: {
+  seatFiles: SeatFileEntry[];
+  sharedFiles: Array<{ path: string; content: string }>;
+}) {
+  const visibleSeatFiles = input.seatFiles.filter((file) => !isAgentDirectoryPath(file.path));
+  const lines = [
+    "# AGENTS Directory",
+    "",
+    "这是一份自动维护的目录文件。它的目标是让当前席位每次重新进入对话时，都能快速知道有哪些文件、文件大致存什么，以及哪些共享目录值得优先读取。",
+    "",
+    "## Seat Files",
+    ...(
+      visibleSeatFiles.length > 0
+        ? visibleSeatFiles.map((file) => {
+            const sourceLabel = file.source === "debate" ? "seat override" : "base agent";
+            return `- \`${file.path}\` [${sourceLabel}]：${extractDirectoryFileSummary(file.path, file.content)}`;
+          })
+        : ["- 当前席位还没有私有文件。"]
+    ),
+    "",
+    ...buildSharedFolderDirectoryLines(input.sharedFiles),
+    "",
+    "## How To Use",
+    "- 当你不确定某个文件里放了什么，先读本目录，再决定读哪个文件。",
+    "- seat override 表示辩论级文件，会覆盖同路径的 base agent 文件。",
+    "- `memory/*`、`context/*`、`votes/*` 多数是运行时文件；只有在当前任务需要时才深入读取。"
+  ];
+  return lines.join("\n");
+}
+
+export async function refreshDebateAgentDirectoryFile(input: {
+  userId: string;
+  debateId: string;
+  debateAgentId: string;
+  agentId: string;
+  now: string;
+}) {
+  const seatFiles = await listMergedSeatFiles(input.userId, input.debateAgentId, input.agentId);
+  const sharedFiles = await listSharedDebateFilesForDirectory(input.userId, input.debateId);
+  const content = buildSeatDirectoryContent({ seatFiles, sharedFiles });
+  await upsertDebateAgentFile(input.debateAgentId, AGENT_DIRECTORY_PATH, content, input.now);
+}
+
 export function isMissingTableError(error: unknown, table: string) {
   if (typeof error !== "object" || error === null) return false;
   const anyError = error as { code?: unknown; message?: unknown };
@@ -1115,42 +1722,28 @@ export async function loadDebateAgentFilesInline(
   audit: DebateFileActivityAudit | null = null
 ) {
   try {
-    const result = await query<{ path: string; content: string }>(
-      `
-        select f.path, f.content
-          from debate_agent_files f
-          join debate_agents da on da.id = f.debate_agent_id
-          join debates d on d.id = da.debate_id
-         where f.debate_agent_id = $1 and d.user_id = $2
-         order by f.path asc
-      `,
-      [debateAgentId, userId]
-    );
-
-    if ((result.rowCount ?? 0) === 0) {
-      return loadAgentFilesInline(userId, debateAgentId, agentId, maxChars, audit);
-    }
-
+    const files = await listMergedSeatFiles(userId, debateAgentId, agentId);
     const parts: string[] = [];
-    const auditedPaths: string[] = [];
-    for (const row of result.rows) {
-      const path = String(row.path);
+    const auditedDebatePaths: string[] = [];
+    const auditedAgentPaths: string[] = [];
+    for (const row of files) {
+      const path = String(row.path ?? "");
       if (isMemoryPath(path)) continue;
       const content = String(row.content ?? "");
       const header = `\n\n---\nFILE: ${path}\n---\n`;
       parts.push(header + content);
-      auditedPaths.push(path);
+      if (row.source === "debate") {
+        auditedDebatePaths.push(path);
+      } else {
+        auditedAgentPaths.push(path);
+      }
     }
 
     if (parts.length === 0) {
       return loadAgentFilesInline(userId, debateAgentId, agentId, maxChars, audit);
     }
-    await recordImplicitFileReads({
-      audit,
-      scope: "agent",
-      paths: auditedPaths,
-      targetDebateAgentId: debateAgentId
-    });
+    await recordImplicitFileReads({ audit, scope: "agent", paths: auditedDebatePaths, targetDebateAgentId: debateAgentId });
+    await recordImplicitFileReads({ audit, scope: "agent", paths: auditedAgentPaths, targetDebateAgentId: null });
     return `Agent files (read-only context):${clipPromptInlineContent(parts.join(""), maxChars ?? 18_000)}`;
   } catch (error) {
     if (isMissingTableError(error, "debate_agent_files")) {
@@ -1166,47 +1759,8 @@ export async function listSeatContextFilesForRule(
   agentId: string,
   rule: ResolvedContextAccessRule
 ) {
-  const prefixLike = `${rule.pathPrefix}%`;
-  const filterRows = (rows: Array<{ path: string; content: string }>) =>
-    rows.filter((row) => (rule.recursive ? true : isDirectChildPath(rule.pathPrefix, String(row.path ?? ""))));
-
-  try {
-    const result = await query<{ path: string; content: string }>(
-      `
-        select f.path, f.content
-          from debate_agent_files f
-          join debate_agents da on da.id = f.debate_agent_id
-          join debates d on d.id = da.debate_id
-         where f.debate_agent_id = $1 and d.user_id = $2 and f.path like $3
-         order by f.path asc
-      `,
-      [debateAgentId, userId, prefixLike]
-    );
-    if ((result.rowCount ?? 0) > 0) {
-      return filterRows(result.rows);
-    }
-  } catch (error) {
-    if (!isMissingTableError(error, "debate_agent_files")) {
-      throw error;
-    }
-  }
-
-  try {
-    const fallback = await query<{ path: string; content: string }>(
-      `
-        select f.path, f.content
-        from ai_agent_files f
-        join ai_agents a on a.id = f.ai_agent_id
-        where f.ai_agent_id = $1 and a.user_id = $2 and f.path like $3
-        order by f.path asc
-      `,
-      [agentId, userId, prefixLike]
-    );
-    return filterRows(fallback.rows);
-  } catch (error) {
-    if (getPgErrorCode(error) === "42P01") return [];
-    throw error;
-  }
+  const rows = await listMergedSeatFiles(userId, debateAgentId, agentId, rule.pathPrefix);
+  return rows.filter((row) => (rule.recursive ? true : isDirectChildPath(rule.pathPrefix, String(row.path ?? ""))));
 }
 
 export async function listSharedContextFilesForRule(userId: string, debateId: string, rule: ResolvedContextAccessRule) {
@@ -1250,12 +1804,28 @@ export async function loadContextAccessAutoReadInline(input: {
         : await listSeatContextFilesForRule(input.userId, input.debateAgentId, input.agentId, rule);
     if (rows.length <= 0) continue;
     const limitedRows = rows.slice(0, Math.max(1, rule.maxFiles));
-    await recordImplicitFileReads({
-      audit: input.audit ?? null,
-      scope: rule.scope === "shared" ? "debate" : "agent",
-      paths: limitedRows.map((row) => String(row.path ?? "")),
-      targetDebateAgentId: rule.scope === "shared" ? null : input.debateAgentId
-    });
+    if (rule.scope === "shared") {
+      await recordImplicitFileReads({
+        audit: input.audit ?? null,
+        scope: "debate",
+        paths: limitedRows.map((row) => String(row.path ?? "")),
+        targetDebateAgentId: null
+      });
+    } else {
+      const seatRows = limitedRows as SeatFileEntry[];
+      await recordImplicitFileReads({
+        audit: input.audit ?? null,
+        scope: "agent",
+        paths: seatRows.filter((row) => row.source === "debate").map((row) => String(row.path ?? "")),
+        targetDebateAgentId: input.debateAgentId
+      });
+      await recordImplicitFileReads({
+        audit: input.audit ?? null,
+        scope: "agent",
+        paths: seatRows.filter((row) => row.source === "agent").map((row) => String(row.path ?? "")),
+        targetDebateAgentId: null
+      });
+    }
     blocks.push(`- [${rule.scope}] ${rule.pathPrefix}${rule.label ? ` · ${rule.label}` : ""}`);
     for (const row of limitedRows) {
       const path = normalizeContextPath(String(row.path ?? ""));
@@ -1300,7 +1870,7 @@ export async function loadSharedFactsBoardInline(
     scope: "debate",
     paths: [SHARED_FACTS_PATH]
   });
-  return `Shared facts board (working notes):\n\n${clipPromptInlineContent(content, maxChars ?? 10_000)}`;
+  return `Shared facts board (structured working notes):\n\n${clipPromptInlineContent(content, maxChars ?? 10_000)}`;
 }
 
 export async function loadDebateSegmentInline(userId: string, debateId: string, maxChars?: number | null) {
@@ -1784,25 +2354,13 @@ export async function toolListFiles(
     }
   }
   try {
-    const prefixLike = `${effectivePrefix}%`;
-    const result = await query<{ path: string }>(
-      `
-        select f.path
-          from debate_agent_files f
-          join debate_agents da on da.id = f.debate_agent_id
-          join debates d on d.id = da.debate_id
-         where f.debate_agent_id = $1 and d.user_id = $2 and f.path like $3
-         order by f.path asc
-         limit 200
-      `,
-      [debateAgentId, userId, prefixLike]
-    );
-    if ((result.rowCount ?? 0) > 0) {
-      const paths = result.rows
+    const rows = await listMergedSeatFiles(userId, debateAgentId, agentId, effectivePrefix);
+    if (rows.length > 0) {
+      const paths = rows
         .map((row) => String(row.path))
         .filter((path) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", path) : true));
       if (audit) {
-        for (const path of paths.slice(0, 20)) {
+        for (const row of rows.filter((item) => paths.includes(item.path)).slice(0, 20)) {
           // eslint-disable-next-line no-await-in-loop
           await recordDebateFileActivity({
             debateId: audit.debateId,
@@ -1811,8 +2369,8 @@ export async function toolListFiles(
             roundNumber: audit.roundNumber,
             action: "list",
             scope: "agent",
-            path,
-            targetDebateAgentId: debateAgentId,
+            path: row.path,
+            targetDebateAgentId: row.source === "debate" ? debateAgentId : null,
             now: audit.now
           });
         }
@@ -1910,42 +2468,25 @@ export async function toolReadFile(
   if (policy && !isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", path)) {
     return describeContextAccessDenied(policy.workflow, policy.currentPhaseKind, "seat", path) ?? `ACCESS_DENIED: ${path}`;
   }
-  try {
-    const result = await query<{ content: string }>(
-      `
-        select f.content
-          from debate_agent_files f
-          join debate_agents da on da.id = f.debate_agent_id
-          join debates d on d.id = da.debate_id
-         where f.debate_agent_id = $1 and d.user_id = $2 and f.path = $3
-         limit 1
-      `,
-      [debateAgentId, userId, path]
-    );
-    if ((result.rowCount ?? 0) === 1) {
-      const content = String(result.rows[0].content ?? "");
-      if (audit) {
-        await recordDebateFileActivity({
-          debateId: audit.debateId,
-          debateAgentId,
-          turnNumber: audit.turnNumber,
-          roundNumber: audit.roundNumber,
-          action: "read",
-          scope: "agent",
-          path,
-          targetDebateAgentId: debateAgentId,
-          now: audit.now
-        });
-      }
-      return content;
+  const files = await listMergedSeatFiles(userId, debateAgentId, agentId);
+  const matched = files.find((file) => file.path === normalizeSeatFilePath(path) || file.path === path);
+  if (matched) {
+    if (audit) {
+      await recordDebateFileActivity({
+        debateId: audit.debateId,
+        debateAgentId,
+        turnNumber: audit.turnNumber,
+        roundNumber: audit.roundNumber,
+        action: "read",
+        scope: "agent",
+        path: matched.path,
+        targetDebateAgentId: matched.source === "debate" ? debateAgentId : null,
+        now: audit.now
+      });
     }
-  } catch (error) {
-    if (!isMissingTableError(error, "debate_agent_files")) {
-      throw error;
-    }
+    return matched.content;
   }
-
-  return toolReadFileFromAgent(userId, debateAgentId, agentId, path, audit);
+  return `NOT_FOUND: ${path}`;
 }
 
 export async function toolReadDebateFile(
@@ -2057,54 +2598,37 @@ export async function toolSearchFiles(
   const searchQuery = queryText.trim();
   if (!searchQuery) return [];
 
-  try {
-    const result = await query<{ path: string; content: string }>(
-      `
-        select f.path, f.content
-          from debate_agent_files f
-          join debate_agents da on da.id = f.debate_agent_id
-          join debates d on d.id = da.debate_id
-         where f.debate_agent_id = $1 and d.user_id = $2 and f.content ilike ('%' || $3 || '%')
-         order by f.path asc
-         limit 5
-      `,
-      [debateAgentId, userId, searchQuery]
-    );
-
-    if ((result.rowCount ?? 0) > 0) {
-      const rows = result.rows
-        .filter((row) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", String(row.path ?? "")) : true))
-        .map((row) => {
-          const content = String(row.content ?? "");
-          const lower = content.toLowerCase();
-          const idx = lower.indexOf(searchQuery.toLowerCase());
-          const start = Math.max(0, idx - 120);
-          const end = Math.min(content.length, idx + searchQuery.length + 120);
-          const snippet = content.slice(start, end);
-          return { path: String(row.path), snippet };
+  const rows = (await listMergedSeatFiles(userId, debateAgentId, agentId))
+    .filter((row) => row.content.toLowerCase().includes(searchQuery.toLowerCase()))
+    .filter((row) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", String(row.path ?? "")) : true))
+    .slice(0, 5)
+    .map((row) => {
+      const content = String(row.content ?? "");
+      const lower = content.toLowerCase();
+      const idx = lower.indexOf(searchQuery.toLowerCase());
+      const start = Math.max(0, idx - 120);
+      const end = Math.min(content.length, idx + searchQuery.length + 120);
+      const snippet = content.slice(start, end);
+      return { path: String(row.path), snippet, source: row.source };
+    });
+  if (rows.length > 0) {
+    if (audit) {
+      for (const row of rows) {
+        // eslint-disable-next-line no-await-in-loop
+        await recordDebateFileActivity({
+          debateId: audit.debateId,
+          debateAgentId,
+          turnNumber: audit.turnNumber,
+          roundNumber: audit.roundNumber,
+          action: "search",
+          scope: "agent",
+          path: row.path,
+          targetDebateAgentId: row.source === "debate" ? debateAgentId : null,
+          now: audit.now
         });
-      if (audit) {
-        for (const row of rows) {
-          // eslint-disable-next-line no-await-in-loop
-          await recordDebateFileActivity({
-            debateId: audit.debateId,
-            debateAgentId,
-            turnNumber: audit.turnNumber,
-            roundNumber: audit.roundNumber,
-            action: "search",
-            scope: "agent",
-            path: row.path,
-            targetDebateAgentId: debateAgentId,
-            now: audit.now
-          });
-        }
       }
-      return rows;
     }
-  } catch (error) {
-    if (!isMissingTableError(error, "debate_agent_files")) {
-      throw error;
-    }
+    return rows.map(({ path, snippet }) => ({ path, snippet }));
   }
 
   return toolSearchFilesFromAgent(userId, debateAgentId, agentId, queryText, audit, policy);
@@ -3590,135 +4114,71 @@ export async function maybeGenerateVoteAnnouncementWithSeat1(input: {
 export async function generateRoundSummary(input: {
   userId: string;
   debate: { id: string; question: string };
+  workflow: NormalizedDebateWorkflow | null;
   participantCount: number;
   endedRound: number;
+  now: string;
 }) {
-  const roundPath = `debate/round_summary.md`;
+  const summarizer = getWorkflowSummarizerConfig(input.workflow);
+  if (!summarizer || !summarizer.perRound) return { ok: false, skipped: true };
 
-  const announcer = await query<Record<string, unknown>>(
-    `
-      select da.id as debate_agent_id,
-             a.*
-        from debate_agents da
-        join ai_agents a on a.id = da.ai_agent_id
-        join debates d on d.id = da.debate_id
-       where da.debate_id = $1
-         and d.user_id = $2
-         and da.turn_order = 1
-       limit 1
-    `,
-    [input.debate.id, input.userId]
-  );
+  const key = `round_summary:${input.endedRound}`;
+  await updateSummaryJob(input.debate.id, {
+    key,
+    kind: "round_summary",
+    label: `第 ${input.endedRound} 轮摘要`,
+    roundNumber: input.endedRound,
+    status: "running",
+    message: "AI 总结中..."
+  });
 
-  let announcerRow: Record<string, unknown> | null = (announcer.rowCount ?? 0) === 1 ? announcer.rows[0] : null;
-  if (!announcerRow) {
-    return { ok: false, error: "Seat-1 agent not found." };
-  }
-
-  const announcerDebateAgentId = String(announcerRow.debate_agent_id);
-  const agent = normalizeAgentRow(announcerRow);
-  const overrideSystemPrompt = await loadDebateAgentSystemPrompt(input.userId, announcerDebateAgentId);
-  const apiKey = decryptSecret(agent.apiKeyEncrypted);
-  const url = resolveChatUrl(agent);
-
-  const proposalStart = (input.endedRound - 1) * input.participantCount + 1;
-  const proposalEnd = input.endedRound * input.participantCount;
-  const proposalTurns = await query<{ turn_number: number; seat_number: number | null; content: string; speaker_name: string | null }>(
-    `
-      select t.turn_number,
-             t.seat_number,
-             t.content,
-             coalesce(da.display_name, a.name) as speaker_name
-        from debate_turns t
-        join ai_agents a on a.id = t.ai_agent_id
-        left join debate_agents da on da.id = t.debate_agent_id
-        join debates d on d.id = t.debate_id
-       where t.debate_id = $1
-         and d.user_id = $2
-         and t.turn_number between $3 and $4
-       order by t.turn_number asc
-       limit 200
-    `,
-    [input.debate.id, input.userId, proposalStart, proposalEnd]
-  );
-  
-  if ((proposalTurns.rowCount ?? 0) === 0) return { ok: false, error: "No turns found" };
-
-  const proposalInline = [
-    `Round ${input.endedRound} Discussion:`,
-    ...proposalTurns.rows.map((r) => {
-      const tn = Number(r.turn_number);
-      const seatNumber = r.seat_number === null ? ((tn - 1) % input.participantCount) + 1 : Number(r.seat_number);
-      const seat = `Seat-${seatNumber}`;
-      const name = String(r.speaker_name ?? "Unknown");
-      const body = summarizeOptionText(String(r.content ?? ""), 1000);
-      return `- ${seat} · ${name}: ${body}`;
-    })
-  ].join("\n");
-
-  const system = [
-    buildBaseSystemPrompt(agent, overrideSystemPrompt),
-    `SYSTEM TASK: You are the moderator/announcer. Please summarize the just-finished round (Round ${input.endedRound}).`,
-    "Output only Markdown for humans; no tool calls."
-  ].join("\n\n");
-
-  const userPrompt = [
-    `Debate question:\n${input.debate.question}`,
-    `\n\n${proposalInline}`,
-    "\n\nPlease summarize the key points discussed in this round. Note any consensus reached, any practical ideas formulated, and how they work. Keep it concise but include important details for the final summary.",
-  ].join("").trim();
-
-  let content = "";
   try {
-    if (agent.provider === "openai") {
-      const res = await openAiChatOnce({
-        url,
-        apiKey,
-        body: { model: agent.model, messages: [{ role: "system", content: system }, { role: "user", content: userPrompt }] }
+    const turnSummaries = await listRoundTurnSummaries({
+      userId: input.userId,
+      debateId: input.debate.id,
+      workflow: input.workflow,
+      roundNumber: input.endedRound,
+      participantCount: input.participantCount
+    });
+    if (turnSummaries.length <= 0) {
+      await updateSummaryJob(input.debate.id, {
+        key,
+        kind: "round_summary",
+        label: `第 ${input.endedRound} 轮摘要`,
+        roundNumber: input.endedRound,
+        status: "failed",
+        message: "缺少回摘要，无法生成轮摘要"
       });
-      content = String(res.content ?? "").trim();
-    } else {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01"
-        },
-        body: JSON.stringify({
-          model: agent.model,
-          max_tokens: 900,
-          system,
-          messages: [{ role: "user", content: userPrompt }]
-        })
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new AppError("AI_API_ERROR", 502, JSON.stringify(payload).slice(0, 400));
-      }
-      const blocks = (payload.content ?? []) as Array<Record<string, unknown>>;
-      const texts = blocks
-        .filter((b) => b.type === "text")
-        .map((b) => String((b as { text?: unknown }).text ?? ""))
-        .filter(Boolean);
-      content = texts.join("\n").trim();
+      return { ok: false, error: "missing_turn_summaries" };
     }
-  } catch (error) {
-    await logRuntimeEvent("warn", "round summary generation failed", { error: describeRuntimeError(error) });
-    return { ok: false, error };
-  }
-
-  const now = new Date().toISOString();
-  if (content) {
-    const lines = [];
-    lines.push(`## Round ${input.endedRound} Summary`);
-    lines.push(content);
-    lines.push("");
-    
-    const existing = (await readDebateFile(input.userId, input.debate.id, roundPath)) ?? "";
-    const next = appendWithTrim(existing, lines.join("\n"));
-    
-    await upsertDebateFile(input.debate.id, roundPath, next, now);
+    const content = await callWorkflowSummarizerMarkdown({
+      userId: input.userId,
+      debateId: input.debate.id,
+      workflow: input.workflow,
+      systemTask: `SYSTEM TASK: Summarize Round ${input.endedRound} using only the provided turn summaries.`,
+      userPrompt: combineSummarizerPrompt(
+        summarizer.prompts.roundSummary,
+        buildDefaultRoundSummaryPrompt({
+          debateQuestion: input.debate.question,
+          roundNumber: input.endedRound,
+          turnSummaries
+        })
+      ),
+      maxTokens: 1000
+    });
+    if (!content) {
+      await updateSummaryJob(input.debate.id, {
+        key,
+        kind: "round_summary",
+        label: `第 ${input.endedRound} 轮摘要`,
+        roundNumber: input.endedRound,
+        status: "failed",
+        message: "轮摘要生成失败"
+      });
+      return { ok: false, error: "empty_round_summary" };
+    }
+    const roundPath = getRoundSummaryPath(input.workflow, input.endedRound);
+    await upsertDebateFile(input.debate.id, roundPath, `${content.trim()}\n`, input.now);
     try {
       await indexDebateContextChunk({
         userId: input.userId,
@@ -3728,14 +4188,31 @@ export async function generateRoundSummary(input: {
         sourcePath: roundPath,
         roundNumber: input.endedRound,
         content,
-        now
+        now: input.now
       });
     } catch {
-      // retrieval indexing is best-effort
     }
+    await updateSummaryJob(input.debate.id, {
+      key,
+      kind: "round_summary",
+      label: `第 ${input.endedRound} 轮摘要`,
+      roundNumber: input.endedRound,
+      status: "completed",
+      message: "轮摘要已完成"
+    });
+    return { ok: true, path: roundPath, content };
+  } catch (error) {
+    await updateSummaryJob(input.debate.id, {
+      key,
+      kind: "round_summary",
+      label: `第 ${input.endedRound} 轮摘要`,
+      roundNumber: input.endedRound,
+      status: "failed",
+      message: "轮摘要生成失败"
+    });
+    await logRuntimeEvent("warn", "round summary generation failed", { error: describeRuntimeError(error) });
+    return { ok: false, error };
   }
-  
-  return { ok: true };
 }
 
 export async function runDebate(id: string, userId: string) {
@@ -4235,27 +4712,48 @@ export async function runDebate(id: string, userId: string) {
           persistAnswerAfterTurn({
             userId,
             debateId: id,
+            roundNumber,
             turnNumber: messageNumber,
             agentName: eventAgentName,
             content: persistedResponse.content,
             now: createdAt
-          }),
-          ...(debate.enableSharedFacts
-            ? [
-                persistSharedFactsAfterTurn({
-                  userId,
-                  debateId: id,
-                  turnNumber: messageNumber,
-                  agentName: eventAgentName,
-                  content: persistedResponse.content,
-                  structuredOutput: persistedResponse.structuredOutput,
-                  now: createdAt
-                })
-              ]
-            : [])
+          })
         ]);
       } catch (error) {
         await logRuntimeEvent("warn", "memory persistence failed", { debateId: id, error: describeRuntimeError(error) });
+      }
+
+      const workflow = await loadDebateWorkflow(userId, id);
+      try {
+        const turnSummary = await generateTurnSummary({
+          userId,
+          debateId: id,
+          debateQuestion: debate.question,
+          workflow,
+          roundNumber,
+          turnNumber: messageNumber,
+          agentName: eventAgentName,
+          content: persistedResponse.content,
+          now: createdAt
+        });
+        if (debate.enableSharedFacts && turnSummary.ok && turnSummary.content) {
+          await refreshFactsBoardFromSummaries({
+            userId,
+            debateId: id,
+            debateQuestion: debate.question,
+            workflow,
+            sourceLabel: `turn-${messageNumber}`,
+            sourceSummary: turnSummary.content,
+            turnNumber: messageNumber,
+            roundNumber,
+            now: createdAt
+          });
+        }
+      } catch (error) {
+        await logRuntimeEvent("warn", "turn summarizer pipeline failed", {
+          debateId: id,
+          error: describeRuntimeError(error)
+        });
       }
 
       const turnRows = await query<Record<string, unknown>>(
@@ -4279,7 +4777,6 @@ export async function runDebate(id: string, userId: string) {
         createdAt: String(row.created_at)
       }));
 
-      const workflow = await loadDebateWorkflow(userId, id);
       const consensus = aggregateConsensusByLastRound(turns, participantCount, workflow?.consensus ?? null);
       const nextTurn = debate.currentTurn + 1;
       const isBoundary = participantCount > 0 ? nextTurn % participantCount === 0 : false;
@@ -4412,11 +4909,37 @@ export async function runDebate(id: string, userId: string) {
             await generateRoundSummary({
               userId,
               debate: { id: debate.id, question: debate.question },
+              workflow,
               participantCount,
-              endedRound
+              endedRound,
+              now: createdAt
             });
           } catch (error) {
             await logRuntimeEvent("warn", "round summary failed", { debateId: id, error: describeRuntimeError(error) });
+          }
+
+          if (debate.enableSharedFacts) {
+            try {
+              const roundSummaryPath = getRoundSummaryPath(workflow, endedRound);
+              const roundSummaryContent = await readDebateFile(userId, id, roundSummaryPath);
+              if (roundSummaryContent?.trim()) {
+                await refreshFactsBoardFromSummaries({
+                  userId,
+                  debateId: id,
+                  debateQuestion: debate.question,
+                  workflow,
+                  sourceLabel: `round-${endedRound}`,
+                  sourceSummary: roundSummaryContent,
+                  roundNumber: endedRound,
+                  now: createdAt
+                });
+              }
+            } catch (error) {
+              await logRuntimeEvent("warn", "round facts board refresh failed", {
+                debateId: id,
+                error: describeRuntimeError(error)
+              });
+            }
           }
 
           try {

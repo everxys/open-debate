@@ -112,6 +112,17 @@ type TurnWindowState = {
   latest: TurnSummary | null;
 };
 
+type SummaryJob = {
+  key: string;
+  kind: "turn_summary" | "round_summary" | "facts_board";
+  status: "pending" | "running" | "failed" | "completed";
+  label: string;
+  turnNumber: number | null;
+  roundNumber: number | null;
+  message: string | null;
+  updatedAt: string;
+};
+
 type DebateRoundDirectoryItemProps = {
   round: number;
   roundTurns: TurnSummary[];
@@ -122,6 +133,7 @@ type DebateRoundDirectoryItemProps = {
   hasInjectedPrompt: boolean;
   isCurrentPhaseRound: boolean;
   hasVoteResult: boolean;
+  summaryJobs: SummaryJob[];
   selectedViewerKey: string;
   votePath: string | undefined;
   onToggleRound: (round: number, open: boolean) => void;
@@ -391,6 +403,13 @@ function formatWorkflowRulesMarkdown(raw: string) {
     rules.push(
       `- 允许写入路径：${parsed.deliverables.allowedPaths.length ? parsed.deliverables.allowedPaths.join(" / ") : "（无）"}`
     );
+    rules.push(
+      `- 独立总结器：${
+        parsed.summarizer.enabled
+          ? `已启用（每回=${parsed.summarizer.perTurn ? "是" : "否"}；每轮=${parsed.summarizer.perRound ? "是" : "否"}；事实板=${parsed.summarizer.factsBoard ? "是" : "否"}）`
+          : "未启用"
+      }`
+    );
     return rules.join("\n");
   }
 
@@ -448,6 +467,14 @@ function formatWorkflowRulesMarkdown(raw: string) {
   rules.push(
     `- 允许写入路径：${parsed.deliverables.allowedPaths.length ? parsed.deliverables.allowedPaths.join(" / ") : "（无）"}`
   );
+  if (parsed.summarizer.enabled) {
+    rules.push(
+      `- 独立总结器：已启用；每回摘要=${parsed.summarizer.perTurn ? "是" : "否"}；每轮摘要=${parsed.summarizer.perRound ? "是" : "否"}；事实板=${parsed.summarizer.factsBoard ? "是" : "否"}`
+    );
+    rules.push(
+      `- 总结输出：${parsed.summarizer.outputPaths.turnSummaryDir} / ${parsed.summarizer.outputPaths.roundSummaryDir} / ${parsed.summarizer.outputPaths.factsBoardPath}`
+    );
+  }
   if (parsed.ideaBank.rawIdeaBankPath || Object.values(parsed.ideaBank.derivedFiles).some(Boolean)) {
     rules.push(
       `- 原始点子库：${parsed.ideaBank.rawIdeaBankPath ?? "（无）"}`
@@ -743,6 +770,7 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
     hasInjectedPrompt,
     isCurrentPhaseRound,
     hasVoteResult,
+    summaryJobs,
     selectedViewerKey,
     votePath,
     onToggleRound,
@@ -750,6 +778,12 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
     onOpenVoteRound,
     onSelectTurn
   } = props;
+  const roundSummaryFailed = summaryJobs.some(
+    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && job.status === "failed"
+  );
+  const roundSummaryRunning = summaryJobs.some(
+    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && job.status !== "failed"
+  );
 
   return (
     <details
@@ -792,6 +826,16 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
             style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}
           >
             有投票结果
+        </span>
+      ) : null}
+      {roundSummaryFailed ? (
+        <span className="softBox" style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}>
+          AI 总结失败
+        </span>
+      ) : null}
+      {roundSummaryRunning ? (
+        <span className="softBox" style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}>
+          AI 总结中...
         </span>
       ) : null}
     </summary>
@@ -841,6 +885,12 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
             const active = selectedViewerKey === turn.id;
             const turnInRound = ((turn.turnNumber - 1) % agentCount) + 1;
             const seat = turn.seatNumber ? `Seat-${turn.seatNumber}` : "";
+            const turnSummaryFailed = summaryJobs.some(
+              (job) => job.kind === "turn_summary" && job.turnNumber === turn.turnNumber && job.status === "failed"
+            );
+            const hasRunningTurnSummary = summaryJobs.some(
+              (job) => job.kind === "turn_summary" && job.turnNumber === turn.turnNumber && job.status !== "failed"
+            );
             return (
               <button
                 key={turn.id}
@@ -857,6 +907,8 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
                   {`#${turn.turnNumber} · 第 ${round} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${turn.agent.name}`}
                 </span>
                 <span className="muted"> · {new Date(turn.createdAt).toLocaleTimeString()}</span>
+                {turnSummaryFailed ? <span className="muted"> · AI 总结失败</span> : null}
+                {hasRunningTurnSummary ? <span className="muted"> · AI 总结中...</span> : null}
               </button>
             );
           })}
@@ -3100,6 +3152,7 @@ export default function DebateDetailPage() {
   const [liveMessageNumber, setLiveMessageNumber] = useState<number | null>(null);
   const [liveAgentName, setLiveAgentName] = useState<string>("");
   const [liveStatus, setLiveStatus] = useState<string>("");
+  const [summaryJobsByKey, setSummaryJobsByKey] = useState<Record<string, SummaryJob>>({});
   const [liveText, setLiveText] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [activeLive, setActiveLive] = useState(false);
@@ -3484,6 +3537,7 @@ export default function DebateDetailPage() {
     setLiveMessageNumber(null);
     setLiveAgentName("");
     setLiveStatus("");
+    setSummaryJobsByKey({});
     setLiveText("");
     setActiveLive(false);
     setActiveTurnId("");
@@ -3978,6 +4032,26 @@ export default function DebateDetailPage() {
       } catch {
       }
     });
+    source.addEventListener("summary_job", (event) => {
+      try {
+        lastSseEventAtRef.current = Date.now();
+        const payload = JSON.parse((event as MessageEvent).data) as { job?: SummaryJob };
+        const job = payload.job;
+        if (!job?.key) return;
+        setSummaryJobsByKey((current) => {
+          if (job.status === "completed") {
+            const next = { ...current };
+            delete next[job.key];
+            return next;
+          }
+          return { ...current, [job.key]: job };
+        });
+        if (job.status === "running" && job.message) {
+          setLiveStatus(job.message);
+        }
+      } catch {
+      }
+    });
     source.addEventListener("chunk", (event) => {
       try {
         lastSseEventAtRef.current = Date.now();
@@ -4461,6 +4535,13 @@ export default function DebateDetailPage() {
   const liveDisplayRound = typeof liveRoundNumber === "number" && liveRoundNumber > 0 ? liveRoundNumber : null;
   const liveDisplayMessage =
     typeof liveMessageNumber === "number" && liveMessageNumber > 0 ? liveMessageNumber : null;
+  const liveSummaryJobs = useMemo(
+    () =>
+      Object.values(summaryJobsByKey)
+        .filter((job) => job.status === "pending" || job.status === "running" || job.status === "failed")
+        .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt)),
+    [summaryJobsByKey]
+  );
 
   const handleToggleDirectoryRound = useCallback((round: number, open: boolean) => {
     setOpenRoundsByNumber((current) => ({ ...current, [round]: open }));
@@ -5219,6 +5300,7 @@ export default function DebateDetailPage() {
                 hasInjectedPrompt={hasInjectedPrompt}
                 isCurrentPhaseRound={isCurrentPhaseRound}
                 hasVoteResult={hasVoteResult}
+                summaryJobs={liveSummaryJobs.filter((job) => job.roundNumber === round)}
                 selectedViewerKey={selectedViewerKey}
                 votePath={votePathsByRound[round]}
                 onToggleRound={handleToggleDirectoryRound}

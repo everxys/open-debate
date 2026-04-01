@@ -29,6 +29,24 @@ export type DebateWorkflowQualityChecks = {
   }>;
 };
 
+export type DebateWorkflowSummarizerConfig = {
+  enabled?: boolean;
+  aiAgentId?: string | null;
+  perTurn?: boolean;
+  perRound?: boolean;
+  factsBoard?: boolean;
+  prompts?: {
+    turnSummary?: string | null;
+    roundSummary?: string | null;
+    factsBoard?: string | null;
+  };
+  outputPaths?: {
+    turnSummaryDir?: string | null;
+    roundSummaryDir?: string | null;
+    factsBoardPath?: string | null;
+  };
+};
+
 export type DebateWorkflowConfig = {
   workflowVersion?: number;
   enabled?: boolean;
@@ -151,6 +169,7 @@ export type DebateWorkflowConfig = {
       newlyInventedIdeasPath?: string | null;
     };
   };
+  summarizer?: DebateWorkflowSummarizerConfig;
   rolesMeta?: Record<string, DebateWorkflowRoleMeta>;
   contextAccess?: {
     alwaysRead?: DebateWorkflowContextAccessRule[];
@@ -276,6 +295,23 @@ export type NormalizedDebateWorkflow = {
       newlyInventedIdeasPath: string | null;
     };
   };
+  summarizer: {
+    enabled: boolean;
+    aiAgentId: string | null;
+    perTurn: boolean;
+    perRound: boolean;
+    factsBoard: boolean;
+    prompts: {
+      turnSummary: string | null;
+      roundSummary: string | null;
+      factsBoard: string | null;
+    };
+    outputPaths: {
+      turnSummaryDir: string;
+      roundSummaryDir: string;
+      factsBoardPath: string;
+    };
+  };
   rolesMeta: Record<
     string,
     {
@@ -398,6 +434,23 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         rejectedOrMergedPath: null,
         eventMappingsPath: null,
         newlyInventedIdeasPath: null
+      }
+    },
+    summarizer: {
+      enabled: false,
+      aiAgentId: null,
+      perTurn: true,
+      perRound: true,
+      factsBoard: true,
+      prompts: {
+        turnSummary: null,
+        roundSummary: null,
+        factsBoard: null
+      },
+      outputPaths: {
+        turnSummaryDir: "debate/turn_summaries/",
+        roundSummaryDir: "debate/round_summaries/",
+        factsBoardPath: "facts/board.md"
       }
     },
     rolesMeta: {},
@@ -672,6 +725,49 @@ function normalizeCompletion(
           : "consensus_only";
   return { mode };
 }
+
+function normalizeDirectoryPath(value: unknown, fallback: string) {
+  const trimmed = toTrimmedString(value);
+  if (!trimmed) return fallback;
+  const normalized = trimmed.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!normalized) return fallback;
+  return normalized.endsWith("/") ? normalized : `${normalized}/`;
+}
+
+function normalizeFilePath(value: unknown, fallback: string) {
+  const trimmed = toTrimmedString(value);
+  if (!trimmed) return fallback;
+  const normalized = trimmed.replace(/\\/g, "/").replace(/^\/+/, "");
+  return normalized || fallback;
+}
+
+function normalizeSummarizer(value: unknown): NormalizedDebateWorkflow["summarizer"] {
+  const defaults = createDefaultDebateWorkflowConfig().summarizer!;
+  const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+  const prompts = typeof obj?.prompts === "object" && obj.prompts !== null ? (obj.prompts as Record<string, unknown>) : null;
+  const outputPaths =
+    typeof obj?.outputPaths === "object" && obj.outputPaths !== null
+      ? (obj.outputPaths as Record<string, unknown>)
+      : null;
+  return {
+    enabled: Boolean(obj?.enabled),
+    aiAgentId: obj?.aiAgentId === null ? null : toTrimmedString(obj?.aiAgentId),
+    perTurn: obj?.perTurn === undefined ? defaults.perTurn ?? true : Boolean(obj?.perTurn),
+    perRound: obj?.perRound === undefined ? defaults.perRound ?? true : Boolean(obj?.perRound),
+    factsBoard: obj?.factsBoard === undefined ? defaults.factsBoard ?? true : Boolean(obj?.factsBoard),
+    prompts: {
+      turnSummary: prompts?.turnSummary === null ? null : toTrimmedString(prompts?.turnSummary),
+      roundSummary: prompts?.roundSummary === null ? null : toTrimmedString(prompts?.roundSummary),
+      factsBoard: prompts?.factsBoard === null ? null : toTrimmedString(prompts?.factsBoard)
+    },
+    outputPaths: {
+      turnSummaryDir: normalizeDirectoryPath(outputPaths?.turnSummaryDir, defaults.outputPaths?.turnSummaryDir ?? "debate/turn_summaries/"),
+      roundSummaryDir: normalizeDirectoryPath(outputPaths?.roundSummaryDir, defaults.outputPaths?.roundSummaryDir ?? "debate/round_summaries/"),
+      factsBoardPath: normalizeFilePath(outputPaths?.factsBoardPath, defaults.outputPaths?.factsBoardPath ?? "facts/board.md")
+    }
+  };
+}
+
 function normalizeRolesMeta(value: unknown): NormalizedDebateWorkflow["rolesMeta"] {
   if (typeof value !== "object" || value === null) return {};
   const obj = value as Record<string, unknown>;
@@ -1129,6 +1225,7 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
     phaseMachine
   });
   const ideaBank = normalizeIdeaBank((anyInput as { ideaBank?: unknown }).ideaBank);
+  const summarizer = normalizeSummarizer((anyInput as { summarizer?: unknown }).summarizer);
   const rolesMeta = normalizeRolesMeta((anyInput as { rolesMeta?: unknown }).rolesMeta);
   let contextAccess: NormalizedDebateWorkflow["contextAccess"];
   try {
@@ -1162,6 +1259,7 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
     deliverables,
     completion,
     ideaBank,
+    summarizer,
     rolesMeta,
     contextAccess
   };
@@ -1273,6 +1371,23 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
       rawIdeaBankPath: normalized.ideaBank.rawIdeaBankPath,
       derivedFiles: normalized.ideaBank.derivedFiles
     },
+    summarizer: {
+      enabled: normalized.summarizer.enabled,
+      aiAgentId: normalized.summarizer.aiAgentId,
+      perTurn: normalized.summarizer.perTurn,
+      perRound: normalized.summarizer.perRound,
+      factsBoard: normalized.summarizer.factsBoard,
+      prompts: {
+        turnSummary: normalized.summarizer.prompts.turnSummary,
+        roundSummary: normalized.summarizer.prompts.roundSummary,
+        factsBoard: normalized.summarizer.prompts.factsBoard
+      },
+      outputPaths: {
+        turnSummaryDir: normalized.summarizer.outputPaths.turnSummaryDir,
+        roundSummaryDir: normalized.summarizer.outputPaths.roundSummaryDir,
+        factsBoardPath: normalized.summarizer.outputPaths.factsBoardPath
+      }
+    },
     rolesMeta: Object.fromEntries(
       Object.entries(normalized.rolesMeta).map(([role, meta]) => [
         role,
@@ -1323,4 +1438,3 @@ export function safeParseWorkflowJson(raw: string | null): NormalizedDebateWorkf
     return null;
   }
 }
-

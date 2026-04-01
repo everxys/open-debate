@@ -38,8 +38,14 @@ Rules:
 系统可能会在 system prompt 中注入以下内容（取决于配置与数据是否存在）：
 
 - 参与者文件（来自 AI 配置文件，或辩论级覆盖文件）
+- 参与者目录索引：`context/AGENTS.md`
+  - 由系统自动维护
+  - 会概览当前席位可见的私有文件，以及共享目录/文件的大致用途
 - 参与者长时记忆摘要：`memory/summary.md`
+- 独立总结器生成的逐回摘要：`debate/turn_summaries/turn-<n>.md`
+- 独立总结器生成的逐轮摘要：`debate/round_summaries/round-<n>.md`
 - 全场共享事实板（可选）：`facts/board.md`
+  - 现为结构化工作板，不再是逐 Turn 摘录堆积
 - 若 workflow 配置了 `contextAccess`，则会按目录规则区分：
   - `alwaysRead`：每次生成、每个新会话都会自动重新注入
   - `readWhenNeeded`：不会自动注入，但模型可通过文件读取工具按需读取

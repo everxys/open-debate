@@ -46,8 +46,11 @@ export async function GET(
         };
 
         const initial = getDebateLiveProgress(id);
-        if (initial) {
-          controller.enqueue(encoder.encode(sseEvent("turn_start", { progress: initial })));
+        if (initial.progress) {
+          controller.enqueue(encoder.encode(sseEvent("turn_start", { progress: initial.progress })));
+        }
+        for (const job of initial.summaryJobs) {
+          controller.enqueue(encoder.encode(sseEvent("summary_job", { debateId: id, job })));
         }
         controller.enqueue(encoder.encode(sseEvent("hello", { at: new Date().toISOString() })));
 

@@ -56,10 +56,31 @@ type WorkflowContextAccess = {
   unlockAfterPhase: WorkflowPhaseGateRule[];
 };
 
+type WorkflowSummarizer = {
+  enabled: boolean;
+  perTurn: boolean;
+  perRound: boolean;
+  factsBoard: boolean;
+  prompts: {
+    turnSummary: string;
+    roundSummary: string;
+    factsBoard: string;
+  };
+  outputPaths: {
+    turnSummaryDir: string;
+    roundSummaryDir: string;
+    factsBoardPath: string;
+  };
+};
+
 type WorkflowConfigPayload = {
   workflowVersion?: number;
   enabled?: boolean;
   contextAccess?: WorkflowContextAccess;
+  summarizer?: Partial<WorkflowSummarizer> & {
+    prompts?: Partial<WorkflowSummarizer["prompts"]>;
+    outputPaths?: Partial<WorkflowSummarizer["outputPaths"]>;
+  };
   [key: string]: unknown;
 };
 
@@ -142,6 +163,32 @@ function normalizeContextAccessPayload(value: unknown): WorkflowContextAccess {
   return { alwaysRead, readWhenNeeded, unlockAfterPhase };
 }
 
+function normalizeSummarizerPayload(value: unknown): WorkflowSummarizer {
+  const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+  const prompts = typeof obj?.prompts === "object" && obj.prompts !== null ? (obj.prompts as Record<string, unknown>) : null;
+  const outputPaths =
+    typeof obj?.outputPaths === "object" && obj.outputPaths !== null
+      ? (obj.outputPaths as Record<string, unknown>)
+      : null;
+  return {
+    enabled: Boolean(obj?.enabled),
+    perTurn: obj?.perTurn === undefined ? true : Boolean(obj?.perTurn),
+    perRound: obj?.perRound === undefined ? true : Boolean(obj?.perRound),
+    factsBoard: obj?.factsBoard === undefined ? true : Boolean(obj?.factsBoard),
+    prompts: {
+      turnSummary: typeof prompts?.turnSummary === "string" ? prompts.turnSummary : "",
+      roundSummary: typeof prompts?.roundSummary === "string" ? prompts.roundSummary : "",
+      factsBoard: typeof prompts?.factsBoard === "string" ? prompts.factsBoard : ""
+    },
+    outputPaths: {
+      turnSummaryDir: typeof outputPaths?.turnSummaryDir === "string" ? outputPaths.turnSummaryDir : "debate/turn_summaries/",
+      roundSummaryDir:
+        typeof outputPaths?.roundSummaryDir === "string" ? outputPaths.roundSummaryDir : "debate/round_summaries/",
+      factsBoardPath: typeof outputPaths?.factsBoardPath === "string" ? outputPaths.factsBoardPath : "facts/board.md"
+    }
+  };
+}
+
 async function readPayload(response: Response) {
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
@@ -193,8 +240,25 @@ export default function StrategyDetailPage() {
     readWhenNeeded: [],
     unlockAfterPhase: []
   });
+  const [workflowSummarizer, setWorkflowSummarizer] = useState<WorkflowSummarizer>({
+    enabled: false,
+    perTurn: true,
+    perRound: true,
+    factsBoard: true,
+    prompts: {
+      turnSummary: "",
+      roundSummary: "",
+      factsBoard: ""
+    },
+    outputPaths: {
+      turnSummaryDir: "debate/turn_summaries/",
+      roundSummaryDir: "debate/round_summaries/",
+      factsBoardPath: "facts/board.md"
+    }
+  });
   const [workflowContextAccessLoading, setWorkflowContextAccessLoading] = useState(false);
   const [workflowContextAccessSaving, setWorkflowContextAccessSaving] = useState(false);
+  const [workflowSummarizerSaving, setWorkflowSummarizerSaving] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -262,6 +326,7 @@ export default function StrategyDetailPage() {
             : null;
         setWorkflowConfig(nextWorkflowConfig);
         setWorkflowContextAccess(normalizeContextAccessPayload(nextWorkflowConfig?.contextAccess));
+        setWorkflowSummarizer(normalizeSummarizerPayload(nextWorkflowConfig?.summarizer));
       }
     } finally {
       setWorkflowPhasePromptsLoading(false);
@@ -757,6 +822,58 @@ export default function StrategyDetailPage() {
     }
   }
 
+  async function saveWorkflowSummarizer() {
+    if (!id || !detail?.canEdit || workflowSummarizerSaving) return;
+    if (!workflowConfig) {
+      showToast("error", "workflow 配置尚未加载完成");
+      return;
+    }
+
+    setWorkflowSummarizerSaving(true);
+    try {
+      const response = await fetch(`/api/strategies/${id}/workflow-config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workflowConfig: {
+            ...workflowConfig,
+            summarizer: {
+              enabled: workflowSummarizer.enabled,
+              aiAgentId: null,
+              perTurn: workflowSummarizer.perTurn,
+              perRound: workflowSummarizer.perRound,
+              factsBoard: workflowSummarizer.factsBoard,
+              prompts: {
+                turnSummary: workflowSummarizer.prompts.turnSummary.trim() || null,
+                roundSummary: workflowSummarizer.prompts.roundSummary.trim() || null,
+                factsBoard: workflowSummarizer.prompts.factsBoard.trim() || null
+              },
+              outputPaths: {
+                turnSummaryDir: workflowSummarizer.outputPaths.turnSummaryDir.trim() || "debate/turn_summaries/",
+                roundSummaryDir: workflowSummarizer.outputPaths.roundSummaryDir.trim() || "debate/round_summaries/",
+                factsBoardPath: workflowSummarizer.outputPaths.factsBoardPath.trim() || "facts/board.md"
+              }
+            }
+          }
+        })
+      });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "保存独立总结器失败");
+        return;
+      }
+      const nextWorkflowConfig =
+        payload.data?.workflowConfig && typeof payload.data.workflowConfig === "object"
+          ? (payload.data.workflowConfig as WorkflowConfigPayload)
+          : workflowConfig;
+      setWorkflowConfig(nextWorkflowConfig);
+      setWorkflowSummarizer(normalizeSummarizerPayload(nextWorkflowConfig.summarizer));
+      showToast("success", "已保存独立总结器");
+    } finally {
+      setWorkflowSummarizerSaving(false);
+    }
+  }
+
   if (!detail) {
     return <div className="panel">加载中...</div>;
   }
@@ -888,6 +1005,155 @@ export default function StrategyDetailPage() {
         <div className="field">
           <label>描述（可选）</label>
           <textarea value={description} disabled={!detail.canEdit} onChange={(event) => setDescription(event.target.value)} />
+        </div>
+      </section>
+
+      <section className="panel stack">
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div>
+            <strong>独立总结器（可选）</strong>
+            <div className="muted">策略可以声明一台独立总结器，用于每回摘要、每轮摘要和结构化事实板。真正绑定哪台 AI，会在“使用策略”创建辩论时再选择。</div>
+          </div>
+          {detail.canEdit ? (
+            <button className="btn btn-primary" disabled={workflowSummarizerSaving} onClick={() => void saveWorkflowSummarizer()}>
+              {workflowSummarizerSaving ? "保存中..." : "保存总结器"}
+            </button>
+          ) : null}
+        </div>
+
+        <label className="row" style={{ alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={workflowSummarizer.enabled}
+            disabled={!detail.canEdit}
+            onChange={(event) =>
+              setWorkflowSummarizer((current) => ({
+                ...current,
+                enabled: event.target.checked
+              }))
+            }
+          />
+          <span>启用独立总结器</span>
+        </label>
+
+        <div className="row" style={{ gap: 16, flexWrap: "wrap" }}>
+          <label className="row" style={{ alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={workflowSummarizer.perTurn}
+              disabled={!detail.canEdit || !workflowSummarizer.enabled}
+              onChange={(event) =>
+                setWorkflowSummarizer((current) => ({ ...current, perTurn: event.target.checked }))
+              }
+            />
+            <span>每回摘要</span>
+          </label>
+          <label className="row" style={{ alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={workflowSummarizer.perRound}
+              disabled={!detail.canEdit || !workflowSummarizer.enabled}
+              onChange={(event) =>
+                setWorkflowSummarizer((current) => ({ ...current, perRound: event.target.checked }))
+              }
+            />
+            <span>每轮摘要</span>
+          </label>
+          <label className="row" style={{ alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={workflowSummarizer.factsBoard}
+              disabled={!detail.canEdit || !workflowSummarizer.enabled}
+              onChange={(event) =>
+                setWorkflowSummarizer((current) => ({ ...current, factsBoard: event.target.checked }))
+              }
+            />
+            <span>结构化事实板</span>
+          </label>
+        </div>
+
+        <div className="grid" style={{ gap: 12 }}>
+          <div className="field">
+            <label>回摘要 Prompt</label>
+            <textarea
+              value={workflowSummarizer.prompts.turnSummary}
+              disabled={!detail.canEdit || !workflowSummarizer.enabled}
+              onChange={(event) =>
+                setWorkflowSummarizer((current) => ({
+                  ...current,
+                  prompts: { ...current.prompts, turnSummary: event.target.value }
+                }))
+              }
+            />
+          </div>
+          <div className="field">
+            <label>轮摘要 Prompt</label>
+            <textarea
+              value={workflowSummarizer.prompts.roundSummary}
+              disabled={!detail.canEdit || !workflowSummarizer.enabled}
+              onChange={(event) =>
+                setWorkflowSummarizer((current) => ({
+                  ...current,
+                  prompts: { ...current.prompts, roundSummary: event.target.value }
+                }))
+              }
+            />
+          </div>
+          <div className="field">
+            <label>事实板 Prompt</label>
+            <textarea
+              value={workflowSummarizer.prompts.factsBoard}
+              disabled={!detail.canEdit || !workflowSummarizer.enabled}
+              onChange={(event) =>
+                setWorkflowSummarizer((current) => ({
+                  ...current,
+                  prompts: { ...current.prompts, factsBoard: event.target.value }
+                }))
+              }
+            />
+          </div>
+        </div>
+
+        <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+          <div className="field" style={{ flex: 1, minWidth: 220 }}>
+            <label>回摘要目录</label>
+            <input
+              value={workflowSummarizer.outputPaths.turnSummaryDir}
+              disabled={!detail.canEdit || !workflowSummarizer.enabled}
+              onChange={(event) =>
+                setWorkflowSummarizer((current) => ({
+                  ...current,
+                  outputPaths: { ...current.outputPaths, turnSummaryDir: event.target.value }
+                }))
+              }
+            />
+          </div>
+          <div className="field" style={{ flex: 1, minWidth: 220 }}>
+            <label>轮摘要目录</label>
+            <input
+              value={workflowSummarizer.outputPaths.roundSummaryDir}
+              disabled={!detail.canEdit || !workflowSummarizer.enabled}
+              onChange={(event) =>
+                setWorkflowSummarizer((current) => ({
+                  ...current,
+                  outputPaths: { ...current.outputPaths, roundSummaryDir: event.target.value }
+                }))
+              }
+            />
+          </div>
+          <div className="field" style={{ flex: 1, minWidth: 220 }}>
+            <label>事实板路径</label>
+            <input
+              value={workflowSummarizer.outputPaths.factsBoardPath}
+              disabled={!detail.canEdit || !workflowSummarizer.enabled}
+              onChange={(event) =>
+                setWorkflowSummarizer((current) => ({
+                  ...current,
+                  outputPaths: { ...current.outputPaths, factsBoardPath: event.target.value }
+                }))
+              }
+            />
+          </div>
         </div>
       </section>
 

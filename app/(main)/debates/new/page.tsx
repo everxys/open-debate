@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { MarkdownView } from "@/components/ui/markdown";
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 
 type Agent = {
@@ -51,6 +52,25 @@ type WorkflowIdeaBank = {
   };
 };
 
+type WorkflowSummarizer = {
+  enabled: boolean;
+  perTurn: boolean;
+  perRound: boolean;
+  factsBoard: boolean;
+  prompts: {
+    turnSummary: string;
+    roundSummary: string;
+    factsBoard: string;
+  };
+};
+
+type WorkflowConfigPayload = {
+  summarizer?: Partial<WorkflowSummarizer> & {
+    prompts?: Partial<WorkflowSummarizer["prompts"]>;
+  };
+  [key: string]: unknown;
+};
+
 type BindingRow = {
   rowId: string;
   roleId: string;
@@ -58,12 +78,26 @@ type BindingRow = {
   agentId: string;
 };
 
+type PromptPreviewDialogState =
+  | null
+  | {
+      title: string;
+      description: string;
+      value: string;
+    };
+
 const initialForm = {
   question: "",
   maxTurns: 10,
   unlimitedTurns: false,
   enableSharedFacts: true
 };
+
+function summarizePrompt(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return "未配置";
+  return normalized.length > 120 ? `${normalized.slice(0, 120)}...` : normalized;
+}
 
 export default function NewDebatePage() {
   const router = useRouter();
@@ -79,9 +113,12 @@ export default function NewDebatePage() {
   const [strategyDetail, setStrategyDetail] = useState<StrategyDetail | null>(null);
   const [workflowOpeningPrompt, setWorkflowOpeningPrompt] = useState("");
   const [workflowIdeaBank, setWorkflowIdeaBank] = useState<WorkflowIdeaBank | null>(null);
+  const [workflowSummarizer, setWorkflowSummarizer] = useState<WorkflowSummarizer | null>(null);
   const [workflowPhasePrompts, setWorkflowPhasePrompts] = useState<WorkflowPhasePrompt[]>([]);
   const [workflowPhasePromptsLoading, setWorkflowPhasePromptsLoading] = useState(false);
   const [bindingRows, setBindingRows] = useState<BindingRow[]>([]);
+  const [summaryAgentId, setSummaryAgentId] = useState("");
+  const [promptPreviewDialog, setPromptPreviewDialog] = useState<PromptPreviewDialogState>(null);
 
   function newRowId() {
     if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
@@ -112,20 +149,24 @@ export default function NewDebatePage() {
       setStrategyDetail(null);
       setWorkflowOpeningPrompt("");
       setWorkflowIdeaBank(null);
+      setWorkflowSummarizer(null);
       setWorkflowPhasePrompts([]);
       setBindingRows([]);
+      setSummaryAgentId("");
       return;
     }
 
     setWorkflowPhasePromptsLoading(true);
 
     try {
-      const [strategyResponse, workflowResponse] = await Promise.all([
+      const [strategyResponse, workflowResponse, workflowConfigResponse] = await Promise.all([
         fetch(`/api/strategies/${id}`),
-        fetch(`/api/strategies/${id}/workflow-phase-prompts`)
+        fetch(`/api/strategies/${id}/workflow-phase-prompts`),
+        fetch(`/api/strategies/${id}/workflow-config`)
       ]);
       const payload = await strategyResponse.json();
       const workflowPayload = await workflowResponse.json();
+      const workflowConfigPayload = await workflowConfigResponse.json();
       if (!strategyResponse.ok) {
         showToast("error", payload.error?.message ?? "加载策略失败");
         setStrategyDetail(null);
@@ -136,6 +177,7 @@ export default function NewDebatePage() {
         showToast("error", workflowPayload.error?.message ?? "加载阶段注入提示词失败");
         setWorkflowOpeningPrompt("");
         setWorkflowIdeaBank(null);
+        setWorkflowSummarizer(null);
         setWorkflowPhasePrompts([]);
       } else {
         setWorkflowOpeningPrompt(typeof workflowPayload.data?.openingPrompt === "string" ? workflowPayload.data.openingPrompt : "");
@@ -172,9 +214,40 @@ export default function NewDebatePage() {
             : []
         );
       }
+      if (workflowConfigResponse.ok) {
+        const workflowConfig =
+          workflowConfigPayload.data?.workflowConfig && typeof workflowConfigPayload.data.workflowConfig === "object"
+            ? (workflowConfigPayload.data.workflowConfig as WorkflowConfigPayload)
+            : null;
+        const summarizerRaw =
+          workflowConfig?.summarizer && typeof workflowConfig.summarizer === "object"
+            ? workflowConfig.summarizer
+            : null;
+        setWorkflowSummarizer(
+          summarizerRaw
+            ? {
+                enabled: Boolean(summarizerRaw.enabled),
+                perTurn: summarizerRaw.perTurn === undefined ? true : Boolean(summarizerRaw.perTurn),
+                perRound: summarizerRaw.perRound === undefined ? true : Boolean(summarizerRaw.perRound),
+                factsBoard: summarizerRaw.factsBoard === undefined ? true : Boolean(summarizerRaw.factsBoard),
+                prompts: {
+                  turnSummary:
+                    typeof summarizerRaw.prompts?.turnSummary === "string" ? summarizerRaw.prompts.turnSummary : "",
+                  roundSummary:
+                    typeof summarizerRaw.prompts?.roundSummary === "string" ? summarizerRaw.prompts.roundSummary : "",
+                  factsBoard:
+                    typeof summarizerRaw.prompts?.factsBoard === "string" ? summarizerRaw.prompts.factsBoard : ""
+                }
+              }
+            : null
+        );
+      } else {
+        setWorkflowSummarizer(null);
+      }
 
       const detail = payload.data as StrategyDetail;
       setStrategyDetail(detail);
+      setSummaryAgentId("");
       setBindingRows((current) => {
         const roleIdSet = new Set((detail.roles ?? []).map((r) => r.id));
         const kept = current.filter((row) => roleIdSet.has(row.roleId));
@@ -231,7 +304,8 @@ export default function NewDebatePage() {
       (Number.isFinite(form.maxTurns) && form.maxTurns >= 1 && form.maxTurns <= 200)) &&
     (strategyId
       ? enabledRows.length >= 2 &&
-        enabledBindings.length === enabledRows.length
+        enabledBindings.length === enabledRows.length &&
+        (!workflowSummarizer?.enabled || Boolean(summaryAgentId))
       : selectedAgentIds.length >= 2) &&
     !isSubmitting;
 
@@ -253,7 +327,8 @@ export default function NewDebatePage() {
                     bindings: enabledRows.map((row) => ({
                       roleId: row.roleId,
                       agentId: row.agentId
-                    }))
+                    })),
+                    summaryAgentId: workflowSummarizer?.enabled ? summaryAgentId || null : null
                   }
                 }
               : { agentIds: selectedAgentIds })
@@ -320,6 +395,44 @@ export default function NewDebatePage() {
             />
             <div className="row" style={{ justifyContent: "flex-end" }}>
               <span className="muted">{form.question.length.toLocaleString()}/50,000</span>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {promptPreviewDialog ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setPromptPreviewDialog(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "center",
+            padding: 24,
+            zIndex: 1000
+          }}
+        >
+          <div
+            className="panel stack"
+            onClick={(event) => event.stopPropagation()}
+            style={{ width: "min(980px, 100%)" }}
+          >
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <div className="stack" style={{ gap: 4 }}>
+                <strong>{promptPreviewDialog.title}</strong>
+                <div className="muted">{promptPreviewDialog.description}</div>
+              </div>
+              <button className="btn" type="button" onClick={() => setPromptPreviewDialog(null)}>
+                关闭
+              </button>
+            </div>
+            <div
+              style={{ maxHeight: "60vh", overflowY: "auto" }}
+            >
+              <MarkdownView value={promptPreviewDialog.value || "未配置"} />
             </div>
           </div>
         </div>
@@ -487,6 +600,86 @@ export default function NewDebatePage() {
                         {workflowOpeningPrompt || "当前策略还没有配置开局自动注入提示词。"}
                       </div>
                     </div>
+                    {workflowSummarizer?.enabled ? (
+                      <div className="softBox stack">
+                        <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                          <strong>独立总结器</strong>
+                          <span className="muted">summary worker</span>
+                        </div>
+                        <div className="muted">
+                          这套策略启用了独立总结器。它不会参与正式席位发言，只会在每回/每轮之间生成摘要并整理事实板。
+                        </div>
+                        <div className="muted">
+                          已启用：
+                          {[
+                            workflowSummarizer.perTurn ? "每回摘要" : "",
+                            workflowSummarizer.perRound ? "每轮摘要" : "",
+                            workflowSummarizer.factsBoard ? "事实板更新" : ""
+                          ]
+                            .filter(Boolean)
+                            .join(" / ") || "（无）"}
+                        </div>
+                        <div className="grid" style={{ gap: 10 }}>
+                          <div className="softBox stack">
+                            <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                              <strong>回摘要 Prompt</strong>
+                              <button
+                                className="btn"
+                                type="button"
+                                onClick={() =>
+                                  setPromptPreviewDialog({
+                                    title: "回摘要 Prompt",
+                                    description: "每回发言结束后，独立总结器用这段规则生成 turn summary。",
+                                    value: workflowSummarizer.prompts.turnSummary
+                                  })
+                                }
+                              >
+                                点击查看
+                              </button>
+                            </div>
+                            <div className="muted">{summarizePrompt(workflowSummarizer.prompts.turnSummary)}</div>
+                          </div>
+                          <div className="softBox stack">
+                            <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                              <strong>轮摘要 Prompt</strong>
+                              <button
+                                className="btn"
+                                type="button"
+                                onClick={() =>
+                                  setPromptPreviewDialog({
+                                    title: "轮摘要 Prompt",
+                                    description: "每轮结束后，独立总结器只基于这一轮的回摘要生成 round summary。",
+                                    value: workflowSummarizer.prompts.roundSummary
+                                  })
+                                }
+                              >
+                                点击查看
+                              </button>
+                            </div>
+                            <div className="muted">{summarizePrompt(workflowSummarizer.prompts.roundSummary)}</div>
+                          </div>
+                          <div className="softBox stack">
+                            <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                              <strong>事实板 Prompt</strong>
+                              <button
+                                className="btn"
+                                type="button"
+                                onClick={() =>
+                                  setPromptPreviewDialog({
+                                    title: "事实板 Prompt",
+                                    description: "独立总结器会用这段规则重写结构化 facts board，而不是做逐 Turn 追加。",
+                                    value: workflowSummarizer.prompts.factsBoard
+                                  })
+                                }
+                              >
+                                点击查看
+                              </button>
+                            </div>
+                            <div className="muted">{summarizePrompt(workflowSummarizer.prompts.factsBoard)}</div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
                     {workflowPhasePrompts.length <= 0 ? (
                       <div className="muted">当前策略没有配置阶段注入提示词。</div>
                     ) : null}
@@ -524,6 +717,22 @@ export default function NewDebatePage() {
                   {hasDuplicateStrategyAgentIds ? " · 当前存在重复绑定" : ""}
                 </span>
               </div>
+            {workflowSummarizer?.enabled ? (
+              <div className="panel stack">
+                <div>
+                  <strong>总结器 AI 绑定</strong>
+                  <div className="muted">这台 AI 只负责回摘要、轮摘要和事实板整理，不参与正式发言和投票。</div>
+                </div>
+                <select value={summaryAgentId} onChange={(event) => setSummaryAgentId(event.target.value)} style={{ flex: 1 }}>
+                  <option value="">选择一台总结器 AI</option>
+                  {agents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name} · {agent.provider} · {agent.model}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
             {bindingRows.map((row) => {
               const role = rolesById.get(row.roleId);
               if (!role) return null;

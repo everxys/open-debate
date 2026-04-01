@@ -31,7 +31,7 @@ users
 
 ### debates
 
-- `enable_shared_facts`：是否开启“全场共享事实板”（写入 `debate_files` 的 `facts/board.md` 并注入后续上下文）
+- `enable_shared_facts`：是否允许维护并注入 `facts/board.md`；在当前实现中，通常由 workflow 中的独立总结器把它整理成结构化事实板
 
 ### debate_agent_files（辩论级覆盖 + 参与者记忆）
 
@@ -44,9 +44,8 @@ users
 
 ### debate_files（辩论共享文件）
 
-- `facts/board.md`：全场共享事实板（可选开关）
+- `facts/board.md`：全场共享结构化事实板（由独立总结器维护时生效）
 
 ## 备注
 
 - 如已有旧数据卷，升级依赖 `docker/init.sql` 的 `create table if not exists`/`alter table if not exists` 兼容策略。
-

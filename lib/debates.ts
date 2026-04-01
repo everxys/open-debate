@@ -154,6 +154,14 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<Retur
         .join(" / ")}`
     );
   }
+  if (workflow.summarizer.enabled) {
+    lines.push(
+      `- summarizer: perTurn=${workflow.summarizer.perTurn ? "yes" : "no"} / perRound=${workflow.summarizer.perRound ? "yes" : "no"} / factsBoard=${workflow.summarizer.factsBoard ? "yes" : "no"}`
+    );
+    lines.push(
+      `- summarizer outputs: ${workflow.summarizer.outputPaths.turnSummaryDir} / ${workflow.summarizer.outputPaths.roundSummaryDir} / ${workflow.summarizer.outputPaths.factsBoardPath}`
+    );
+  }
   if (
     workflow.contextAccess.alwaysRead.length > 0 ||
     workflow.contextAccess.readWhenNeeded.length > 0 ||
@@ -424,7 +432,12 @@ async function loadStrategyRolesMap(strategyId: string, roleIds: string[]) {
   }
 }
 
-async function copyStrategyDebateFiles(debateId: string, roleIds: string[], now: string) {
+async function copyStrategyDebateFiles(
+  debateId: string,
+  roleIds: string[],
+  now: string,
+  options?: { summaryAgentId?: string | null }
+) {
   const workflow = await query<{ content: string }>(
     `
       select content
@@ -441,7 +454,20 @@ async function copyStrategyDebateFiles(debateId: string, roleIds: string[], now:
     if (!workflowContent) return DEFAULT_WORKFLOW_JSON;
     try {
       const parsed = JSON.parse(workflowContent) as unknown;
-      return JSON.stringify(toCanonicalWorkflowConfig(parsed) ?? parsed, null, 2);
+      const canonical = (toCanonicalWorkflowConfig(parsed) ?? parsed) as Record<string, unknown>;
+      const summaryAgentId = typeof options?.summaryAgentId === "string" ? options.summaryAgentId.trim() : "";
+      if (
+        canonical &&
+        typeof canonical === "object" &&
+        canonical.summarizer &&
+        typeof canonical.summarizer === "object"
+      ) {
+        canonical.summarizer = {
+          ...(canonical.summarizer as Record<string, unknown>),
+          aiAgentId: summaryAgentId || null
+        };
+      }
+      return JSON.stringify(canonical, null, 2);
     } catch {
       return DEFAULT_WORKFLOW_JSON;
     }
@@ -556,13 +582,21 @@ async function createDebateWithStrategy(
     strategy: {
       strategyId: string;
       bindings: Array<{ roleId: string; agentId: string }>;
+      summaryAgentId?: string | null;
     };
   }
 ) {
   const bindings = data.strategy.bindings;
   const roleIds = bindings.map((binding) => binding.roleId);
   const uniqueRoleIds = Array.from(new Set(roleIds));
-  const uniqueAgentIds = Array.from(new Set(bindings.map((binding) => binding.agentId)));
+  const uniqueAgentIds = Array.from(
+    new Set([
+      ...bindings.map((binding) => binding.agentId),
+      ...(typeof data.strategy.summaryAgentId === "string" && data.strategy.summaryAgentId.trim()
+        ? [data.strategy.summaryAgentId.trim()]
+        : [])
+    ])
+  );
 
   const strategyVisible = await loadVisibleStrategy(data.strategy.strategyId, userId);
   if (!strategyVisible) {
@@ -586,7 +620,9 @@ async function createDebateWithStrategy(
 
   try {
     const usedDisplayNames = new Set<string>();
-    await copyStrategyDebateFiles(debate.id, uniqueRoleIds, now);
+    await copyStrategyDebateFiles(debate.id, uniqueRoleIds, now, {
+      summaryAgentId: data.strategy.summaryAgentId ?? null
+    });
 
     for (let index = 0; index < bindings.length; index += 1) {
       const binding = bindings[index];

@@ -1,5 +1,8 @@
 ## 2026-03-31
 
+- 原始发言归档不再持续追加到单个 `debate/answers.md`：运行时现改为按轮写入 `debate/answers/round-<n>.md`，避免长辩论把一个答案文件撑到几十万甚至上百万字符，更方便浏览和后续按轮定位。
+- 重做辩论摘要体系：新增由策略 workflow 声明、在创建辩论时单独绑定 AI 的独立总结器；每回自动写入 `debate/turn_summaries/turn-<n>.md`，每轮只基于这些回摘要生成 `debate/round_summaries/round-<n>.md`，并把 `facts/board.md` 改成结构化事实板而不再逐回追加摘录。同时 SSE / 发言目录新增“AI 总结中...”状态，便于在两回之间观察总结进度。
+- 新增 seat 级自动目录文件 `context/AGENTS.md`：系统会在每次生成前自动刷新，列出当前席位可见的私有文件、共享目录和用途摘要，帮助 AI 新开一轮时快速恢复文件上下文；同时修正 seat 覆盖文件与基础 `ai_agent_files` 的读取视图，现在两者会合并呈现，而不是“有任意 debate_agent_file 就把基础文件全遮住”。
 - 继续把小说策略往“纯 workflow + prompt”收口：没有引入专门的 `ideaBank` 结构，而是在真实策略 workflow 里补了通用 `contextAccess`（允许按需读取 `debate/` 共享工作文件），并把原始点子池/筛选结果/事件映射等文件语义写进 opening prompt；同样配置已同步回数据库中的真实 `debate/workflow.json`。
 - 删除 8 份已不再进入 docs 页面、也不再被代码或正式教程消费的小说方案草稿文档，保留真正仍在承担配置参照作用的 `docs/NOVEL_GODMODE_WORKFLOW.json` 与接手/教程类文档，减少仓库噪音。
 - 新增 `docs/PROJECT_KNOWLEDGE_BASE.md`，整理项目全景、数据模型、运行时主流程、模块调用关系与接手须知，便于后续 AI 助手或新工程师快速接手项目。

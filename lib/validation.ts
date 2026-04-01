@@ -89,7 +89,8 @@ export const createDebateSchema = z.union([
   debateCommonSchema.extend({
     strategy: z.object({
       strategyId: z.string().min(1),
-      bindings: z.array(z.object({ roleId: z.string().min(1), agentId: z.string().min(1) })).min(2)
+      bindings: z.array(z.object({ roleId: z.string().min(1), agentId: z.string().min(1) })).min(2),
+      summaryAgentId: z.string().min(1).nullable().optional()
     })
   })
 ]);
