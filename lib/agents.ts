@@ -699,6 +699,10 @@ export async function updateAgent(id: string, input: unknown) {
   const data = updateAgentSchema.parse(input);
   const session = await requireSessionUser();
   const current = await getAgentById(id);
+  const nextIsActive =
+    typeof (data as { isActive?: unknown }).isActive === "boolean"
+      ? Boolean((data as { isActive: boolean }).isActive)
+      : current.isActive;
   const hasContextLength = Object.prototype.hasOwnProperty.call(data, "contextLength");
   const hasMaxInputTokens = Object.prototype.hasOwnProperty.call(data, "maxInputTokens");
   const hasMaxOutputTokens = Object.prototype.hasOwnProperty.call(data, "maxOutputTokens");
@@ -741,7 +745,8 @@ export async function updateAgent(id: string, input: unknown) {
           base_url = $9,
           api_key_encrypted = $10,
           api_key_masked = $11,
-          updated_at = $12
+          is_active = $12,
+          updated_at = $13
      where id = $1 and user_id = $2
      returning *`,
     [
@@ -756,6 +761,7 @@ export async function updateAgent(id: string, input: unknown) {
       data.baseUrl ?? current.baseUrl,
       data.apiKey ? encryptSecret(data.apiKey) : current.apiKeyEncrypted,
       data.apiKey ? maskSecret(data.apiKey) : current.apiKeyMasked,
+      nextIsActive,
       new Date().toISOString()
     ]
   );

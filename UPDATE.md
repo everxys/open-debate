@@ -82,3 +82,9 @@
 - 当前真实神级小说策略的 Phase 2 现在会在进入子任务推进阶段后自动读取 `debate/ideas/` 下的工作台私有素材，并在阶段注入提示中明确要求先消化 `raw-idea-bank / selected-s-tier / selected-a-tier / event-mappings` 等文件，再据此做筛选、重组和方案推进，避免“Phase 2 有流程提示但没有 ideas 输入”的问题。
 - 当前真实神级小说策略的 `deliverables.requiredFiles[*].qualityChecks` 已全部移除，避免文件质量门槛过死；现在只保留 `minChars / minMarkdownHeadings / requiredSnippets` 这类更宽的约束。
 - 当前真实神级小说策略的 `deliverables.requiredFiles[*].requiredSnippets` 也已全部移除，进一步放宽交付文件的硬性片段要求，改为主要依赖 AI 自主思考与更宽的长度/结构约束。
+- 修复从工作台创建辩论时私有文件路径被错误去掉 `debate/` 前缀的问题；现在工作台中的 `debate/ideas/*` 会按原路径复制进辩论。同时已补正该工作台最近两场已创建辩论里的错误 `ideas/*` 路径为 `debate/ideas/*`。
+- AI 配置页新增启用/禁用按钮；工作台中的“均匀分配 AI”和“总结器随机 AI”现在只会使用启用中的 AI。手动下拉仍会保留显示已禁用项，但会标注“已禁用”，避免自动分配继续选到这些配置。
+- 修复辩论页左侧文件管理区域的高度链路：现在左侧侧栏与文件树都会严格按外层面板剩余高度伸展，文件树滚动区域不再只剩很小一段，展开大量文件时可视高度会更接近外边框的实际可用空间。
+- 继续重构辩论页文件管理布局，移除左侧面板内部多余的嵌套 `panel`，改成“工具栏 + 文件树”两行结构，让文件树直接吃满大面板剩余高度，减少双层 padding/gap 吃掉可视空间的问题。
+- 优化 `context/AGENTS.md` 的共享目录生成逻辑：现在 `debate/ideas/*` 会优先于 `debate/answers/*` 出现在目录里，并补充了 raw idea bank、S/A 级候选、事件映射、新增点子等文件的专用用途摘要，避免 idea 文件被大量发言归档挤掉看不见。
+- 删除 `context/AGENTS.md` 的整套自动维护逻辑：运行时不再生成 seat 目录索引，也移除了相关常量、刷新调用和文档引用；同时清理了数据库里现存的 `context/AGENTS.md` 历史文件。

@@ -38,9 +38,6 @@ Rules:
 系统可能会在 system prompt 中注入以下内容（取决于配置与数据是否存在）：
 
 - 参与者文件（来自 AI 配置文件，或辩论级覆盖文件）
-- 参与者目录索引：`context/AGENTS.md`
-  - 由系统自动维护
-  - 会概览当前席位可见的私有文件，以及共享目录/文件的大致用途
 - 参与者长时记忆摘要：`memory/summary.md`
 - 独立总结器生成的逐回摘要：`debate/turn_summaries/turn-<n>.md`
 - 独立总结器生成的逐轮摘要：`debate/round_summaries/round-<n>.md`

@@ -20,7 +20,6 @@ export const CONTEXT_USAGE_LOG_PATH = "context/usage_log.jsonl";
 export const CONTEXT_USAGE_TOTALS_PATH = "context/usage_totals.json";
 export const CONTEXT_USAGE_BASELINE_PATH = "context/usage_baseline.json";
 export const CONTEXT_GENERATION_DIAGNOSTICS_PATH = "context/generation_diagnostics.jsonl";
-export const AGENT_DIRECTORY_PATH = "context/AGENTS.md";
 export const QUESTION_LATEST_DIFF_PATH = "question/latest_diff.md";
 export const MEMORY_LOG_COMPACT_THRESHOLD_CHARS = 60_000;
 export const MEMORY_LOG_KEEP_LAST_LINES = 120;

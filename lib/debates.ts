@@ -603,7 +603,7 @@ async function copyWorkspaceFilesToDebate(input: {
 }) {
   for (const file of input.files) {
     const normalizedPath = String(file.path ?? "").replace(/\\/g, "/").replace(/^\/+/, "").trim();
-    const debatePath = normalizedPath.replace(/^debate\//i, "");
+    const debatePath = normalizedPath;
     if (!debatePath) continue;
     await query(
       `

@@ -12,6 +12,7 @@ type Agent = {
   name: string;
   provider: string;
   model: string;
+  isActive?: boolean;
 };
 
 type WorkspaceDetail = {
@@ -109,6 +110,7 @@ export default function WorkspaceDetailPage() {
   }, [params.id, showToast]);
 
   const enabledBindings = bindings.filter((binding) => binding.agentId && binding.sourceStrategyRoleId);
+  const activeAgents = agents.filter((agent) => agent.isActive !== false);
   const isDirty = useMemo(() => {
     if (!detail) return false;
     return JSON.stringify({
@@ -328,11 +330,11 @@ export default function WorkspaceDetailPage() {
               className="btn"
               type="button"
               onClick={() => {
-                if (agents.length === 0) {
+                if (activeAgents.length === 0) {
                   showToast("error", "还没有可用的 AI 配置");
                   return;
                 }
-                const next = assignAgentsEvenly(bindings, agents.map((agent) => agent.id));
+                const next = assignAgentsEvenly(bindings, activeAgents.map((agent) => agent.id));
                 setBindings(next);
                 showToast("success", "已均匀分配 AI");
               }}
@@ -343,11 +345,11 @@ export default function WorkspaceDetailPage() {
               className="btn"
               type="button"
               onClick={() => {
-                if (agents.length === 0) {
+                if (activeAgents.length === 0) {
                   showToast("error", "还没有可用的 AI 配置");
                   return;
                 }
-                setSummaryAgentId(pickRandomAgentId(agents.map((agent) => agent.id)));
+                setSummaryAgentId(pickRandomAgentId(activeAgents.map((agent) => agent.id)));
               }}
             >
               总结器随机 AI
@@ -385,6 +387,7 @@ export default function WorkspaceDetailPage() {
               {agents.map((agent) => (
                 <option key={agent.id} value={agent.id}>
                   {agent.name} · {agent.provider} · {agent.model}
+                  {agent.isActive === false ? " · 已禁用" : ""}
                 </option>
               ))}
             </select>
@@ -397,6 +400,7 @@ export default function WorkspaceDetailPage() {
             {agents.map((agent) => (
               <option key={agent.id} value={agent.id}>
                 {agent.name} · {agent.provider} · {agent.model}
+                {agent.isActive === false ? " · 已禁用" : ""}
               </option>
             ))}
           </select>

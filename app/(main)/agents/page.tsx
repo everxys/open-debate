@@ -53,6 +53,7 @@ export default function AgentsPage() {
   const [isTestingDraft, setIsTestingDraft] = useState(false);
   const [testingAgentId, setTestingAgentId] = useState<string | null>(null);
   const [duplicatingAgentId, setDuplicatingAgentId] = useState<string | null>(null);
+  const [togglingAgentId, setTogglingAgentId] = useState<string | null>(null);
   const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
   const [ioOpen, setIoOpen] = useState(false);
   const [ioPassphrase, setIoPassphrase] = useState("");
@@ -433,6 +434,36 @@ export default function AgentsPage() {
     showToast("success", "已复制");
     await loadAgents();
     setDuplicatingAgentId(null);
+  }
+
+  async function toggleAgentActive(agent: Agent) {
+    if (togglingAgentId === agent.id) return;
+    const nextActive = !agent.isActive;
+    const ok = window.confirm(`确认${nextActive ? "启用" : "禁用"}该 AI 配置？`);
+    if (!ok) return;
+    setTogglingAgentId(agent.id);
+    let response: Response;
+    try {
+      response = await fetch(`/api/agents/${agent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isActive: nextActive })
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showToast("error", `Failed to fetch: ${message}`);
+      setTogglingAgentId(null);
+      return;
+    }
+    const payload = await readPayload(response);
+    if (!response.ok) {
+      showToast("error", payload.error?.message ?? `${nextActive ? "启用" : "禁用"}失败`);
+      setTogglingAgentId(null);
+      return;
+    }
+    showToast("success", nextActive ? "已启用" : "已禁用");
+    await loadAgents();
+    setTogglingAgentId(null);
   }
 
   function toggleSelected(id: string) {
@@ -1000,7 +1031,10 @@ export default function AgentsPage() {
                   />
                   <strong>{agent.name}</strong>
                 </label>
-                <span className="muted">{agent.provider}</span>
+                <span className="muted">
+                  {agent.provider}
+                  {agent.isActive ? "" : " · 已禁用"}
+                </span>
               </div>
               <div className="muted">{agent.model}</div>
               {agent.contextLength ? <div className="muted">Context: {agent.contextLength.toLocaleString()}</div> : null}
@@ -1030,6 +1064,9 @@ export default function AgentsPage() {
                   onClick={() => void duplicateAgent(agent.id)}
                 >
                   {duplicatingAgentId === agent.id ? "复制中..." : "复制"}
+                </button>
+                <button className="btn" disabled={togglingAgentId === agent.id} onClick={() => void toggleAgentActive(agent)}>
+                  {togglingAgentId === agent.id ? "处理中..." : agent.isActive ? "禁用" : "启用"}
                 </button>
                 <Link className="btn" href={`/agents/${agent.id}/files`}>
                   文件

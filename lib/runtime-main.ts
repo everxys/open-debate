@@ -14,7 +14,6 @@ import {
 import { AppError } from "@/lib/http";
 import { indexDebateContextChunk, retrieveRelevantHistory, splitTextIntoRetrievalChunks } from "@/lib/retrieval";
 import {
-  AGENT_DIRECTORY_PATH,
   ANSWERS_DIR,
   CONTEXT_GENERATION_DIAGNOSTICS_PATH,
   CONTEXT_SEGMENT_PATH,
@@ -1575,10 +1574,6 @@ function normalizeSeatFilePath(path: string) {
   return path.replace(/\\/g, "/").replace(/^\/+/, "").trim();
 }
 
-function isAgentDirectoryPath(path: string) {
-  return normalizeSeatFilePath(path).toLowerCase() === AGENT_DIRECTORY_PATH.toLowerCase();
-}
-
 async function listRawDebateSeatFiles(userId: string, debateAgentId: string, prefix = "") {
   try {
     const prefixLike = `${prefix}%`;
@@ -1641,145 +1636,6 @@ async function listMergedSeatFiles(userId: string, debateAgentId: string, agentI
     merged.set(normalizeSeatFilePath(file.path), file);
   }
   return [...merged.values()].sort((left, right) => left.path.localeCompare(right.path));
-}
-
-function extractDirectoryFileSummary(path: string, content: string) {
-  const normalizedPath = normalizeSeatFilePath(path).toLowerCase();
-  if (normalizedPath === MEMORY_SUMMARY_PATH) return "本席位长期记忆摘要，由系统定期压缩维护。";
-  if (normalizedPath === MEMORY_LOG_PATH) return "本席位历史记忆日志，按回合追加。";
-  if (normalizedPath === CONTEXT_SEGMENT_PATH) return "本席位分段检查点，用于长辩论续跑。";
-  if (normalizedPath === CONTEXT_WINDOW_PATH) return "上下文窗口配置，用于限制回看历史范围。";
-  if (normalizedPath === AGENT_DIRECTORY_PATH.toLowerCase()) return "本席位目录索引，说明文件路径、目录和用途。";
-  if (normalizedPath.startsWith("debate/turn_summaries/")) return "逐回摘要文件，由独立总结器在每回结束后按 round/turn 分层生成。";
-  if (normalizedPath.startsWith("debate/round_summaries/")) return "逐轮摘要文件，由独立总结器在轮末基于回摘要生成。";
-  if (normalizedPath.startsWith("debate/answers/")) return "原始发言归档，按轮和回合拆分保存完整发言内容。";
-  if (normalizedPath === SHARED_FACTS_PATH.toLowerCase()) return "结构化事实板，聚合当前已确认共识、候选方案、风险和缺口。";
-  if (normalizedPath.startsWith("prompts/")) return "席位附加提示词或行为规则。";
-  if (normalizedPath.startsWith("notes/")) return "席位工作笔记或补充说明。";
-
-  const trimmed = content.replace(/\r\n/g, "\n").trim();
-  if (!trimmed) return "空文件或待补充。";
-  const firstHeading = trimmed
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => /^#{1,6}\s+\S/.test(line));
-  if (firstHeading) {
-    return firstHeading.replace(/^#{1,6}\s+/, "").trim().slice(0, 80);
-  }
-  const firstLine = trimmed
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.length > 0 && !/^```/.test(line));
-  if (!firstLine) return "文件已存在。";
-  return firstLine.slice(0, 100);
-}
-
-async function listSharedDebateFilesForDirectory(userId: string, debateId: string) {
-  try {
-    const result = await query<{ path: string; content: string }>(
-      `
-        select f.path, f.content
-          from debate_files f
-          join debates d on d.id = f.debate_id
-         where f.debate_id = $1 and d.user_id = $2
-         order by f.path asc
-      `,
-      [debateId, userId]
-    );
-    return result.rows.map((row) => ({
-      path: normalizeSeatFilePath(String(row.path ?? "")),
-      content: String(row.content ?? "")
-    }));
-  } catch (error) {
-    if (isMissingTableError(error, "debate_files")) return [] as Array<{ path: string; content: string }>;
-    throw error;
-  }
-}
-
-function buildSharedFolderDirectoryLines(rows: Array<{ path: string; content: string }>) {
-  if (rows.length === 0) {
-    return ["## Shared Workspace", "- 当前还没有共享文件。"];
-  }
-
-  const folderMap = new Map<string, Array<{ path: string; content: string }>>();
-  for (const row of rows) {
-    const normalizedPath = normalizeSeatFilePath(row.path);
-    const [folder] = normalizedPath.split("/", 1);
-    const bucket = folderMap.get(folder) ?? [];
-    bucket.push({ ...row, path: normalizedPath });
-    folderMap.set(folder, bucket);
-  }
-
-  const describeFolder = (folder: string) => {
-    if (folder === "debate") return "共享工作文件，例如点子池、筛选结果、事件映射和中间讨论稿。";
-    if (folder === "final") return "最终交付文件，完成判定通常会看这里。";
-    if (folder === "outputs") return "其他共享输出文件。";
-    if (folder === "facts") return "结构化事实板与共享工作板。";
-    if (folder === "votes") return "官方投票状态、结论和历史结果。";
-    if (folder === "question") return "题目差异和问题变更记录。";
-    if (folder === "context") return "运行时上下文、窗口和检查点。";
-    return "共享文件夹。";
-  };
-
-  const noisyPrefixes = ["votes/round-", "context/usage", "context/generation_diagnostics"];
-  const lines = ["## Shared Workspace"];
-  for (const folder of [...folderMap.keys()].sort()) {
-    const rowsInFolder = folderMap.get(folder) ?? [];
-    lines.push(`- \`${folder}/\`：${describeFolder(folder)}（${rowsInFolder.length} 个文件）`);
-    const visibleRows = rowsInFolder
-      .filter((row) => !noisyPrefixes.some((prefix) => row.path.startsWith(prefix)))
-      .slice(0, 8);
-    for (const row of visibleRows) {
-      lines.push(`  - \`${row.path}\`：${extractDirectoryFileSummary(row.path, row.content)}`);
-    }
-    if (rowsInFolder.length > visibleRows.length) {
-      lines.push(`  - 其余 ${rowsInFolder.length - visibleRows.length} 个文件未展开。`);
-    }
-  }
-  return lines;
-}
-
-function buildSeatDirectoryContent(input: {
-  seatFiles: SeatFileEntry[];
-  sharedFiles: Array<{ path: string; content: string }>;
-}) {
-  const visibleSeatFiles = input.seatFiles.filter((file) => !isAgentDirectoryPath(file.path));
-  const lines = [
-    "# AGENTS Directory",
-    "",
-    "这是一份自动维护的目录文件。它的目标是让当前席位每次重新进入对话时，都能快速知道有哪些文件、文件大致存什么，以及哪些共享目录值得优先读取。",
-    "",
-    "## Seat Files",
-    ...(
-      visibleSeatFiles.length > 0
-        ? visibleSeatFiles.map((file) => {
-            const sourceLabel = file.source === "debate" ? "seat override" : "base agent";
-            return `- \`${file.path}\` [${sourceLabel}]：${extractDirectoryFileSummary(file.path, file.content)}`;
-          })
-        : ["- 当前席位还没有私有文件。"]
-    ),
-    "",
-    ...buildSharedFolderDirectoryLines(input.sharedFiles),
-    "",
-    "## How To Use",
-    "- 当你不确定某个文件里放了什么，先读本目录，再决定读哪个文件。",
-    "- seat override 表示辩论级文件，会覆盖同路径的 base agent 文件。",
-    "- `memory/*`、`context/*`、`votes/*` 多数是运行时文件；只有在当前任务需要时才深入读取。"
-  ];
-  return lines.join("\n");
-}
-
-export async function refreshDebateAgentDirectoryFile(input: {
-  userId: string;
-  debateId: string;
-  debateAgentId: string;
-  agentId: string;
-  now: string;
-}) {
-  const seatFiles = await listMergedSeatFiles(input.userId, input.debateAgentId, input.agentId);
-  const sharedFiles = await listSharedDebateFilesForDirectory(input.userId, input.debateId);
-  const content = buildSeatDirectoryContent({ seatFiles, sharedFiles });
-  await upsertDebateAgentFile(input.debateAgentId, AGENT_DIRECTORY_PATH, content, input.now);
 }
 
 export function isMissingTableError(error: unknown, table: string) {

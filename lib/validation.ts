@@ -15,7 +15,9 @@ export const createAgentSchema = z.object({
 
 export const testAgentConfigSchema = createAgentSchema.pick({ provider: true, model: true, baseUrl: true, apiKey: true });
 
-export const updateAgentSchema = createAgentSchema.partial();
+export const updateAgentSchema = createAgentSchema.partial().extend({
+  isActive: z.boolean().optional()
+});
 
 // === Retrieval config schemas ===
 

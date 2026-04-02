@@ -70,7 +70,6 @@ import {
   loadDebateParticipantsInline,
   loadDebateSeatInline,
   loadRecentTurnRows,
-  refreshDebateAgentDirectoryFile,
   loadSharedFactsBoardInline,
   loadWorkflowIdeaBankInline,
   maybeGenerateVoteAnnouncementWithSeat1,
@@ -280,13 +279,6 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
   const turnInRound = ((input.messageNumber - 1) % Math.max(1, input.participantCount)) + 1;
   const roundStart = (input.roundNumber - 1) * Math.max(1, input.participantCount) + 1;
   const roundEnd = input.roundNumber * Math.max(1, input.participantCount);
-  await refreshDebateAgentDirectoryFile({
-    userId: input.userId,
-    debateId: input.debate.id,
-    debateAgentId: input.debateAgentId,
-    agentId: input.agent.id,
-    now: implicitReadAudit.now
-  });
   const enableVotingTools = Boolean(openVoteInline) || isOfficialVotingAllowed(workflow, input.roundNumber);
   const votingRuleInline = workflow?.enabled
     ? "- Official voting: enabled by workflow.json for consolidation/custom decisions when needed."

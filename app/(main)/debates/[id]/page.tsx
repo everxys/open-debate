@@ -1368,7 +1368,7 @@ function DebateFilesPanel(props: {
     if (!element) return;
 
     const syncHeight = () => {
-      const nextHeight = Math.max(240, Math.floor(element.clientHeight - 12));
+      const nextHeight = Math.max(240, Math.floor(element.clientHeight));
       setTreeHeight((current) => (current === nextHeight ? current : nextHeight));
     };
 
@@ -1379,23 +1379,29 @@ function DebateFilesPanel(props: {
   }, []);
 
   return (
-    <div className="panel stack" style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
-      <DebateFilesToolbar
-        selectedCount={props.selectedCount}
-        downloading={props.downloading}
-        loading={props.loading}
-        onDownload={props.onDownload}
-        onRefresh={props.onRefresh}
-      />
+    <div style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateRows: "auto 1fr", gap: 12, overflow: "hidden" }}>
+      <div className="softBox">
+        <DebateFilesToolbar
+          selectedCount={props.selectedCount}
+          downloading={props.downloading}
+          loading={props.loading}
+          onDownload={props.onDownload}
+          onRefresh={props.onRefresh}
+        />
+      </div>
       {props.loading ? (
-        <div className="muted">读取中...</div>
+        <div className="softBox muted" style={{ minHeight: 0 }}>
+          读取中...
+        </div>
       ) : !props.hasFiles ? (
-        <div className="muted">暂无文件（通常需要至少一轮发言后才会逐步生成）。</div>
+        <div className="softBox muted" style={{ minHeight: 0 }}>
+          暂无文件（通常需要至少一轮发言后才会逐步生成）。
+        </div>
       ) : (
         <div
           ref={treeRootRef}
-          className="treeRoot"
-          style={{ flex: 1, minHeight: 0, maxHeight: "none", overflow: "hidden", padding: 0 }}
+          className="softBox treeRoot"
+          style={{ minHeight: 0, maxHeight: "none", overflow: "hidden", padding: 0 }}
           onContextMenu={props.onRootContextMenu}
         >
           <Tree<FsNode> data={props.tree} width="100%" height={treeHeight} indent={18} rowHeight={34} openByDefault={false}>
@@ -5106,7 +5112,7 @@ export default function DebateDetailPage() {
         </div>
       </nav>
 
-      <section className="panel stack debateSidebarPanel debateViewportPanel" style={{ overflow: "hidden" }}>
+      <section className="panel stack debateSidebarPanel debateViewportPanel" style={{ overflow: "hidden", minHeight: 0 }}>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <strong style={{ fontSize: 14 }}>{leftTabTitle[leftTab]}</strong>
           <Link className="btn" href="/debates">
@@ -5116,109 +5122,111 @@ export default function DebateDetailPage() {
 
         {!debate.isOwner ? <div className="muted">公开辩论（只读）</div> : null}
 
-        {leftTab === "status" ? (
-          <Fragment>
-            <div>
-              <span className={`badge badge-${debate.status}`}>{debate.status}</span>
-            </div>
-            <StatusQuestionPanel
-              debate={debate}
-              questionVersion={questionVersion}
-              questionDraft={questionDraft}
-              questionDirty={questionDirty}
-              isSavingQuestion={isSavingQuestion}
-              onOpenZoom={() => setQuestionZoomOpen(true)}
-              onOpenHistory={() => void openQuestionHistory()}
-              onSave={() => void saveQuestion()}
-              onChangeDraft={(next) => {
-                setQuestionDraft(next);
-                setQuestionDirty(true);
-              }}
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          {leftTab === "status" ? (
+            <Fragment>
+              <div>
+                <span className={`badge badge-${debate.status}`}>{debate.status}</span>
+              </div>
+              <StatusQuestionPanel
+                debate={debate}
+                questionVersion={questionVersion}
+                questionDraft={questionDraft}
+                questionDirty={questionDirty}
+                isSavingQuestion={isSavingQuestion}
+                onOpenZoom={() => setQuestionZoomOpen(true)}
+                onOpenHistory={() => void openQuestionHistory()}
+                onSave={() => void saveQuestion()}
+                onChangeDraft={(next) => {
+                  setQuestionDraft(next);
+                  setQuestionDirty(true);
+                }}
+              />
+              <StatusSummaryPanel
+                debate={debate}
+                agentCount={agentCount}
+                completedRounds={completedRounds}
+                liveAgentName={liveAgentName}
+                liveDisplayRound={liveDisplayRound}
+                liveDisplayMessage={liveDisplayMessage}
+                liveStatus={liveStatus}
+                showWorkflowPhaseUi={showWorkflowPhaseUi}
+                summaryJobs={liveSummaryJobs}
+                summaryActionBusy={summaryActionBusy}
+                onRetryFailedSummaryJobs={handleRetryFailedSummaryJobs}
+                onRebuildFactsBoard={handleRebuildFactsBoard}
+              />
+            </Fragment>
+          ) : leftTab === "participants" ? (
+            <ParticipantsPanel
+              canAddAgent={canAddAgent}
+              agentCount={debate.agents.length}
+              availableAgents={availableAgents}
+              newAgentId={newAgentId}
+              isAddingAgent={isAddingAgent}
+              isOwner={debate.isOwner}
+              debateStatus={debateStatus}
+              agents={debate.agents}
+              resettingUsageByDebateAgentId={resettingUsageByDebateAgentId}
+              contextTotalsByDebateAgentId={contextTotalsByDebateAgentId}
+              onChangeNewAgentId={setNewAgentId}
+              onAddAgent={() => void addAgent()}
+              onResetUsageSession={(debateAgentId) => void resetAgentUsageSession(debateAgentId)}
             />
-            <StatusSummaryPanel
-              debate={debate}
-              agentCount={agentCount}
-              completedRounds={completedRounds}
-              liveAgentName={liveAgentName}
-              liveDisplayRound={liveDisplayRound}
-              liveDisplayMessage={liveDisplayMessage}
-              liveStatus={liveStatus}
-              showWorkflowPhaseUi={showWorkflowPhaseUi}
-              summaryJobs={liveSummaryJobs}
-              summaryActionBusy={summaryActionBusy}
-              onRetryFailedSummaryJobs={handleRetryFailedSummaryJobs}
-              onRebuildFactsBoard={handleRebuildFactsBoard}
+          ) : leftTab === "workflow" ? (
+            <WorkflowRulesPanel
+              markdown={workflowRulesState.markdown}
+              loading={workflowRulesState.loading}
+              onRefresh={() => void loadWorkflowRules()}
             />
-          </Fragment>
-        ) : leftTab === "participants" ? (
-          <ParticipantsPanel
-            canAddAgent={canAddAgent}
-            agentCount={debate.agents.length}
-            availableAgents={availableAgents}
-            newAgentId={newAgentId}
-            isAddingAgent={isAddingAgent}
-            isOwner={debate.isOwner}
-            debateStatus={debateStatus}
-            agents={debate.agents}
-            resettingUsageByDebateAgentId={resettingUsageByDebateAgentId}
-            contextTotalsByDebateAgentId={contextTotalsByDebateAgentId}
-            onChangeNewAgentId={setNewAgentId}
-            onAddAgent={() => void addAgent()}
-            onResetUsageSession={(debateAgentId) => void resetAgentUsageSession(debateAgentId)}
-          />
-        ) : leftTab === "workflow" ? (
-          <WorkflowRulesPanel
-            markdown={workflowRulesState.markdown}
-            loading={workflowRulesState.loading}
-            onRefresh={() => void loadWorkflowRules()}
-          />
-        ) : leftTab === "file_activity" ? (
-          debate.isOwner ? (
-            <FileActivityPanel
-              action={fileActivityAction}
-              counts={fileActivityCounts}
-              loading={fileActivityLoading}
-              error={fileActivityError}
-              items={fileActivityItems}
-              hasMore={fileActivityHasMore}
-              loadingMore={fileActivityLoadingMore}
-              onChangeAction={(action) => {
-                setFileActivityAction(action);
-                setSelectedFileActivityId("");
-                setFileActivityDetail(null);
+          ) : leftTab === "file_activity" ? (
+            debate.isOwner ? (
+              <FileActivityPanel
+                action={fileActivityAction}
+                counts={fileActivityCounts}
+                loading={fileActivityLoading}
+                error={fileActivityError}
+                items={fileActivityItems}
+                hasMore={fileActivityHasMore}
+                loadingMore={fileActivityLoadingMore}
+                onChangeAction={(action) => {
+                  setFileActivityAction(action);
+                  setSelectedFileActivityId("");
+                  setFileActivityDetail(null);
+                }}
+                onRefresh={() => void loadFileActivity("reset")}
+                onLoadMore={() => void loadFileActivity("more")}
+                onSelectEntry={(entryId) => setSelectedFileActivityId(entryId)}
+              />
+            ) : (
+              <div className="muted">公开辩论不支持查看文件记录。</div>
+            )
+          ) : debate.isOwner ? (
+            <DebateFilesPanel
+              selectedCount={selectedAllFileVirtualPaths.length}
+              downloading={allFilesDownloading}
+              loading={allFilesLoading}
+              hasFiles={Object.keys(allFilesMetaByVirtualPath).length > 0}
+              tree={allFilesTree}
+              renderNode={renderAllFilesNode}
+              contextMenu={allFilesContextMenu}
+              onDownload={() => void downloadSelectedAllFiles()}
+              onRefresh={() => void loadAllFilesIndex(true)}
+              onRootContextMenu={(event) => {
+                event.preventDefault();
+                setAllFilesContextMenu({
+                  x: event.clientX,
+                  y: event.clientY,
+                  target: { type: "root" }
+                });
               }}
-              onRefresh={() => void loadFileActivity("reset")}
-              onLoadMore={() => void loadFileActivity("more")}
-              onSelectEntry={(entryId) => setSelectedFileActivityId(entryId)}
+              onCloseContextMenu={() => setAllFilesContextMenu(null)}
+              onOpenFileInfo={(virtualPath) => void openAllFileInfo(virtualPath)}
             />
           ) : (
-            <div className="muted">公开辩论不支持查看文件记录。</div>
-          )
-        ) : debate.isOwner ? (
-          <DebateFilesPanel
-            selectedCount={selectedAllFileVirtualPaths.length}
-            downloading={allFilesDownloading}
-            loading={allFilesLoading}
-            hasFiles={Object.keys(allFilesMetaByVirtualPath).length > 0}
-            tree={allFilesTree}
-            renderNode={renderAllFilesNode}
-            contextMenu={allFilesContextMenu}
-            onDownload={() => void downloadSelectedAllFiles()}
-            onRefresh={() => void loadAllFilesIndex(true)}
-            onRootContextMenu={(event) => {
-              event.preventDefault();
-              setAllFilesContextMenu({
-                x: event.clientX,
-                y: event.clientY,
-                target: { type: "root" }
-              });
-            }}
-            onCloseContextMenu={() => setAllFilesContextMenu(null)}
-            onOpenFileInfo={(virtualPath) => void openAllFileInfo(virtualPath)}
-          />
-        ) : (
-          <div className="muted">公开辩论不支持读取辩论文件。</div>
-        )}
+            <div className="muted">公开辩论不支持读取辩论文件。</div>
+          )}
+        </div>
       </section>
 
       <div className="debateViewerShell">
