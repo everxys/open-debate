@@ -47,6 +47,9 @@
 - 2026-04-02: 继续清理固定 Host 重构后的残留：删除 `workflow-phase.ts` 中已失效的 election helper；将官方投票结论文件从 `votes/directive.*` 更名为更中性的 `votes/decision.*`；并把策略文档 `30_election_and_veto.md` 重命名为 `30_host_and_quality_control.md`，同步更新知识库与教程中的相关说明。
 - 2026-04-02: 调整当前神级小说策略的早期阶段节奏与命名：`Phase 1` 显式设置 `analysis.minRounds = 1`，确保新辩论第 1 轮稳定停在开题阶段；同时把 `Phase 2` 标题改为“子任务推进与方案成形”，并在阶段说明中补充“Phase 1 的成功标准是明确核心命题、底层约束、失败风险和下一阶段先推进的块”，避免一开局就呈现“内容锻造”的过重心智。 
 - 2026-04-02: 删掉 workflow 中所有当前不属于硬约束的策略语义字段及其消费链，`workflow` 现在只保留真正被代码执行的 phase / completion / consensus / deliverables / contextAccess / summarizer / outputBudget 等硬规则；移除了 `rolesMeta`、`promptPolicies.openingPrompt`、`round1Fairness`、`responseFormat`、`voting.announcement`、`voting.governance.fallbackMode`、`deliverables` 中的角色分工与描述字段、以及 `contextAccess.label`。相关语义已回收到固定角色的 system prompt、`protocol/00_ground_rules.md`、`protocol/20_output_templates.md` 和 phase `injectedPrompt` 中，并同步写回当前数据库策略 `民主集中制共识算法（先赛马，再相马）`。
+<<<<<<< HEAD
 - 辩论详情页的参与者列表现在会显示每个 AI 在当前策略里的基础角色名，方便区分通用议员、反驳者、事件诡计工程师等固定席位。
 - 辩论页每条发言的头部也会显示该 AI 的基础角色名，和参与者列表保持一致。
 - 使用策略创建辩论时，现在可以给每个席位单独填写显示名称；留空时会自动回退为 `AI-1 / AI-2 / ...`，不再生成随机中文组合名。
+=======
+>>>>>>> 1141c0340b47078ad95d3358923c112a1b004cab
