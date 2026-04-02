@@ -97,8 +97,27 @@ type FileWithWebkitRelativePath = File & {
   webkitRelativePath?: string;
 };
 
+type ImportedStrategyManifestPreview = {
+  strategyName: string;
+  roleCount: number;
+  keepRoles: Array<{ id: string; name: string; roleOrder: number }>;
+  deleteRoles: Array<{ id: string; name: string; roleOrder: number }>;
+  newRoles: Array<{ sourceRoleId: string; name: string; roleOrder: number }>;
+};
+
 function createClientId() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+}
+
+function stripImportedRootPrefix(paths: string[]) {
+  if (paths.includes("manifest.json")) return paths;
+  const firstSegments = Array.from(new Set(paths.map((item) => item.split("/")[0]).filter(Boolean)));
+  if (firstSegments.length !== 1) return paths;
+  const root = firstSegments[0];
+  if (!paths.includes(`${root}/manifest.json`)) return paths;
+  return paths
+    .filter((item) => item.startsWith(`${root}/`))
+    .map((item) => item.slice(root.length + 1));
 }
 
 function summarizePrompt(value: string) {
@@ -418,7 +437,82 @@ export default function StrategyDetailPage() {
     event.target.value = "";
     if (!id || files.length <= 0 || isImportingFolder) return;
 
-    const ok = window.confirm("确认用所选文件夹覆盖当前策略？这会替换当前策略的角色、System Prompt、workflow 和所有角色文件。");
+    const normalizedFiles = files
+      .map((file) => ({
+        file,
+        relativePath: String(file.webkitRelativePath?.trim() || file.name).replace(/\\/g, "/").replace(/^\/+/, "")
+      }))
+      .filter((item) => item.relativePath.length > 0);
+    const strippedPaths = stripImportedRootPrefix(normalizedFiles.map((item) => item.relativePath));
+    const manifestIndex = strippedPaths.findIndex((item) => item === "manifest.json");
+    if (manifestIndex < 0) {
+      showToast("error", "导入失败：所选文件夹根目录缺少 manifest.json");
+      return;
+    }
+
+    let manifestRaw = "";
+    try {
+      manifestRaw = await normalizedFiles[manifestIndex]!.file.text();
+    } catch {
+      showToast("error", "导入失败：读取 manifest.json 失败");
+      return;
+    }
+
+    let preview: ImportedStrategyManifestPreview;
+    try {
+      const parsed = JSON.parse(manifestRaw) as {
+        strategy?: { name?: unknown };
+        roles?: Array<{ name?: unknown; roleOrder?: unknown; sourceRoleId?: unknown }>;
+      };
+      const manifestRoles = Array.isArray(parsed.roles)
+        ? parsed.roles
+            .map((role) => ({
+              sourceRoleId: typeof role.sourceRoleId === "string" ? role.sourceRoleId : "",
+              name: typeof role.name === "string" ? role.name : "",
+              roleOrder: typeof role.roleOrder === "number" ? Math.floor(role.roleOrder) : 0
+            }))
+            .filter((role) => role.name && role.roleOrder > 0)
+        : [];
+      if (manifestRoles.length < 2) {
+        showToast("error", "导入失败：manifest.json 至少需要包含 2 个角色");
+        return;
+      }
+      const currentRoles = detail?.roles ?? [];
+      const currentById = new Map(currentRoles.map((role) => [role.id, role] as const));
+      const nextRoleIds = new Set(manifestRoles.map((role) => role.sourceRoleId).filter(Boolean));
+      preview = {
+        strategyName: typeof parsed.strategy?.name === "string" ? parsed.strategy.name : detail?.name ?? "未命名策略",
+        roleCount: manifestRoles.length,
+        keepRoles: currentRoles
+          .filter((role) => nextRoleIds.has(role.id))
+          .map((role) => ({ id: role.id, name: role.name, roleOrder: role.roleOrder })),
+        deleteRoles: currentRoles
+          .filter((role) => !nextRoleIds.has(role.id))
+          .map((role) => ({ id: role.id, name: role.name, roleOrder: role.roleOrder })),
+        newRoles: manifestRoles
+          .filter((role) => !role.sourceRoleId || !currentById.has(role.sourceRoleId))
+          .map((role) => ({ sourceRoleId: role.sourceRoleId, name: role.name, roleOrder: role.roleOrder }))
+      };
+    } catch {
+      showToast("error", "导入失败：manifest.json 格式无效");
+      return;
+    }
+
+    const deleteLines =
+      preview.deleteRoles.length > 0
+        ? `\n将删除的角色：\n${preview.deleteRoles.map((role) => `- #${role.roleOrder} ${role.name}`).join("\n")}`
+        : "\n将删除的角色：无";
+    const newLines =
+      preview.newRoles.length > 0
+        ? `\n将新增的角色：\n${preview.newRoles.map((role) => `- #${role.roleOrder} ${role.name}`).join("\n")}`
+        : "\n将新增的角色：无";
+    const keepLines =
+      preview.keepRoles.length > 0
+        ? `\n将保留并覆盖的角色：\n${preview.keepRoles.map((role) => `- #${role.roleOrder} ${role.name}`).join("\n")}`
+        : "\n将保留并覆盖的角色：无";
+    const ok = window.confirm(
+      `即将用文件夹覆盖当前策略：${preview.strategyName}\n导入后角色数：${preview.roleCount}${keepLines}${newLines}${deleteLines}\n\n确认继续覆盖？`
+    );
     if (!ok) return;
 
     setIsImportingFolder(true);
