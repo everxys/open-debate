@@ -474,7 +474,13 @@ export function buildAnthropicTools(input: { enableVoting: boolean; allowedOutpu
   return tools;
 }
 
-export async function emitChunks(debateId: string, turnNumber: number, agentName: string, raw: string) {
+export async function emitChunks(
+  debateId: string,
+  turnNumber: number,
+  agentName: string,
+  baseRoleName: string | null,
+  raw: string
+) {
   const text = typeof raw === "string" ? raw : String(raw ?? "");
   const chunkSize = 320;
   for (let index = 0; index < text.length; index += chunkSize) {
@@ -483,6 +489,7 @@ export async function emitChunks(debateId: string, turnNumber: number, agentName
       debateId,
       turnNumber,
       agentName,
+      baseRoleName,
       text: text.slice(index, index + chunkSize),
       at: new Date().toISOString()
     });

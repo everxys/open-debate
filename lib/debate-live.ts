@@ -15,6 +15,7 @@ export type DebateLiveProgress = {
   debateAgentId: string;
   aiAgentId: string;
   agentName: string;
+  baseRoleName: string;
   stage: DebateLiveStage;
   updatedAt: string;
 };
@@ -38,7 +39,7 @@ export type DebateLiveEvent =
   | { type: "turn_start"; progress: DebateLiveProgress }
   | { type: "summary_job"; debateId: string; job: DebateSummaryJob }
   | { type: "status"; debateId: string; message: string; at: string }
-  | { type: "chunk"; debateId: string; turnNumber: number; agentName: string; text: string; at: string }
+  | { type: "chunk"; debateId: string; turnNumber: number; agentName: string; baseRoleName: string | null; text: string; at: string }
   | { type: "turn_end"; debateId: string; turnNumber: number; agentName: string; at: string };
 
 type Store = {

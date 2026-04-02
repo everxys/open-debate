@@ -3336,7 +3336,8 @@ export async function callProvider(
   participantCount: number,
   userId: string,
   debateAgentId: string,
-  eventAgentName: string
+  eventAgentName: string,
+  baseRoleName: string
 ) {
   // NOTE: keep provider orchestration lazily loaded until shared runtime helpers
   // are fully extracted from this file; this avoids a runtime import cycle.
@@ -3349,7 +3350,8 @@ export async function callProvider(
     participantCount,
     userId,
     debateAgentId,
-    eventAgentName
+    eventAgentName,
+    baseRoleName
   );
 }
 
@@ -4515,6 +4517,7 @@ export async function runDebate(id: string, userId: string) {
         [id]
       );
       const participantCount = participantRows.rows.length;
+      const roleAssignments = await loadDebateParticipantRoleTypes(userId, id);
       if (participantCount < 2) {
         throw new AppError("VALIDATION_ERROR", 400, "Debate requires at least 2 agents");
       }
@@ -4623,6 +4626,7 @@ export async function runDebate(id: string, userId: string) {
           : typeof (currentParticipant as any).displayName === "string"
             ? String((currentParticipant as any).displayName)
             : "";
+      const baseRoleNameForEvent = getDebateParticipantRoleType(roleAssignments, String(currentParticipant.id));
       const eventAgentName = `Seat-${seatNumberForEvent}${displayNameForEvent ? ` · ${displayNameForEvent}` : ""}`;
       const currentSpeechRoundIndex = Math.floor(Math.max(0, debate.currentTurn) / Math.max(1, participantCount)) + 1;
       const actualRoundNumber = mapSpeechRoundIndexToActualRound(currentSpeechRoundIndex, closedVoteRoundsBeforeTurn);
@@ -4633,6 +4637,7 @@ export async function runDebate(id: string, userId: string) {
         debateAgentId: String(currentParticipant.id),
         aiAgentId: String(currentParticipant.ai_agent_id),
         agentName: eventAgentName,
+        baseRoleName: baseRoleNameForEvent,
         stage: "calling_model"
       });
       const startedAt = Date.now();
@@ -4663,7 +4668,8 @@ export async function runDebate(id: string, userId: string) {
             participantCount,
             userId,
             String(currentParticipant.id),
-            eventAgentName
+            eventAgentName,
+            baseRoleNameForEvent
           );
           raw = result.raw;
           usage = result.usage;
@@ -4704,6 +4710,7 @@ export async function runDebate(id: string, userId: string) {
         debateAgentId: String(currentParticipant.id),
         aiAgentId: String(currentParticipant.ai_agent_id),
         agentName: eventAgentName,
+        baseRoleName: baseRoleNameForEvent,
         stage: "parsing"
       });
       const parsed = parseResponse(raw);
@@ -4725,6 +4732,7 @@ export async function runDebate(id: string, userId: string) {
         debateAgentId: String(currentParticipant.id),
         aiAgentId: String(currentParticipant.ai_agent_id),
         agentName: eventAgentName,
+        baseRoleName: baseRoleNameForEvent,
         stage: "saving",
         updatedAt: createdAt
       });

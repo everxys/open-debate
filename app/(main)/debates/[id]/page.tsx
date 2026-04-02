@@ -698,6 +698,20 @@ function formatLiveStage(stage: string | null | undefined, paused: boolean) {
   return "生成中...";
 }
 
+function formatLiveAgentLabel(agentName: string | null | undefined, baseRoleName?: string | null) {
+  const normalizedAgentName = typeof agentName === "string" ? agentName.trim() : "";
+  const normalizedBaseRoleName = typeof baseRoleName === "string" ? baseRoleName.trim() : "";
+  if (normalizedBaseRoleName && normalizedAgentName) {
+    const seatPrefixMatch = normalizedAgentName.match(/^(Seat-\d+)(\s*·\s*)(.+)$/);
+    if (seatPrefixMatch) {
+      const [, seatLabel, separator, remainder] = seatPrefixMatch;
+      return `${seatLabel}${separator}${normalizedBaseRoleName}${separator}${remainder}`;
+    }
+    return `${normalizedAgentName} · ${normalizedBaseRoleName}`;
+  }
+  return normalizedAgentName || normalizedBaseRoleName || "";
+}
+
 function isPhaseEntryRound(workflow: NormalizedDebateWorkflow | null, round: number, kind: DebateDirectoryPhaseInfo["kind"]) {
   if (!workflow?.enabled) return false;
   if (kind === "analysis") return round < getWorkflowEarliestDeliberationRound(workflow);
@@ -3960,7 +3974,7 @@ export default function DebateDetailPage() {
       try {
         lastSseEventAtRef.current = Date.now();
         const payload = JSON.parse((event as MessageEvent).data) as {
-          progress?: { roundNumber: number; messageNumber: number; agentName: string; stage?: string };
+          progress?: { roundNumber: number; messageNumber: number; agentName: string; baseRoleName?: string | null; stage?: string };
         };
         if (!payload.progress) return;
         setIsStreaming(debateStatus === "running");
@@ -3969,7 +3983,7 @@ export default function DebateDetailPage() {
           const next = payload.progress?.messageNumber;
           return typeof next === "number" ? next : current;
         });
-        setLiveAgentName(payload.progress.agentName);
+        setLiveAgentName(formatLiveAgentLabel(payload.progress.agentName, payload.progress.baseRoleName));
         setLiveStatus(formatLiveStage(payload.progress.stage, debateStatus === "paused"));
         setLiveText((current) => {
           const nextMessageNumber = payload.progress?.messageNumber;
@@ -4014,6 +4028,7 @@ export default function DebateDetailPage() {
         const payload = JSON.parse((event as MessageEvent).data) as {
           text?: string;
           agentName?: string;
+          baseRoleName?: string | null;
           turnNumber?: number;
         };
         setIsStreaming(debateStatus === "running");
@@ -4023,7 +4038,9 @@ export default function DebateDetailPage() {
             return payload.turnNumber ?? null;
           });
         }
-        if (typeof payload.agentName === "string") setLiveAgentName(payload.agentName);
+        if (typeof payload.agentName === "string") {
+          setLiveAgentName(formatLiveAgentLabel(payload.agentName, payload.baseRoleName));
+        }
         if (typeof payload.text === "string") {
           setLiveStatus("正在生成...");
           setLiveText((current) => current + payload.text);

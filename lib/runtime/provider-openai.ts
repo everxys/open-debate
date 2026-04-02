@@ -42,6 +42,7 @@ export async function openAiChatStream(args: {
   messageNumber: number;
   roundNumber: number;
   agentName: string;
+  baseRoleName?: string | null;
   url: string;
   apiKey: string;
   body: Record<string, unknown>;
@@ -90,6 +91,7 @@ export async function openAiChatStream(args: {
         debateId: args.debateId,
         turnNumber: args.messageNumber,
         agentName: args.agentName,
+        baseRoleName: args.baseRoleName ?? null,
         text,
         at: new Date().toISOString()
       });

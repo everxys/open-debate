@@ -115,6 +115,7 @@ type ProviderCallInput = {
   userId: string;
   debateAgentId: string;
   eventAgentName: string;
+  baseRoleName: string;
 };
 
 type ProviderPromptContext = ProviderCallInput & {
@@ -145,6 +146,7 @@ function createLiveStageUpdater(input: ProviderCallInput) {
       debateAgentId: input.debateAgentId,
       aiAgentId: input.agent.id,
       agentName: input.eventAgentName,
+      baseRoleName: input.baseRoleName,
       stage
     });
     emitDebateLiveEvent(input.debate.id, {
@@ -687,6 +689,7 @@ async function runOpenAiProviderLoop(
         messageNumber: context.messageNumber,
         roundNumber: context.roundNumber,
         agentName: context.eventAgentName,
+        baseRoleName: context.baseRoleName,
         url: context.url,
         apiKey: context.apiKey,
         body: withOptionalMaxTokens(
@@ -791,6 +794,7 @@ async function runOpenAiProviderLoop(
     messageNumber: context.messageNumber,
     roundNumber: context.roundNumber,
     agentName: context.eventAgentName,
+    baseRoleName: context.baseRoleName,
     url: context.url,
     apiKey: context.apiKey,
     body: withOptionalMaxTokens({ model: context.agent.model, messages }, context.currentOutputMaxTokens)
@@ -880,7 +884,7 @@ async function runAnthropicProviderLoop(
     if (toolUses.length === 0) {
       const textBlock = contentBlocks.find((block) => block.type === "text") as { text?: string } | undefined;
       const content = textBlock?.text ?? buildDemoResponse(context.debate, context.agent, context.messageNumber);
-      await emitChunks(context.debate.id, context.messageNumber, context.agent.name, content);
+      await emitChunks(context.debate.id, context.messageNumber, context.eventAgentName, context.baseRoleName, content);
       return {
         raw: content,
         usage: normalizeAnthropicUsage(payload?.usage ?? null),
@@ -937,7 +941,7 @@ async function runAnthropicProviderLoop(
     throw new AppError("AI_API_ERROR", 502, JSON.stringify(fallbackPayload).slice(0, 400));
   }
   const content = fallbackPayload.content?.[0]?.text ?? buildDemoResponse(context.debate, context.agent, context.messageNumber);
-  await emitChunks(context.debate.id, context.messageNumber, context.agent.name, content);
+  await emitChunks(context.debate.id, context.messageNumber, context.eventAgentName, context.baseRoleName, content);
   return {
     raw: content,
     usage: normalizeAnthropicUsage(fallbackPayload?.usage ?? null),
@@ -961,7 +965,8 @@ export async function callProvider(
   participantCount: number,
   userId: string,
   debateAgentId: string,
-  eventAgentName: string
+  eventAgentName: string,
+  baseRoleName: string
 ) {
   const input: ProviderCallInput = {
     debate,
@@ -971,7 +976,8 @@ export async function callProvider(
     participantCount,
     userId,
     debateAgentId,
-    eventAgentName
+    eventAgentName,
+    baseRoleName
   };
   const promptContext = await buildProviderPromptContext(input);
   const overrideSystemPrompt = await loadDebateAgentSystemPrompt(userId, debateAgentId);
