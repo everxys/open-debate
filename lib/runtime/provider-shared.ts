@@ -255,7 +255,7 @@ export function buildFileToolInstructions(input: {
   if (input.enableVoting) {
     lines.push("");
     lines.push("You also have official voting tools:");
-    lines.push("- debate_vote_open: open an official vote (election / finalization / custom).");
+    lines.push("- debate_vote_open: open an official vote (finalization / custom).");
     lines.push("- debate_vote_cast: cast your ballot into the open vote.");
     lines.push("- debate_vote_close: close vote and publish official result/directive.");
   }
@@ -366,11 +366,11 @@ export function buildOpenAiTools(input: { enableVoting: boolean; allowedOutputPa
         type: "function",
         function: {
           name: "debate_vote_open",
-          description: "Open an official voting phase (election / finalization / custom).",
+          description: "Open an official voting phase (finalization / custom).",
           parameters: {
             type: "object",
             properties: {
-              kind: { type: "string", enum: ["election", "finalization", "custom"] },
+              kind: { type: "string", enum: ["finalization", "custom"] },
               title: { type: "string" },
               prompt: { type: "string" },
               options: { type: "array", items: { type: "string" } }
@@ -387,7 +387,6 @@ export function buildOpenAiTools(input: { enableVoting: boolean; allowedOutputPa
           parameters: {
             type: "object",
             properties: {
-              selections: { type: "object", additionalProperties: { type: "string" } },
               choice: { type: "string" },
               reason: { type: "string" }
             }
@@ -476,11 +475,11 @@ export function buildAnthropicTools(input: { enableVoting: boolean; allowedOutpu
     tools.push(
       {
         name: "debate_vote_open",
-        description: "Open an official voting phase (election / finalization / custom).",
+        description: "Open an official voting phase (finalization / custom).",
         input_schema: {
           type: "object",
           properties: {
-            kind: { type: "string", enum: ["election", "finalization", "custom"] },
+            kind: { type: "string", enum: ["finalization", "custom"] },
             title: { type: "string" },
             prompt: { type: "string" },
             options: { type: "array", items: { type: "string" } }
@@ -494,7 +493,6 @@ export function buildAnthropicTools(input: { enableVoting: boolean; allowedOutpu
         input_schema: {
           type: "object",
           properties: {
-            selections: { type: "object", additionalProperties: { type: "string" } },
             choice: { type: "string" },
             reason: { type: "string" }
           }

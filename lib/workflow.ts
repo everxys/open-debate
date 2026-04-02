@@ -1,4 +1,4 @@
-﻿export type WorkflowPhaseKind = "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization";
+export type WorkflowPhaseKind = "analysis" | "deliberation" | "finalization_vote" | "finalization";
 export type WorkflowContextAccessScope = "shared" | "seat";
 export type WorkflowCompletionMode = "consensus_only" | "consensus_plus_outputs" | "workflow_gate";
 
@@ -60,12 +60,6 @@ export type DebateWorkflowConfig = {
       injectedPrompt?: string | null;
     }>;
     transitionRules?: {
-      election?: {
-        startRound?: number;
-        autoOpen?: boolean;
-        reopenUntilPassed?: boolean;
-        discussionRoundsBetweenVotes?: number;
-      };
       finalization?: {
         autoOpenVote?: boolean;
         requireUnanimousVote?: boolean;
@@ -74,29 +68,6 @@ export type DebateWorkflowConfig = {
         requirePhaseForCompletion?: boolean;
       };
     };
-  };
-
-  // v1 recommended shape
-  election?: {
-    startRound?: number;
-    roles?: string[];
-    speakingOrder?: {
-      firstRole?: string | null;
-      lastRole?: string | null;
-    };
-  };
-
-  seatOrderRules?: Array<{
-    afterRound?: number;
-    policy?: { type?: string; offset?: number; order?: unknown[] };
-  }>;
-
-  // legacy (pre-v1 docs) shape (still accepted)
-  startRound?: number;
-  roles?: string[];
-  speakingOrder?: {
-    firstRole?: string | null;
-    lastRole?: string | null;
   };
 
   voting?: {
@@ -195,12 +166,6 @@ export type NormalizedDebateWorkflow = {
       injectedPrompt: string | null;
     }>;
     transitionRules: {
-      election: {
-        startRound: number;
-        autoOpen: boolean;
-        reopenUntilPassed: boolean;
-        discussionRoundsBetweenVotes: number;
-      };
       finalization: {
         autoOpenVote: boolean;
         requireUnanimousVote: boolean;
@@ -210,18 +175,6 @@ export type NormalizedDebateWorkflow = {
       };
     };
   };
-  election: {
-    startRound: number;
-    roles: string[];
-    speakingOrder: {
-      firstRole: string | null;
-      lastRole: string | null;
-    };
-  };
-  seatOrderRules: Array<
-    | { afterRound: number; policy: { type: "rotate"; offset: number } }
-    | { afterRound: number; policy: { type: "reverse" } }
-  >;
   voting: {
     custom: {
       minOptions: number | null;
@@ -372,12 +325,6 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         }
       ],
       transitionRules: {
-        election: {
-          startRound: 2,
-          autoOpen: false,
-          reopenUntilPassed: false,
-          discussionRoundsBetweenVotes: 1
-        },
         finalization: {
           autoOpenVote: false,
           requireUnanimousVote: false,
@@ -387,12 +334,6 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         }
       }
     },
-    election: {
-      startRound: 2,
-      roles: [],
-      speakingOrder: { firstRole: null, lastRole: null }
-    },
-    seatOrderRules: [],
     voting: {
       custom: { minOptions: 2, maxOptions: null },
       announcement: {
@@ -843,7 +784,6 @@ function normalizePhaseMachine(value: unknown) {
       const kindRaw = toTrimmedString(phaseObj?.kind);
       const kind =
         kindRaw === "analysis" ||
-        kindRaw === "election" ||
         kindRaw === "deliberation" ||
         kindRaw === "finalization_vote" ||
         kindRaw === "finalization"
@@ -873,7 +813,7 @@ function normalizePhaseMachine(value: unknown) {
       ): item is {
         id: string;
         title: string;
-        kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization";
+        kind: "analysis" | "deliberation" | "finalization_vote" | "finalization";
         description: string | null;
         minRounds: number | null;
         injectedPrompt: string | null;
@@ -883,10 +823,6 @@ function normalizePhaseMachine(value: unknown) {
   const transitionRulesRaw =
     typeof obj?.transitionRules === "object" && obj.transitionRules !== null
       ? (obj.transitionRules as Record<string, unknown>)
-      : null;
-  const electionTransitionRaw =
-    typeof transitionRulesRaw?.election === "object" && transitionRulesRaw.election !== null
-      ? (transitionRulesRaw.election as Record<string, unknown>)
       : null;
   const finalizationTransitionRaw =
     typeof transitionRulesRaw?.finalization === "object" && transitionRulesRaw.finalization !== null
@@ -908,15 +844,6 @@ function normalizePhaseMachine(value: unknown) {
             }
           ],
     transitionRules: {
-      election: {
-        startRound: toPositiveInt(electionTransitionRaw?.startRound) ?? 1,
-        autoOpen: electionTransitionRaw?.autoOpen === undefined ? false : Boolean(electionTransitionRaw.autoOpen),
-        reopenUntilPassed:
-          electionTransitionRaw?.reopenUntilPassed === undefined
-            ? false
-            : Boolean(electionTransitionRaw.reopenUntilPassed),
-        discussionRoundsBetweenVotes: toPositiveInt(electionTransitionRaw?.discussionRoundsBetweenVotes) ?? 1
-      },
       finalization: {
         autoOpenVote:
           finalizationTransitionRaw?.autoOpenVote === undefined
@@ -938,14 +865,6 @@ function normalizePhaseMachine(value: unknown) {
       }
     }
   };
-}
-
-function normalizeSpeakingOrder(value: unknown) {
-  if (typeof value !== "object" || value === null) return { firstRole: null, lastRole: null };
-  const obj = value as Record<string, unknown>;
-  const firstRole = obj.firstRole === null ? null : toTrimmedString(obj.firstRole);
-  const lastRole = obj.lastRole === null ? null : toTrimmedString(obj.lastRole);
-  return { firstRole, lastRole };
 }
 
 function normalizePromptPolicies(value: unknown) {
@@ -1124,7 +1043,7 @@ function normalizeContextAccess(value: unknown): NormalizedDebateWorkflow["conte
               ? ((item as { phaseKind?: unknown }).phaseKind as WorkflowPhaseKind | undefined)
               : undefined;
           if (!rule || !phaseKind) return null;
-          if (!["analysis", "election", "deliberation", "finalization_vote", "finalization"].includes(phaseKind)) return null;
+          if (!["analysis", "deliberation", "finalization_vote", "finalization"].includes(phaseKind)) return null;
           return { ...rule, phaseKind };
         })
         .filter((item): item is NormalizedWorkflowPhaseGateRule => Boolean(item))
@@ -1156,66 +1075,6 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
   const enabled = enabledRaw === undefined ? false : Boolean(enabledRaw);
   const phaseMachineRaw = (anyInput as { phaseMachine?: unknown }).phaseMachine;
   const phaseMachine = normalizePhaseMachine(phaseMachineRaw);
-  const phaseMachineObj =
-    typeof phaseMachineRaw === "object" && phaseMachineRaw !== null ? (phaseMachineRaw as Record<string, unknown>) : null;
-  const transitionRulesRaw =
-    typeof phaseMachineObj?.transitionRules === "object" && phaseMachineObj.transitionRules !== null
-      ? (phaseMachineObj.transitionRules as Record<string, unknown>)
-      : null;
-  const electionTransitionRaw =
-    typeof transitionRulesRaw?.election === "object" && transitionRulesRaw.election !== null
-      ? (transitionRulesRaw.election as Record<string, unknown>)
-      : null;
-
-  const electionRaw = (anyInput as { election?: unknown }).election;
-  const electionObj =
-    typeof electionRaw === "object" && electionRaw !== null ? (electionRaw as Record<string, unknown>) : null;
-
-  const legacyStartRound = toPositiveInt((anyInput as { startRound?: unknown }).startRound);
-  const legacyRoles = normalizeRoles((anyInput as { roles?: unknown }).roles);
-  const legacySpeakingOrder = normalizeSpeakingOrder((anyInput as { speakingOrder?: unknown }).speakingOrder);
-
-  const startRound =
-    toPositiveInt(electionObj?.startRound) ?? toPositiveInt(electionTransitionRaw?.startRound) ?? legacyStartRound ?? 1;
-  const roles = (() => {
-    const fromElection = normalizeRoles(electionObj?.roles);
-    return fromElection.length ? fromElection : legacyRoles;
-  })();
-  const speakingOrder = (() => {
-    const fromElection = normalizeSpeakingOrder(electionObj?.speakingOrder);
-    const legacyHas = legacySpeakingOrder.firstRole !== null || legacySpeakingOrder.lastRole !== null;
-    const electionHas = fromElection.firstRole !== null || fromElection.lastRole !== null;
-    return electionHas ? fromElection : legacyHas ? legacySpeakingOrder : { firstRole: null, lastRole: null };
-  })();
-
-  const seatOrderRulesRaw = (anyInput as { seatOrderRules?: unknown }).seatOrderRules;
-  const seatOrderRulesInput = Array.isArray(seatOrderRulesRaw) ? seatOrderRulesRaw : [];
-  const seatOrderRules: NormalizedDebateWorkflow["seatOrderRules"] = [];
-  for (const item of seatOrderRulesInput) {
-    if (typeof item !== "object" || item === null) continue;
-    const obj = item as Record<string, unknown>;
-    const afterRound = toPositiveInt(obj.afterRound);
-    if (!afterRound) continue;
-    const policyRaw = obj.policy;
-    if (typeof policyRaw !== "object" || policyRaw === null) continue;
-    const policyObj = policyRaw as Record<string, unknown>;
-    const type = toTrimmedString(policyObj.type);
-    if (type === "rotate") {
-      const offset = toInt(policyObj.offset) ?? 1;
-      seatOrderRules.push({ afterRound, policy: { type: "rotate", offset } });
-      continue;
-    }
-    if (type === "reverse") {
-      seatOrderRules.push({ afterRound, policy: { type: "reverse" } });
-      continue;
-    }
-  }
-
-  // Validation: speakingOrder roles must exist in election.roles when provided.
-  const roleSet = new Set(roles);
-  if (speakingOrder.firstRole && !roleSet.has(speakingOrder.firstRole)) return null;
-  if (speakingOrder.lastRole && !roleSet.has(speakingOrder.lastRole)) return null;
-
   const voting = normalizeVoting((anyInput as { voting?: unknown }).voting);
   const consensus = normalizeConsensus((anyInput as { consensus?: unknown }).consensus);
   const promptPolicies = normalizePromptPolicies((anyInput as { promptPolicies?: unknown }).promptPolicies);
@@ -1237,22 +1096,7 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
   return {
     workflowVersion: 1,
     enabled,
-    phaseMachine: {
-      ...phaseMachine,
-      transitionRules: {
-        ...phaseMachine.transitionRules,
-        election: {
-          ...phaseMachine.transitionRules.election,
-          startRound
-        }
-      }
-    },
-    election: {
-      startRound,
-      roles,
-      speakingOrder
-    },
-    seatOrderRules,
+    phaseMachine,
     voting,
     consensus,
     promptPolicies,
@@ -1281,12 +1125,6 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
         injectedPrompt: phase.injectedPrompt
       })),
       transitionRules: {
-        election: {
-          startRound: normalized.phaseMachine.transitionRules.election.startRound,
-          autoOpen: normalized.phaseMachine.transitionRules.election.autoOpen,
-          reopenUntilPassed: normalized.phaseMachine.transitionRules.election.reopenUntilPassed,
-          discussionRoundsBetweenVotes: normalized.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes
-        },
         finalization: {
           autoOpenVote: normalized.phaseMachine.transitionRules.finalization.autoOpenVote,
           requireUnanimousVote: normalized.phaseMachine.transitionRules.finalization.requireUnanimousVote,
@@ -1296,18 +1134,6 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
         }
       }
     },
-    election: {
-      startRound: normalized.election.startRound,
-      roles: normalized.election.roles,
-      speakingOrder: {
-        firstRole: normalized.election.speakingOrder.firstRole,
-        lastRole: normalized.election.speakingOrder.lastRole
-      }
-    },
-    seatOrderRules: normalized.seatOrderRules.map((rule) => ({
-      afterRound: rule.afterRound,
-      policy: rule.policy.type === "rotate" ? { type: "rotate", offset: rule.policy.offset } : { type: "reverse" }
-    })),
     voting: {
       custom: {
         minOptions: normalized.voting.custom.minOptions,

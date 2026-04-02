@@ -52,7 +52,7 @@ export type DebateRecord = {
   isShared: boolean;
   consensusReached: boolean;
   consensusSummary: { leadingSolution: string; score: number } | null;
-  workflowPhaseKind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization" | null;
+  workflowPhaseKind: "analysis" | "deliberation" | "finalization_vote" | "finalization" | null;
   workflowPhaseTitle: string | null;
   workflowPhaseRound: number | null;
   runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | null;

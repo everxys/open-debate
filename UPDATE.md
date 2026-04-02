@@ -33,3 +33,15 @@
 - 2026-04-01: 继续把 `NOVEL_GODMODE_MASTER_PROMPT` 中未完全吸收的内容增强回当前策略：补强故事总前提、点子分层规则、事件/角色/终局失败判据、总结器的审判视角；新增 `protocol/40_idea_ledger_and_outline.md` 并同步到数据库中的当前策略。
 - 2026-04-01: 对当前神作策略做了一轮不降质瘦身，压缩 `openingPrompt` 和部分 protocol / question 中的重复语义，保留核心高压目标，把细规则更多收束到 `protocol/*`，并同步回数据库中的当前策略。
 - 2026-04-01: 继续把 `NOVEL_GODMODE_MASTER_PROMPT` 中缺失的高价值约束分层吸收回当前策略：新增 `protocol/50_arsenal_and_methods.md`，补回精简三层学科武器库、角色主场方法论、二刷成立级质量审判、阶段伪推进提醒，并同步到数据库中的当前策略。
+- 2026-04-02: 给独立总结器调用加了轻量重试与退避；对 `fetch failed`、临时网络中断和常见限流错误会自动重试两次，减少 turn summary / facts board 偶发失败。
+- 2026-04-02: 给独立总结器补了降级补偿链；turn summary / round summary / facts board 失败时会先写入 `context/summarizer_backlog.json` 待补队列，后续主循环和轮次边界会自动重试补生成，不再因为一次网络抖动直接丢摘要。
+- 2026-04-02: 辩论页的总结状态现在会显示更完整的待补信息；summary job 新增失败原因和下次重试时间，前端会把“AI 待补生成 / AI 总结失败”的具体原因通过悬停提示展示出来，不再需要翻运行日志定位。
+- 2026-04-02: 当前数据库策略 `民主集中制共识算法（先赛马，再相马）` 已从 5 个同质“通用议员”精简成 2 席：`通用议员 + 反驳者`。反驳者默认承担更高压的质量审判与拆错职责，但仍可被选为 Host / Supervisor；同时同步更新了策略 docs 源文件、开局问题模板、ground rules 和选举说明，避免继续隐含“多人同质赛马”的旧心智。
+- 2026-04-02: 当前数据库策略继续扩成 3 席：`通用议员 + 反驳者 + 事件诡计工程师`。新增“事件诡计工程师”专门负责把大事件、诡计链、信息差、误导、反制、代价与余波做实，并同步更新了 docs 策略源、opening prompt、ground rules、选举说明和数据库中的真实策略。
+- 2026-04-02: 平台级删除 `appointedRole / election / seat reorder / Supervisor` 运行模型，改成固定基础角色席位 + 固定 Host 主持流程。`workflow` schema 已去掉 `election` 和 `seatOrderRules`，官方投票只保留 `finalization / custom`，辩论详情页和策略编辑页也同步去除了选举心智。当前数据库策略 `民主集中制共识算法（先赛马，再相马）` 已重写成固定 `Host + 11 个内容席位` 的 12 席结构，并与 `docs/merged_democratic_centralism_strategy/` 源文件保持一致。
+- 2026-04-02: 当前数据库策略继续扩成 5 席，补齐长期最优的核心创作会议结构：`通用议员 + 反驳者 + 事件诡计工程师 + 终局闭环官 + 人物关系审判官`。新增两类席位的专用 system prompt，并同步更新 docs 策略源、opening prompt、ground rules、选举说明和数据库中的真实策略。
+- 2026-04-02: 当前数据库策略已按推荐配比扩成 12 席：`4 通用议员 + 2 反驳者 + 2 事件诡计工程师 + 2 终局闭环官 + 2 人物关系审判官`。继续保持 `role_order = 1` 为 owner role，独占 `debate/workflow.json`，其余 11 席共享同一套 protocol / template / ideas 文件。
+- 2026-04-02: 新增辩论页在“使用策略”时增加“均匀分配 AI”按钮，可把当前已加载的 AI 配置按轮转方式平均绑定到所有启用席位，降低大席位策略的手动映射成本。
+- 2026-04-02: 新增辩论页的总结器绑定区增加“随机 AI”按钮，可从当前已加载的 AI 配置中随机选择一台作为独立总结器，保留原有手动选择方式。
+- 2026-04-02: 新增辩论页的问题输入框增加本地历史候选。聚焦问题框时会显示最近填写过的问题，可一键回填或清空历史，效果类似浏览器的表单历史提示，但支持当前使用的多行 textarea。
+- 2026-04-02: 继续清理固定 Host 重构后的残留：删除 `workflow-phase.ts` 中已失效的 election helper；将官方投票结论文件从 `votes/directive.*` 更名为更中性的 `votes/decision.*`；并把策略文档 `30_election_and_veto.md` 重命名为 `30_host_and_quality_control.md`，同步更新知识库与教程中的相关说明。

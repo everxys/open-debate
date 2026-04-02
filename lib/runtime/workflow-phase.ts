@@ -15,57 +15,7 @@ function getPgErrorCode(error: unknown) {
 export type OfficialVote =
   | {
       status: "open";
-      kind: "election";
-      roundNumber: number;
-      title: string;
-      roles: string[];
-      candidates: Array<{ seat: string; name: string }>;
-      ballots: Array<{
-        debateAgentId: string;
-        voter: string;
-        voterSeat?: string;
-        selections: Record<string, string>;
-        reason?: string;
-        at: string;
-      }>;
-      meta?: {
-        forcedOpen?: boolean;
-        reason?: string;
-        tieRound?: number;
-        reopenedBecause?: string;
-        attempt?: number;
-        previousFailedRound?: number;
-      };
-      createdAt: string;
-    }
-  | {
-      status: "open";
-      kind: "finalization";
-      roundNumber: number;
-      title: string;
-      prompt: string;
-      options: string[];
-      ballots: Array<{
-        debateAgentId: string;
-        voter: string;
-        voterSeat?: string;
-        choice: string;
-        reason?: string;
-        at: string;
-      }>;
-      meta?: {
-        forcedOpen?: boolean;
-        reason?: string;
-        tieRound?: number;
-        reopenedBecause?: string;
-        attempt?: number;
-        previousFailedRound?: number;
-      };
-      createdAt: string;
-    }
-  | {
-      status: "open";
-      kind: "custom";
+      kind: "finalization" | "custom";
       roundNumber: number;
       title: string;
       prompt: string;
@@ -90,24 +40,7 @@ export type OfficialVote =
     }
   | {
       status: "closed";
-      kind: "election";
-      roundNumber: number;
-      title: string;
-      result: Record<string, unknown>;
-      meta?: {
-        forcedOpen?: boolean;
-        reason?: string;
-        tieRound?: number;
-        reopenedBecause?: string;
-        attempt?: number;
-        previousFailedRound?: number;
-      };
-      closedAt: string;
-      createdAt: string;
-    }
-  | {
-      status: "closed";
-      kind: "finalization";
+      kind: "finalization" | "custom";
       roundNumber: number;
       title: string;
       prompt: string;
@@ -123,24 +56,7 @@ export type OfficialVote =
       closedAt: string;
       createdAt: string;
     }
-  | {
-      status: "closed";
-      kind: "custom";
-      roundNumber: number;
-      title: string;
-      prompt: string;
-      result: Record<string, unknown>;
-      meta?: {
-        forcedOpen?: boolean;
-        reason?: string;
-        tieRound?: number;
-        reopenedBecause?: string;
-        attempt?: number;
-        previousFailedRound?: number;
-      };
-      closedAt: string;
-      createdAt: string;
-    };
+  ;
 
 export type OpenOfficialVote = Extract<OfficialVote, { status: "open" }>;
 export type ClosedOfficialVote = Extract<OfficialVote, { status: "closed" }>;
@@ -177,31 +93,21 @@ export async function loadDebateWorkflow(userId: string, debateId: string): Prom
 
 export function isOfficialVotingAllowed(workflow: NormalizedDebateWorkflow | null, roundNumber: number) {
   if (!workflow?.enabled) return false;
-  return roundNumber >= getWorkflowElectionStartRound(workflow);
-}
-
-export function getWorkflowElectionStartRound(workflow: NormalizedDebateWorkflow | null) {
-  if (!workflow?.enabled) return 1;
-  return workflow.phaseMachine.transitionRules.election.startRound;
+  return roundNumber >= 1;
 }
 
 export function getWorkflowPhaseByKind(
   workflow: NormalizedDebateWorkflow | null,
-  kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization"
+  kind: "analysis" | "deliberation" | "finalization_vote" | "finalization"
 ) {
   return workflow?.phaseMachine.phases.find((phase) => phase.kind === kind) ?? null;
 }
 
 export function hasWorkflowPhase(
   workflow: NormalizedDebateWorkflow | null,
-  kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization"
+  kind: "analysis" | "deliberation" | "finalization_vote" | "finalization"
 ) {
   return Boolean(getWorkflowPhaseByKind(workflow, kind));
-}
-
-export function usesWorkflowElectionPhase(workflow: NormalizedDebateWorkflow | null) {
-  if (!workflow?.enabled) return false;
-  return hasWorkflowPhase(workflow, "election") && workflow.election.roles.length > 0;
 }
 
 export function usesWorkflowFinalizationVotePhase(workflow: NormalizedDebateWorkflow | null) {
@@ -216,7 +122,7 @@ export function usesWorkflowFinalizationPhase(workflow: NormalizedDebateWorkflow
 
 export function getWorkflowPhaseMinRounds(
   workflow: NormalizedDebateWorkflow | null,
-  kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization",
+  kind: "analysis" | "deliberation" | "finalization_vote" | "finalization",
   fallback = 0
 ) {
   const minRounds = getWorkflowPhaseByKind(workflow, kind)?.minRounds;
@@ -225,18 +131,12 @@ export function getWorkflowPhaseMinRounds(
 
 export function getWorkflowMinimumAnalysisRounds(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 0;
-  if (!usesWorkflowElectionPhase(workflow)) {
-    return getWorkflowPhaseMinRounds(workflow, "analysis", 0);
-  }
-  return Math.max(getWorkflowElectionStartRound(workflow) - 1, getWorkflowPhaseMinRounds(workflow, "analysis", 0));
+  return getWorkflowPhaseMinRounds(workflow, "analysis", 0);
 }
 
 export function getWorkflowEarliestDeliberationRound(workflow: NormalizedDebateWorkflow | null) {
   if (!workflow?.enabled) return 1;
-  if (!usesWorkflowElectionPhase(workflow)) {
-    return Math.max(1, getWorkflowMinimumAnalysisRounds(workflow) + 1);
-  }
-  return getWorkflowMinimumAnalysisRounds(workflow) + getWorkflowPhaseMinRounds(workflow, "election", 1) + 1;
+  return Math.max(1, getWorkflowMinimumAnalysisRounds(workflow) + 1);
 }
 
 export function getWorkflowEarliestFinalizationVoteRound(workflow: NormalizedDebateWorkflow | null) {
@@ -339,7 +239,7 @@ export function requiresWorkflowFinalizationPhaseForCompletion(workflow: Normali
 
 export function getWorkflowOutputMaxTokens(
   workflow: NormalizedDebateWorkflow | null,
-  phaseKind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization" | null,
+  phaseKind: "analysis" | "deliberation" | "finalization_vote" | "finalization" | null,
   agentMaxOutputTokens: number | null
 ) {
   const discussionBudget = workflow?.promptPolicies.outputBudget.discussionMaxTokens;
@@ -380,32 +280,8 @@ export function hasEnteredWorkflowFinalization(input: {
 }) {
   if (!input.workflow?.enabled) return false;
   if (getWorkflowCompletionMode(input.workflow) !== "workflow_gate") return false;
-  if (input.roundNumber < getWorkflowElectionStartRound(input.workflow)) return false;
   if (input.roundNumber < getWorkflowEarliestFinalizationRound(input.workflow)) return false;
   return input.persistedPhaseKind === "finalization";
-}
-
-export function shouldAutoOpenWorkflowElectionAtBoundary(
-  workflow: NormalizedDebateWorkflow | null,
-  endedRound: number
-) {
-  if (!workflow?.enabled) return false;
-  const electionRules = workflow.phaseMachine.transitionRules.election;
-  return electionRules.autoOpen && endedRound === electionRules.startRound - 1;
-}
-
-export function isClosedElectionVotePassed(vote: OfficialVote | null | undefined) {
-  if (!vote || vote.status !== "closed" || vote.kind !== "election") return false;
-  const explicitPassed =
-    typeof (vote.result as { passed?: unknown }).passed === "boolean"
-      ? Boolean((vote.result as { passed?: boolean }).passed)
-      : null;
-  if (explicitPassed !== null) return explicitPassed;
-  const roles = Array.isArray((vote.result as { roles?: unknown }).roles)
-    ? (((vote.result as { roles?: unknown }).roles ?? []) as string[])
-    : Object.keys((((vote.result as { winners?: unknown }).winners ?? {}) as Record<string, unknown>) ?? {});
-  const winners = (((vote.result as { winners?: unknown }).winners ?? {}) as Record<string, unknown>) ?? {};
-  return roles.length > 0 && roles.every((role) => typeof winners[role] === "string" && Boolean(String(winners[role])));
 }
 
 export async function listMissingRequiredDeliverables(input: {
@@ -504,7 +380,6 @@ export function resolveCurrentWorkflowPhase(input: {
   const phases = input.workflow?.phaseMachine.phases ?? [];
   const byKind = new Map(phases.map((phase) => [phase.kind, phase] as const));
   if (!input.workflow?.enabled) return null;
-  if (input.openVote?.kind === "election") return byKind.get("election") ?? byKind.get("deliberation") ?? byKind.get("analysis") ?? null;
   if (input.openVote?.kind === "finalization") {
     return byKind.get("finalization_vote") ?? byKind.get("deliberation") ?? byKind.get("finalization") ?? null;
   }
@@ -517,19 +392,7 @@ export function resolveCurrentWorkflowPhase(input: {
   ) {
     return byKind.get("finalization") ?? byKind.get("deliberation") ?? null;
   }
-  if (!usesWorkflowElectionPhase(input.workflow)) {
-    if (input.roundNumber < getWorkflowEarliestDeliberationRound(input.workflow)) {
-      return byKind.get("analysis") ?? null;
-    }
-    return byKind.get("deliberation") ?? byKind.get("analysis") ?? null;
-  }
-  const electionPassed =
-    isClosedElectionVotePassed(input.latestVote) ||
-    (input.persistedPhaseKind !== null &&
-      input.persistedPhaseKind !== undefined &&
-      input.persistedPhaseKind !== "analysis" &&
-      input.persistedPhaseKind !== "election");
-  if (input.roundNumber < getWorkflowElectionStartRound(input.workflow) || !electionPassed) {
+  if (input.roundNumber < getWorkflowEarliestDeliberationRound(input.workflow)) {
     return byKind.get("analysis") ?? null;
   }
   return byKind.get("deliberation") ?? null;

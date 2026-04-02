@@ -29,7 +29,7 @@ type RoleDraft = { clientId: string; id: string; name: string; systemPrompt: str
 type WorkflowPhasePrompt = {
   id: string;
   title: string;
-  kind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization";
+  kind: "analysis" | "deliberation" | "finalization_vote" | "finalization";
   description: string | null;
   minRounds: number | null;
   injectedPrompt: string;
@@ -154,7 +154,6 @@ function normalizeContextAccessPayload(value: unknown): WorkflowContextAccess {
         const raw = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : null;
         const phaseKind: WorkflowPhaseKind =
           raw?.phaseKind === "analysis" ||
-          raw?.phaseKind === "election" ||
           raw?.phaseKind === "deliberation" ||
           raw?.phaseKind === "finalization_vote" ||
           raw?.phaseKind === "finalization"
@@ -312,7 +311,6 @@ export default function StrategyDetailPage() {
             title: String(phase.title ?? ""),
             kind:
               phase.kind === "analysis" ||
-              phase.kind === "election" ||
               phase.kind === "deliberation" ||
               phase.kind === "finalization_vote" ||
               phase.kind === "finalization"
@@ -753,7 +751,6 @@ export default function StrategyDetailPage() {
           title: String(phase.title ?? ""),
           kind:
             phase.kind === "analysis" ||
-            phase.kind === "election" ||
             phase.kind === "deliberation" ||
             phase.kind === "finalization_vote" ||
             phase.kind === "finalization"
@@ -1480,7 +1477,6 @@ export default function StrategyDetailPage() {
                       <label>解锁阶段</label>
                       <select value={rule.phaseKind} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { phaseKind: event.target.value as WorkflowPhasePrompt["kind"] })}>
                         <option value="analysis">analysis</option>
-                        <option value="election">election</option>
                         <option value="deliberation">deliberation</option>
                         <option value="finalization_vote">finalization_vote</option>
                         <option value="finalization">finalization</option>

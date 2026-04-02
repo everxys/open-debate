@@ -2,111 +2,59 @@ import { query } from "@/lib/db";
 
 export type DebateParticipantRoleType = string;
 
-type SuccessfulElectionAssignments = {
+type DebateParticipantRoleAssignments = {
   byDebateAgentId: Map<string, DebateParticipantRoleType>;
-  roundNumber: number | null;
 };
 
-function parseVoteRoundNumber(path: string) {
-  const match = String(path ?? "")
-    .replace(/\\/g, "/")
-    .match(/^votes\/round-([0-9]{1,6})\.json$/);
-  if (!match) return null;
-  const value = Number(match[1]);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
-}
+const BASE_ROLE_PATH = "context/base_role.json";
 
-function parseSuccessfulElectionAssignments(
-  content: string,
-  seatToDebateAgentId: Map<string, string>
-): SuccessfulElectionAssignments | null {
+function parseBaseRole(content: string) {
   if (!content.trim()) return null;
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    const parsed = JSON.parse(content) as { role?: unknown; baseRole?: unknown };
+    const role =
+      typeof parsed.baseRole === "string"
+        ? parsed.baseRole.trim()
+        : typeof parsed.role === "string"
+          ? parsed.role.trim()
+          : "";
+    return role || null;
   } catch {
     return null;
   }
-  if (!parsed || typeof parsed !== "object") return null;
-  const obj = parsed as Record<string, unknown>;
-  if (obj.status !== "closed" || obj.kind !== "election") return null;
-  const result = obj.result && typeof obj.result === "object" ? (obj.result as Record<string, unknown>) : null;
-  if (!result || result.passed !== true) return null;
-  const winners = result.winners && typeof result.winners === "object" ? (result.winners as Record<string, unknown>) : null;
-  if (!winners) return null;
-
-  const byDebateAgentId = new Map<string, DebateParticipantRoleType>();
-  for (const [roleName, seatValue] of Object.entries(winners)) {
-    if (typeof seatValue !== "string") continue;
-    const normalizedRole = roleName.trim();
-    if (!normalizedRole) continue;
-    const debateAgentId = seatToDebateAgentId.get(seatValue.trim()) ?? null;
-    if (!debateAgentId || byDebateAgentId.has(debateAgentId)) continue;
-    byDebateAgentId.set(debateAgentId, normalizedRole);
-  }
-
-  const roundNumber = typeof obj.roundNumber === "number" ? Math.floor(obj.roundNumber) : null;
-  return { byDebateAgentId, roundNumber };
 }
 
 export async function loadDebateParticipantRoleTypes(
   userId: string,
   debateId: string
-): Promise<SuccessfulElectionAssignments> {
-  const participants = await query<{ debate_agent_id: string; turn_order: number }>(
+): Promise<DebateParticipantRoleAssignments> {
+  const result = await query<{ debate_agent_id: string; content: string | null }>(
     `
       select da.id as debate_agent_id,
-             da.turn_order
+             f.content as content
         from debate_agents da
         join debates d on d.id = da.debate_id
+        left join debate_agent_files f
+          on f.debate_agent_id = da.id
+         and f.path = $3
        where da.debate_id = $1
          and d.user_id = $2
     `,
-    [debateId, userId]
-  );
-  const seatToDebateAgentId = new Map<string, string>();
-  for (const row of participants.rows) {
-    const turnOrder = Number(row.turn_order ?? 0);
-    if (Number.isFinite(turnOrder) && turnOrder > 0) {
-      seatToDebateAgentId.set(`Seat-${Math.floor(turnOrder)}`, String(row.debate_agent_id));
-    }
-  }
-
-  const roundFiles = await query<{ path: string; content: string }>(
-    `
-      select f.path, coalesce(f.content, '') as content
-        from debate_files f
-        join debates d on d.id = f.debate_id
-       where f.debate_id = $1
-         and d.user_id = $2
-         and f.path like 'votes/round-%.json'
-    `,
-    [debateId, userId]
+    [debateId, userId, BASE_ROLE_PATH]
   );
 
-  const candidates = roundFiles.rows
-    .map((row) => ({
-      path: String(row.path ?? ""),
-      content: String(row.content ?? ""),
-      roundNumber: parseVoteRoundNumber(String(row.path ?? "")) ?? 0
-    }))
-    .filter((row) => row.roundNumber > 0)
-    .sort((a, b) => b.roundNumber - a.roundNumber);
-
-  for (const item of candidates) {
-    const parsed = parseSuccessfulElectionAssignments(item.content, seatToDebateAgentId);
-    if (parsed) return parsed;
+  const byDebateAgentId = new Map<string, DebateParticipantRoleType>();
+  for (const row of result.rows) {
+    const baseRole = parseBaseRole(String(row.content ?? ""));
+    byDebateAgentId.set(String(row.debate_agent_id), baseRole ?? "Participant");
   }
 
-  return {
-    byDebateAgentId: new Map<string, DebateParticipantRoleType>(),
-    roundNumber: null
-  };
+  return { byDebateAgentId };
 }
 
 export function getDebateParticipantRoleType(
-  assignments: SuccessfulElectionAssignments,
+  assignments: DebateParticipantRoleAssignments,
   debateAgentId: string
 ): DebateParticipantRoleType {
-  return assignments.byDebateAgentId.get(debateAgentId) ?? "Contributor";
+  return assignments.byDebateAgentId.get(debateAgentId) ?? "Participant";
 }

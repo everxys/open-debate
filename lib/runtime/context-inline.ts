@@ -55,14 +55,12 @@ export function getPhaseRank(phaseKind: WorkflowPhaseKind | null | undefined) {
   switch (phaseKind) {
     case "analysis":
       return 1;
-    case "election":
-      return 2;
     case "deliberation":
-      return 3;
+      return 2;
     case "finalization_vote":
-      return 4;
+      return 3;
     case "finalization":
-      return 5;
+      return 4;
     default:
       return 0;
   }

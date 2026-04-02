@@ -89,16 +89,9 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
 }
 
 function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<ReturnType<typeof normalizeDebateWorkflow>>) {
-  const hasElectionPhase = workflow.phaseMachine.phases.some((phase) => phase.kind === "election");
   const hasFinalizationVotePhase = workflow.phaseMachine.phases.some((phase) => phase.kind === "finalization_vote");
   const hasFinalizationPhase = workflow.phaseMachine.phases.some((phase) => phase.kind === "finalization");
-  const analysisMinRounds = hasElectionPhase
-    ? Math.max(
-        workflow.election.startRound - 1,
-        workflow.phaseMachine.phases.find((phase) => phase.kind === "analysis")?.minRounds ?? 0
-      )
-    : (workflow.phaseMachine.phases.find((phase) => phase.kind === "analysis")?.minRounds ?? 0);
-  const electionMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "election")?.minRounds ?? 0;
+  const analysisMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "analysis")?.minRounds ?? 0;
   const deliberationMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "deliberation")?.minRounds ?? 0;
   const finalizationVoteMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "finalization_vote")?.minRounds ?? 0;
   const finalizationMinRounds = workflow.phaseMachine.phases.find((phase) => phase.kind === "finalization")?.minRounds ?? 0;
@@ -112,23 +105,15 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<Retur
     }
   }
   lines.push(
-    `- phase minRounds: analysis=${analysisMinRounds}; election=${hasElectionPhase ? electionMinRounds : "n/a"}; deliberation=${deliberationMinRounds}; finalization_vote=${hasFinalizationVotePhase ? finalizationVoteMinRounds : "n/a"}; finalization=${hasFinalizationPhase ? finalizationMinRounds : "n/a"}`
-  );
-  lines.push(
-    `- election phase: configured=${hasElectionPhase ? "yes" : "no"}; roles=${workflow.election.roles.length ? workflow.election.roles.join("/") : "(none)"}; startRound=${workflow.phaseMachine.transitionRules.election.startRound}; autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}; reopenUntilPassed=${workflow.phaseMachine.transitionRules.election.reopenUntilPassed ? "yes" : "no"}; discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes}`
+    `- phase minRounds: analysis=${analysisMinRounds}; deliberation=${deliberationMinRounds}; finalization_vote=${hasFinalizationVotePhase ? finalizationVoteMinRounds : "n/a"}; finalization=${hasFinalizationPhase ? finalizationMinRounds : "n/a"}`
   );
   lines.push(
     `- consolidation controls: votePhase=${hasFinalizationVotePhase ? "yes" : "no"}; consolidationPhase=${hasFinalizationPhase ? "yes" : "no"}; autoOpenVote=${workflow.phaseMachine.transitionRules.finalization.autoOpenVote ? "yes" : "no"}; requireUnanimousVote=${workflow.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "yes" : "no"}; reopenUntilPassed=${workflow.phaseMachine.transitionRules.finalization.reopenUntilPassed ? "yes" : "no"}; discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes}; requirePhaseForCompletion=${workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "yes" : "no"}`
   );
   lines.push(`- completion mode: ${workflow.completion.mode}`);
-  lines.push(`- election startRound: ${workflow.election.startRound}`);
-  lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
   lines.push(`- vote tieBreaker: ${workflow.voting.governance.tieBreaker}`);
   lines.push(`- vote maxTieRounds: ${workflow.voting.governance.maxTieRounds}`);
   lines.push(`- vote fallbackMode: ${workflow.voting.governance.fallbackMode ?? "(none)"}`);
-  const first = workflow.election.speakingOrder.firstRole;
-  const last = workflow.election.speakingOrder.lastRole;
-  lines.push(`- speakingOrder (after election, next-round boundary): first=${first ?? "(none)"}; last=${last ?? "(none)"}`);
   lines.push(`- round1 fairness: ${workflow.promptPolicies.round1Fairness ? "enabled" : "disabled"}`);
   lines.push(`- opening prompt: ${workflow.promptPolicies.openingPrompt ? "configured" : "none"}`);
   lines.push(
@@ -182,16 +167,6 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<Retur
     for (const file of workflow.deliverables.requiredFiles) {
       lines.push(`  - ${formatRequiredDeliverableSummary(file, "plain")}`);
     }
-  }
-  if (workflow.seatOrderRules.length === 0) {
-    lines.push("- seatOrderRules: (none)");
-    return;
-  }
-  lines.push("- seatOrderRules:");
-  for (const rule of workflow.seatOrderRules) {
-    lines.push(
-      `  - afterRound=${rule.afterRound}: ${rule.policy.type}${rule.policy.type === "rotate" ? ` offset=${rule.policy.offset}` : ""}`
-    );
   }
 }
 
@@ -377,7 +352,7 @@ async function insertDebateAgent(input: {
 }
 
 async function ensureDefaultDebateWorkflow(debateId: string, now: string) {
-  // Ensure workflow.json exists so seat order and election timing are deterministic.
+  // Ensure workflow.json exists so debate flow is deterministic.
   try {
     await query(
       `
@@ -420,13 +395,17 @@ async function loadVisibleStrategy(strategyId: string, userId: string) {
 async function loadStrategyRolesMap(strategyId: string, roleIds: string[]) {
   try {
     const roleResult = await query<Record<string, unknown>>(
-      "select id, system_prompt from strategy_roles where strategy_id = $1 and id = any($2::uuid[])",
+      "select id, name, system_prompt from strategy_roles where strategy_id = $1 and id = any($2::uuid[])",
       [strategyId, roleIds]
     );
     return new Map(
       roleResult.rows.map((row) => [
         String(row.id),
-        { id: String(row.id), systemPrompt: (row.system_prompt as string | null) ?? null }
+        {
+          id: String(row.id),
+          name: (row.name as string | null) ?? null,
+          systemPrompt: (row.system_prompt as string | null) ?? null
+        }
       ])
     );
   } catch (error) {
@@ -517,6 +496,7 @@ async function copyStrategyDebateFiles(
 async function copyStrategyRoleFilesToDebateAgent(input: {
   roleId: string;
   debateAgentId: string;
+  roleName?: string | null;
   now: string;
 }) {
   const roleFiles = await query<{ path: string; content: string }>(
@@ -541,6 +521,20 @@ async function copyStrategyRoleFilesToDebateAgent(input: {
       [randomUUID(), input.debateAgentId, path, file.content ?? "", input.now]
     );
   }
+
+  await query(
+    `insert into debate_agent_files (id, debate_agent_id, path, content, created_at, updated_at)
+     values ($1,$2,$3,$4,$5,$5)
+     on conflict (debate_agent_id, path)
+     do update set content = excluded.content, updated_at = excluded.updated_at`,
+    [
+      randomUUID(),
+      input.debateAgentId,
+      "context/base_role.json",
+      JSON.stringify({ baseRole: input.roleName?.trim() || "Participant" }, null, 2),
+      input.now
+    ]
+  );
 }
 
 async function createDebateWithAgents(
@@ -653,6 +647,7 @@ async function createDebateWithStrategy(
       await copyStrategyRoleFilesToDebateAgent({
         roleId: binding.roleId,
         debateAgentId,
+        roleName: role?.name ?? null,
         now
       });
     }
@@ -1640,65 +1635,6 @@ export async function getDebateFileActivityDetail(debateId: string, entryId: str
   }
 }
 
-export async function reorderDebateSeats(id: string, input: unknown) {
-  const session = await requireSessionUser();
-  const body = input as { order?: unknown };
-  const order = Array.isArray(body?.order) ? body.order.map((x) => String(x)) : [];
-  if (order.length < 2) {
-    throw new AppError("VALIDATION_ERROR", 400, "order must include at least 2 debateAgentIds");
-  }
-
-  const debateRes = await query<{ status: string; current_turn: number }>(
-    "select status, current_turn from debates where id = $1 and user_id = $2",
-    [id, session.userId]
-  );
-  if ((debateRes.rowCount ?? 0) !== 1) {
-    throw new AppError("NOT_FOUND", 404, "Debate not found");
-  }
-  const status = String(debateRes.rows[0].status ?? "");
-  const currentTurn = Number(debateRes.rows[0].current_turn ?? 0);
-  if (!["pending", "paused"].includes(status)) {
-    throw new AppError("CONFLICT", 409, "Please pause the debate before reordering seats");
-  }
-
-  const agentsRes = await query<{ id: string; turn_order: number }>(
-    "select id, turn_order from debate_agents where debate_id = $1 order by turn_order asc",
-    [id]
-  );
-  const debateAgentIds = agentsRes.rows.map((row) => String(row.id));
-  const participantCount = debateAgentIds.length;
-  if (participantCount !== order.length) {
-    throw new AppError("VALIDATION_ERROR", 400, "order length must match participant count");
-  }
-
-  if (status === "paused" && participantCount > 0 && currentTurn % participantCount !== 0) {
-    throw new AppError("CONFLICT", 409, "Please reorder seats at a round boundary (after a full round ends)");
-  }
-
-  const expected = new Set(debateAgentIds);
-  for (const item of order) {
-    if (!expected.has(item)) {
-      throw new AppError("VALIDATION_ERROR", 400, "order includes invalid debateAgentId");
-    }
-  }
-  if (new Set(order).size !== order.length) {
-    throw new AppError("VALIDATION_ERROR", 400, "order contains duplicates");
-  }
-
-  // Two-phase update to avoid unique(debate_id, turn_order) conflicts.
-  const now = new Date().toISOString();
-  await query("update debate_agents set turn_order = turn_order + 1000 where debate_id = $1", [id]);
-  for (let index = 0; index < order.length; index += 1) {
-    await query(
-      "update debate_agents set turn_order = $3 where debate_id = $1 and id = $2",
-      [id, order[index], index + 1]
-    );
-  }
-  await query("update debates set updated_at = $2 where id = $1 and user_id = $3", [id, now, session.userId]);
-
-  return { id, order };
-}
-
 export async function startDebateSegment(id: string, input: unknown) {
   const session = await requireSessionUser();
   const body = input as { reason?: unknown };
@@ -1757,7 +1693,7 @@ export async function startDebateSegment(id: string, input: unknown) {
   let directive = "";
   try {
     const directiveRes = await query<{ content: string }>(
-      "select content from debate_files where debate_id = $1 and path = 'votes/directive.md' limit 1",
+      "select content from debate_files where debate_id = $1 and path = 'votes/decision.md' limit 1",
       [id]
     );
     directive = (directiveRes.rowCount ?? 0) === 1 ? String(directiveRes.rows[0]?.content ?? "") : "";

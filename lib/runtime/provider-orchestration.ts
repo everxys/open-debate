@@ -17,7 +17,7 @@ import {
 } from "@/lib/runtime/context-inline";
 import {
   loadLatestVote,
-  loadOfficialDirectiveInline,
+  loadOfficialDecisionInline,
   loadOpenVote,
   loadOpenVoteInline,
   loadQuestionDiffInline,
@@ -48,7 +48,6 @@ import {
   summarizeOptionText
 } from "@/lib/runtime/provider-shared";
 import {
-  getWorkflowElectionStartRound,
   getWorkflowOutputMaxTokens,
   isOfficialVotingAllowed,
   listMissingRequiredDeliverables,
@@ -95,18 +94,11 @@ type ProviderUsageSummary = {
   totalTokens: number | null;
 } | null;
 
-type ElectionBallotSummary = {
-  selections: Record<string, string>;
-  reason: string | null;
-  voterSeat: string | null;
-} | null;
-
 type ProviderExecutionResult = {
   raw: string;
   usage: ProviderUsageSummary;
   promptChars: number;
   estimatedPromptTokens: number | null;
-  electionBallotSummary: ElectionBallotSummary;
   diagnostics: {
     provider: string;
     model: string;
@@ -168,30 +160,6 @@ function createLiveStageUpdater(input: ProviderCallInput) {
       message,
       at: new Date().toISOString()
     });
-  };
-}
-
-function extractElectionBallotSummaryFromToolResult(result: unknown): ElectionBallotSummary {
-  if (!(result && typeof result === "object" && (result as { ok?: unknown }).ok)) return null;
-  const ballot = (result as { ballot?: unknown }).ballot;
-  const rawSelections =
-    ballot && typeof ballot === "object" && (ballot as { selections?: unknown }).selections
-      ? ((ballot as { selections?: unknown }).selections as Record<string, unknown>)
-      : {};
-  return {
-    selections: Object.fromEntries(
-      Object.entries(rawSelections)
-        .filter(([, value]) => typeof value === "string" && Boolean(String(value).trim()))
-        .map(([role, value]) => [String(role), String(value).trim()])
-    ),
-    reason:
-      ballot && typeof ballot === "object" && typeof (ballot as { reason?: unknown }).reason === "string"
-        ? String((ballot as { reason: string }).reason)
-        : null,
-    voterSeat:
-      ballot && typeof ballot === "object" && typeof (ballot as { voterSeat?: unknown }).voterSeat === "string"
-        ? String((ballot as { voterSeat: string }).voterSeat)
-        : null
   };
 }
 
@@ -303,7 +271,7 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
     debateId: input.debate.id
   });
   const openVoteInline = await loadOpenVoteInline(input.userId, input.debate.id, `${input.debateAgentId}:${openVote?.roundNumber ?? 0}`);
-  const directiveInline = await loadOfficialDirectiveInline(input.userId, input.debate.id);
+  const directiveInline = await loadOfficialDecisionInline(input.userId, input.debate.id);
   const announcementInline = await loadVoteAnnouncementInline(input.userId, input.debate.id);
   const questionDiffInline = await loadQuestionDiffInline(input.userId, input.debate.id);
   const implicitReadAudit: DebateFileActivityAudit = {
@@ -331,9 +299,8 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
     now: implicitReadAudit.now
   });
   const enableVotingTools = Boolean(openVoteInline) || isOfficialVotingAllowed(workflow, input.roundNumber);
-  const electionStartRound = getWorkflowElectionStartRound(workflow);
   const votingRuleInline = workflow?.enabled
-    ? `- Official voting: enabled by workflow.json. startRound=${electionStartRound}. roles=[${(workflow.election.roles ?? []).join(", ")}].`
+    ? "- Official voting: enabled by workflow.json for consolidation/custom decisions when needed."
     : null;
   const alreadyVoted =
     openVote && openVote.status === "open"
@@ -341,17 +308,11 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
       : false;
   const votingActionInline =
     openVote && openVote.status === "open" && !alreadyVoted
-      ? openVote.kind === "election"
-        ? [
-            "VOTING REQUIRED: An official election vote is open and you haven't voted yet.",
-            "- Call tool debate_vote_cast with { selections: { <role>: 'Seat-X', ... }, reason?: '...' }.",
-            "- Do not add any extra analysis, argument, or commentary in this election round."
-          ].join("\n")
-        : [
-            "VOTING REQUIRED: An official vote is open and you haven't voted yet.",
-            "- First: call tool debate_vote_cast with { choice: '<one option exactly>', reason?: '...' }.",
-            "- Then: you may add a short message (1-3 sentences)."
-          ].join("\n")
+      ? [
+          "VOTING REQUIRED: An official vote is open and you haven't voted yet.",
+          "- First: call tool debate_vote_cast with { choice: '<one option exactly>', reason?: '...' }.",
+          "- Then: you may add a short message (1-3 sentences)."
+        ].join("\n")
       : null;
 
   let relevantHistoryInline: string | null = null;
@@ -460,16 +421,6 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
       { key: "relevantHistory", priority: 0, category: "retrieved", preferredMaxChars: 12_000, content: relevantHistoryInline },
       { key: "recentTurns", priority: 0, category: "recent", preferredMaxChars: 6_000, content: recentTurnsInline },
       {
-        key: "electionSilence",
-        priority: 0,
-        category: "core",
-        preferredMaxChars: 800,
-        content:
-          openVote?.kind === "election"
-            ? "Election silence rule: this round is vote-only. Do not provide extra discussion content beyond casting your ballot."
-            : null
-      },
-      {
         key: "responseRules",
         priority: 0,
         category: "core",
@@ -562,7 +513,6 @@ async function executeProviderToolCall(input: {
   input.updateLiveStage("running_tools", `执行工具：${input.toolName}`);
 
   let result: unknown;
-  let electionBallotSummary: ElectionBallotSummary = null;
   const toolNow = new Date().toISOString();
   const toolPolicy = {
     workflow: input.context.workflow,
@@ -670,15 +620,11 @@ async function executeProviderToolCall(input: {
       participantCount: input.context.participantCount,
       roundNumber: input.context.roundNumber,
       title,
-      kind: kind === "election" ? "election" : kind === "finalization" ? "finalization" : "custom",
+      kind: kind === "finalization" ? "finalization" : "custom",
       prompt: promptText,
       options
     });
   } else if (input.toolName === "debate_vote_cast") {
-    const selections =
-      (input.rawArgs as { selections?: unknown }).selections && typeof (input.rawArgs as { selections?: unknown }).selections === "object"
-        ? ((input.rawArgs as { selections: Record<string, unknown> }).selections as Record<string, unknown>)
-        : undefined;
     const choice =
       typeof (input.rawArgs as { choice?: unknown }).choice === "string"
         ? String((input.rawArgs as { choice: string }).choice)
@@ -693,11 +639,9 @@ async function executeProviderToolCall(input: {
       participantCount: input.context.participantCount,
       debateAgentId: input.context.debateAgentId,
       voterName: input.context.agent.name,
-      selections,
       choice,
       reason
     });
-    electionBallotSummary = extractElectionBallotSummaryFromToolResult(result);
   } else if (input.toolName === "debate_vote_close") {
     result = await toolVoteClose({
       userId: input.context.userId,
@@ -715,7 +659,7 @@ async function executeProviderToolCall(input: {
       ? { role: "tool", tool_call_id: String(input.toolCallId ?? ""), content: serialized }
       : { type: "tool_result", tool_use_id: String(input.toolCallId ?? ""), content: serialized };
 
-  return { result, toolMessage, electionBallotSummary };
+  return { result, toolMessage };
 }
 
 async function runOpenAiProviderLoop(
@@ -724,7 +668,6 @@ async function runOpenAiProviderLoop(
   overrideSystemPrompt: string | null
 ): Promise<ProviderExecutionResult> {
   let totalToolCalls = 0;
-  let electionBallotSummary: ElectionBallotSummary = null;
   const tools = buildOpenAiTools({
     enableVoting: context.enableVotingTools,
     allowedOutputPaths: context.allowedOutputPaths
@@ -811,7 +754,6 @@ async function runOpenAiProviderLoop(
           usage: normalizeOpenAiUsage(noToolRetry?.usage) ?? usage,
           promptChars,
           estimatedPromptTokens,
-          electionBallotSummary,
           diagnostics: {
             provider: context.agent.provider,
             model: context.agent.model,
@@ -829,7 +771,6 @@ async function runOpenAiProviderLoop(
         usage,
         promptChars,
         estimatedPromptTokens,
-        electionBallotSummary,
         diagnostics: {
           provider: context.agent.provider,
           model: context.agent.model,
@@ -857,9 +798,6 @@ async function runOpenAiProviderLoop(
         context,
         updateLiveStage
       });
-      if (execution.electionBallotSummary) {
-        electionBallotSummary = execution.electionBallotSummary;
-      }
       messages.push(execution.toolMessage);
     }
   }
@@ -888,7 +826,6 @@ async function runOpenAiProviderLoop(
     usage,
     promptChars,
     estimatedPromptTokens,
-    electionBallotSummary,
     diagnostics: {
       provider: context.agent.provider,
       model: context.agent.model,
@@ -905,7 +842,6 @@ async function runAnthropicProviderLoop(
   overrideSystemPrompt: string | null
 ): Promise<ProviderExecutionResult> {
   let totalToolCalls = 0;
-  let electionBallotSummary: ElectionBallotSummary = null;
   const tools = buildAnthropicTools({
     enableVoting: context.enableVotingTools,
     allowedOutputPaths: context.allowedOutputPaths
@@ -967,7 +903,6 @@ async function runAnthropicProviderLoop(
         usage: normalizeAnthropicUsage(payload?.usage ?? null),
         promptChars,
         estimatedPromptTokens,
-        electionBallotSummary,
         diagnostics: {
           provider: context.agent.provider,
           model: context.agent.model,
@@ -991,9 +926,6 @@ async function runAnthropicProviderLoop(
         context,
         updateLiveStage
       });
-      if (execution.electionBallotSummary) {
-        electionBallotSummary = execution.electionBallotSummary;
-      }
       toolResults.push(execution.toolMessage);
     }
     messages.push({ role: "user", content: toolResults });
@@ -1028,7 +960,6 @@ async function runAnthropicProviderLoop(
     usage: normalizeAnthropicUsage(fallbackPayload?.usage ?? null),
     promptChars,
     estimatedPromptTokens,
-    electionBallotSummary,
     diagnostics: {
       provider: context.agent.provider,
       model: context.agent.model,
@@ -1070,7 +1001,6 @@ export async function callProvider(
       usage: null,
       promptChars: promptContext.prompt.length,
       estimatedPromptTokens,
-      electionBallotSummary: null,
       diagnostics: {
         provider: agent.provider,
         model: agent.model,

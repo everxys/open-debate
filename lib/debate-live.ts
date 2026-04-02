@@ -29,6 +29,8 @@ export type DebateSummaryJob = {
   turnNumber: number | null;
   roundNumber: number | null;
   message: string | null;
+  errorReason: string | null;
+  retryAt: string | null;
   updatedAt: string;
 };
 

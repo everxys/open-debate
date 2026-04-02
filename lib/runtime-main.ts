@@ -35,13 +35,13 @@ import {
   PROMPT_HARD_MAX_CHARS_ANTHROPIC,
   QUESTION_LATEST_DIFF_PATH,
   ROUND_SUMMARY_DIR,
-  SEATS_PENDING_REORDER_PATH,
   SHARED_FACTS_PATH,
+  SUMMARIZER_BACKLOG_PATH,
   TURN_SUMMARY_DIR,
   VOTE_ANNOUNCEMENT_PATH,
   VOTE_ANNOUNCEMENT_PREFIX,
-  VOTE_DIRECTIVE_JSON_PATH,
-  VOTE_DIRECTIVE_PATH,
+  VOTE_DECISION_JSON_PATH,
+  VOTE_DECISION_PATH,
   VOTE_OPEN_PATH,
   VOTE_RESULT_PREFIX,
   WORKFLOW_PATH
@@ -77,7 +77,7 @@ import {
   isFinalDebateOutputPath,
   loadDebatePhaseState,
   loadLatestVote,
-  loadOfficialDirectiveInline,
+  loadOfficialDecisionInline,
   loadOpenVote,
   loadOpenVoteInline,
   loadQuestionDiffInline,
@@ -139,13 +139,11 @@ import {
   getWorkflowEarliestFinalizationRound,
   getWorkflowEarliestFinalizationVoteRound,
   getWorkflowCompletionMode,
-  getWorkflowElectionStartRound,
   getWorkflowMinimumAnalysisRounds,
   getWorkflowOutputMaxTokens,
   hasWorkflowPhase,
   getWorkflowPhaseMinRounds,
   getWorkflowPhaseByKind,
-  isClosedElectionVotePassed,
   isOfficialVotingAllowed,
   listClosedOfficialVoteRounds,
   listMissingRequiredDeliverables,
@@ -159,7 +157,6 @@ import {
   requiresWorkflowFinalizationPhaseForCompletion,
   requiresWorkflowOutputsForCompletion,
   safeJsonParse,
-  shouldAutoOpenWorkflowElectionAtBoundary,
   withOptionalMaxTokens
 } from "@/lib/runtime/workflow-phase";
 
@@ -761,51 +758,83 @@ async function callWorkflowSummarizerMarkdown(input: {
 }) {
   const runtime = await loadWorkflowSummarizerAgent(input.userId, input.workflow);
   if (!runtime) return null;
-  const apiKey = decryptSecret(runtime.agent.apiKeyEncrypted);
-  const url = resolveChatUrl(runtime.agent);
-  const system = [buildBaseSystemPrompt(runtime.agent, null), input.systemTask, "Output only Markdown for humans; no tool calls."]
+  const summarizerRuntime = runtime;
+  const apiKey = decryptSecret(summarizerRuntime.agent.apiKeyEncrypted);
+  const url = resolveChatUrl(summarizerRuntime.agent);
+  const system = [buildBaseSystemPrompt(summarizerRuntime.agent, null), input.systemTask, "Output only Markdown for humans; no tool calls."]
     .join("\n\n")
     .trim();
-  if (runtime.agent.provider === "openai") {
-    const response = await openAiChatOnce({
-      url,
-      apiKey,
-      body: {
-        model: runtime.agent.model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: input.userPrompt }
-        ],
-        ...(input.maxTokens ? { max_tokens: input.maxTokens } : {})
-      }
+
+  async function executeOnce() {
+    if (summarizerRuntime.agent.provider === "openai") {
+      const response = await openAiChatOnce({
+        url,
+        apiKey,
+        body: {
+          model: summarizerRuntime.agent.model,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: input.userPrompt }
+          ],
+          ...(input.maxTokens ? { max_tokens: input.maxTokens } : {})
+        }
+      });
+      return String(response.content ?? "").trim() || null;
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: summarizerRuntime.agent.model,
+        max_tokens: input.maxTokens ?? 1000,
+        system,
+        messages: [{ role: "user", content: input.userPrompt }]
+      })
     });
-    return String(response.content ?? "").trim() || null;
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new AppError("AI_API_ERROR", 502, JSON.stringify(payload).slice(0, 400));
+    }
+    const blocks = (payload.content ?? []) as Array<Record<string, unknown>>;
+    return blocks
+      .filter((block) => block.type === "text")
+      .map((block) => String((block as { text?: unknown }).text ?? ""))
+      .join("\n")
+      .trim();
   }
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01"
-    },
-    body: JSON.stringify({
-      model: runtime.agent.model,
-      max_tokens: input.maxTokens ?? 1000,
-      system,
-      messages: [{ role: "user", content: input.userPrompt }]
-    })
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new AppError("AI_API_ERROR", 502, JSON.stringify(payload).slice(0, 400));
+  const retryDelaysMs = [800, 2000];
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      return await executeOnce();
+    } catch (error) {
+      lastError = error;
+      const details = describeRuntimeError(error);
+      const message = String(details.message ?? "");
+      const looksRateLimited =
+        message.includes("429") || message.toLowerCase().includes("rate limit") || message.toLowerCase().includes("too many requests");
+      const retryable = isRecoverableRuntimeInterruption(details) || looksRateLimited;
+      if (!retryable || attempt >= retryDelaysMs.length) {
+        throw error;
+      }
+      await logRuntimeEvent("warn", "summarizer request retrying", {
+        debateId: input.debateId,
+        provider: summarizerRuntime.agent.provider,
+        model: summarizerRuntime.agent.model,
+        attempt: attempt + 1,
+        nextDelayMs: retryDelaysMs[attempt],
+        error: details
+      });
+      await sleep(retryDelaysMs[attempt]);
+    }
   }
-  const blocks = (payload.content ?? []) as Array<Record<string, unknown>>;
-  return blocks
-    .filter((block) => block.type === "text")
-    .map((block) => String((block as { text?: unknown }).text ?? ""))
-    .join("\n")
-    .trim();
+  throw lastError ?? new AppError("RUNTIME_ERROR", 500, "summarizer request failed");
 }
 
 function buildDefaultTurnSummaryPrompt(input: {
@@ -904,6 +933,144 @@ function combineSummarizerPrompt(customPrompt: string | null | undefined, basePr
   return [`Summary instructions:\n${trimmed}`, basePrompt].join("\n\n---\n\n").trim();
 }
 
+type SummarizerBacklogJob =
+  | {
+      key: string;
+      kind: "turn_summary";
+      status: "pending";
+      createdAt: string;
+      updatedAt: string;
+      availableAt: string;
+      attemptCount: number;
+      lastError: string | null;
+      payload: {
+        userId: string;
+        debateId: string;
+        debateAgentId: string;
+        debateQuestion: string;
+        roundNumber: number;
+        turnNumber: number;
+        agentName: string;
+        content: string;
+        refreshFactsBoard: boolean;
+      };
+    }
+  | {
+      key: string;
+      kind: "round_summary";
+      status: "pending";
+      createdAt: string;
+      updatedAt: string;
+      availableAt: string;
+      attemptCount: number;
+      lastError: string | null;
+      payload: {
+        userId: string;
+        debateId: string;
+        debateAgentId: string;
+        debateQuestion: string;
+        endedRound: number;
+        participantCount: number;
+        refreshFactsBoard: boolean;
+      };
+    }
+  | {
+      key: string;
+      kind: "facts_board";
+      status: "pending";
+      createdAt: string;
+      updatedAt: string;
+      availableAt: string;
+      attemptCount: number;
+      lastError: string | null;
+      payload: {
+        userId: string;
+        debateId: string;
+        debateAgentId: string;
+        debateQuestion: string;
+        sourceLabel: string;
+        sourceSummary: string;
+        turnNumber: number | null;
+        roundNumber: number | null;
+      };
+    };
+
+function isSummarizerBacklogJob(value: unknown): value is SummarizerBacklogJob {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.key === "string" &&
+    (record.kind === "turn_summary" || record.kind === "round_summary" || record.kind === "facts_board") &&
+    record.status === "pending" &&
+    typeof record.createdAt === "string" &&
+    typeof record.updatedAt === "string" &&
+    typeof record.availableAt === "string" &&
+    typeof record.attemptCount === "number" &&
+    "payload" in record
+  );
+}
+
+async function loadSummarizerBacklog(userId: string, debateId: string) {
+  const raw = await readDebateFile(userId, debateId, SUMMARIZER_BACKLOG_PATH);
+  if (!raw?.trim()) return [] as SummarizerBacklogJob[];
+  const parsed = safeJsonParse<unknown>(raw);
+  if (!Array.isArray(parsed)) return [] as SummarizerBacklogJob[];
+  return parsed.filter(isSummarizerBacklogJob).sort((left, right) => left.availableAt.localeCompare(right.availableAt));
+}
+
+async function saveSummarizerBacklog(debateId: string, jobs: SummarizerBacklogJob[], now: string) {
+  if (jobs.length <= 0) {
+    await upsertDebateFile(debateId, SUMMARIZER_BACKLOG_PATH, "[]\n", now);
+    return;
+  }
+  await upsertDebateFile(debateId, SUMMARIZER_BACKLOG_PATH, `${JSON.stringify(jobs, null, 2)}\n`, now);
+}
+
+function getSummarizerBacklogDelayMs(attemptCount: number) {
+  if (attemptCount <= 1) return 15_000;
+  if (attemptCount <= 3) return 60_000;
+  return 5 * 60_000;
+}
+
+async function enqueueSummarizerBacklogJob(input: {
+  userId: string;
+  debateId: string;
+  now: string;
+  job: Omit<SummarizerBacklogJob, "status" | "createdAt" | "updatedAt" | "availableAt" | "attemptCount" | "lastError">;
+  errorMessage: string | null;
+}) {
+  const jobs = await loadSummarizerBacklog(input.userId, input.debateId);
+  const existingIndex = jobs.findIndex((job) => job.key === input.job.key);
+  const existing = existingIndex >= 0 ? jobs[existingIndex] : null;
+  const attemptCount = existing ? existing.attemptCount + 1 : 1;
+  const availableAt = new Date(Date.now() + getSummarizerBacklogDelayMs(attemptCount)).toISOString();
+  const nextJob: SummarizerBacklogJob = {
+    ...input.job,
+    status: "pending",
+    createdAt: existing?.createdAt ?? input.now,
+    updatedAt: input.now,
+    availableAt,
+    attemptCount,
+    lastError: input.errorMessage
+  } as SummarizerBacklogJob;
+  if (existingIndex >= 0) jobs.splice(existingIndex, 1, nextJob);
+  else jobs.push(nextJob);
+  await saveSummarizerBacklog(input.debateId, jobs, input.now);
+  return nextJob;
+}
+
+async function removeSummarizerBacklogJob(input: {
+  userId: string;
+  debateId: string;
+  key: string;
+  now: string;
+}) {
+  const jobs = await loadSummarizerBacklog(input.userId, input.debateId);
+  const next = jobs.filter((job) => job.key !== input.key);
+  if (next.length === jobs.length) return;
+  await saveSummarizerBacklog(input.debateId, next, input.now);
+}
+
 async function updateSummaryJob(
   debateId: string,
   job: {
@@ -912,8 +1079,10 @@ async function updateSummaryJob(
     label: string;
     turnNumber?: number | null;
     roundNumber?: number | null;
-    status: "running" | "failed" | "completed";
+    status: "pending" | "running" | "failed" | "completed";
     message: string | null;
+    errorReason?: string | null;
+    retryAt?: string | null;
   }
 ) {
   setDebateSummaryJob(debateId, {
@@ -923,7 +1092,9 @@ async function updateSummaryJob(
     turnNumber: job.turnNumber ?? null,
     roundNumber: job.roundNumber ?? null,
     status: job.status,
-    message: job.message
+    message: job.message,
+    errorReason: job.errorReason ?? null,
+    retryAt: job.retryAt ?? null
   });
   if (job.status === "completed") {
     clearDebateSummaryJob(debateId, job.key);
@@ -941,6 +1112,8 @@ export async function generateTurnSummary(input: {
   agentName: string;
   content: string;
   now: string;
+  refreshFactsBoard?: boolean;
+  backlogOnFailure?: boolean;
 }) {
   const summarizer = getWorkflowSummarizerConfig(input.workflow);
   if (!summarizer || !summarizer.perTurn) return { ok: false, skipped: true };
@@ -975,6 +1148,40 @@ export async function generateTurnSummary(input: {
       maxTokens: 900
     });
     if (!content) {
+      if (input.backlogOnFailure !== false) {
+        const queued = await enqueueSummarizerBacklogJob({
+          userId: input.userId,
+          debateId: input.debateId,
+          now: input.now,
+          job: {
+            key,
+            kind: "turn_summary",
+            payload: {
+              userId: input.userId,
+              debateId: input.debateId,
+              debateAgentId: input.debateAgentId,
+              debateQuestion: input.debateQuestion,
+              roundNumber: input.roundNumber,
+              turnNumber: input.turnNumber,
+              agentName: input.agentName,
+              content: input.content,
+              refreshFactsBoard: input.refreshFactsBoard !== false
+            }
+          },
+          errorMessage: "empty_summary"
+        });
+        await updateSummaryJob(input.debateId, {
+          key,
+          kind: "turn_summary",
+          label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
+          turnNumber: input.turnNumber,
+          roundNumber: input.roundNumber,
+          status: "pending",
+          message: `回摘要生成失败，已记待补任务（第 ${queued.attemptCount} 次）`,
+          errorReason: queued.lastError,
+          retryAt: queued.availableAt
+        });
+      } else {
       await updateSummaryJob(input.debateId, {
         key,
         kind: "turn_summary",
@@ -984,6 +1191,7 @@ export async function generateTurnSummary(input: {
         status: "failed",
         message: "回摘要生成失败"
       });
+      }
       return { ok: false, error: "empty_summary" };
     }
     const path = getTurnSummaryPath(input.workflow, input.roundNumber, input.turnNumber);
@@ -1024,16 +1232,52 @@ export async function generateTurnSummary(input: {
     });
     return { ok: true, path, content };
   } catch (error) {
-    await updateSummaryJob(input.debateId, {
-      key,
-      kind: "turn_summary",
-      label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
-      turnNumber: input.turnNumber,
-      roundNumber: input.roundNumber,
-      status: "failed",
-      message: "回摘要生成失败"
-    });
-    await logRuntimeEvent("warn", "turn summary generation failed", { debateId: input.debateId, error: describeRuntimeError(error) });
+    const details = describeRuntimeError(error);
+    if (input.backlogOnFailure !== false) {
+      const queued = await enqueueSummarizerBacklogJob({
+        userId: input.userId,
+        debateId: input.debateId,
+        now: input.now,
+        job: {
+          key,
+          kind: "turn_summary",
+          payload: {
+            userId: input.userId,
+            debateId: input.debateId,
+            debateAgentId: input.debateAgentId,
+            debateQuestion: input.debateQuestion,
+            roundNumber: input.roundNumber,
+            turnNumber: input.turnNumber,
+            agentName: input.agentName,
+            content: input.content,
+            refreshFactsBoard: input.refreshFactsBoard !== false
+          }
+        },
+        errorMessage: truncateErrorMessage(String(details.message ?? "turn_summary_failed"))
+      });
+      await updateSummaryJob(input.debateId, {
+        key,
+        kind: "turn_summary",
+        label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
+        turnNumber: input.turnNumber,
+        roundNumber: input.roundNumber,
+        status: "pending",
+        message: `回摘要生成失败，已记待补任务（第 ${queued.attemptCount} 次）`,
+        errorReason: queued.lastError,
+        retryAt: queued.availableAt
+      });
+    } else {
+      await updateSummaryJob(input.debateId, {
+        key,
+        kind: "turn_summary",
+        label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
+        turnNumber: input.turnNumber,
+        roundNumber: input.roundNumber,
+        status: "failed",
+        message: "回摘要生成失败"
+      });
+    }
+    await logRuntimeEvent("warn", "turn summary generation failed", { debateId: input.debateId, error: details });
     return { ok: false, error };
   }
 }
@@ -1089,6 +1333,7 @@ export async function refreshFactsBoardFromSummaries(input: {
   turnNumber?: number | null;
   roundNumber?: number | null;
   now: string;
+  backlogOnFailure?: boolean;
 }) {
   if (!ENABLE_DEBATE_MEMORY) return { ok: false, skipped: true };
   const summarizer = getWorkflowSummarizerConfig(input.workflow);
@@ -1125,6 +1370,39 @@ export async function refreshFactsBoardFromSummaries(input: {
       maxTokens: 1200
     });
     if (!content) {
+      if (input.backlogOnFailure !== false) {
+        const queued = await enqueueSummarizerBacklogJob({
+          userId: input.userId,
+          debateId: input.debateId,
+          now: input.now,
+          job: {
+            key,
+            kind: "facts_board",
+            payload: {
+              userId: input.userId,
+              debateId: input.debateId,
+              debateAgentId: input.debateAgentId,
+              debateQuestion: input.debateQuestion,
+              sourceLabel: input.sourceLabel,
+              sourceSummary: input.sourceSummary,
+              turnNumber: input.turnNumber ?? null,
+              roundNumber: input.roundNumber ?? null
+            }
+          },
+          errorMessage: "empty_facts_board"
+        });
+        await updateSummaryJob(input.debateId, {
+          key,
+          kind: "facts_board",
+          label: "结构化事实板",
+          turnNumber: input.turnNumber ?? null,
+          roundNumber: input.roundNumber ?? null,
+          status: "pending",
+          message: `事实板整理失败，已记待补任务（第 ${queued.attemptCount} 次）`,
+          errorReason: queued.lastError,
+          retryAt: queued.availableAt
+        });
+      } else {
       await updateSummaryJob(input.debateId, {
         key,
         kind: "facts_board",
@@ -1134,6 +1412,7 @@ export async function refreshFactsBoardFromSummaries(input: {
         status: "failed",
         message: "事实板整理失败"
       });
+      }
       return { ok: false, error: "empty_facts_board" };
     }
     await writeSummarizerDebateFile({
@@ -1173,16 +1452,51 @@ export async function refreshFactsBoardFromSummaries(input: {
     });
     return { ok: true, path: boardPath, content };
   } catch (error) {
-    await updateSummaryJob(input.debateId, {
-      key,
-      kind: "facts_board",
-      label: "结构化事实板",
-      turnNumber: input.turnNumber ?? null,
-      roundNumber: input.roundNumber ?? null,
-      status: "failed",
-      message: "事实板整理失败"
-    });
-    await logRuntimeEvent("warn", "facts board refresh failed", { debateId: input.debateId, error: describeRuntimeError(error) });
+    const details = describeRuntimeError(error);
+    if (input.backlogOnFailure !== false) {
+      const queued = await enqueueSummarizerBacklogJob({
+        userId: input.userId,
+        debateId: input.debateId,
+        now: input.now,
+        job: {
+          key,
+          kind: "facts_board",
+          payload: {
+            userId: input.userId,
+            debateId: input.debateId,
+            debateAgentId: input.debateAgentId,
+            debateQuestion: input.debateQuestion,
+            sourceLabel: input.sourceLabel,
+            sourceSummary: input.sourceSummary,
+            turnNumber: input.turnNumber ?? null,
+            roundNumber: input.roundNumber ?? null
+          }
+        },
+        errorMessage: truncateErrorMessage(String(details.message ?? "facts_board_failed"))
+      });
+      await updateSummaryJob(input.debateId, {
+        key,
+        kind: "facts_board",
+        label: "结构化事实板",
+        turnNumber: input.turnNumber ?? null,
+        roundNumber: input.roundNumber ?? null,
+        status: "pending",
+        message: `事实板整理失败，已记待补任务（第 ${queued.attemptCount} 次）`,
+        errorReason: queued.lastError,
+        retryAt: queued.availableAt
+      });
+    } else {
+      await updateSummaryJob(input.debateId, {
+        key,
+        kind: "facts_board",
+        label: "结构化事实板",
+        turnNumber: input.turnNumber ?? null,
+        roundNumber: input.roundNumber ?? null,
+        status: "failed",
+        message: "事实板整理失败"
+      });
+    }
+    await logRuntimeEvent("warn", "facts board refresh failed", { debateId: input.debateId, error: details });
     return { ok: false, error };
   }
 }
@@ -1358,58 +1672,6 @@ export function parseResponse(raw: string): {
   return { content: raw, structuredOutput: null, parseStatus: "ok" as const };
 }
 
-export function buildElectionVoteOnlyContent(input?: {
-  selections?: Record<string, string>;
-  reason?: string | null;
-  voterSeat?: string | null;
-}) {
-  const lines = ["## 选举投票", ""];
-  if (input?.voterSeat) {
-    lines.push(`投票席位：${input.voterSeat}`);
-    lines.push("");
-  }
-  const pairs = Object.entries(input?.selections ?? {}).map(([role, seat]) => `- ${role}: ${seat}`);
-  if (pairs.length > 0) {
-    lines.push("本席位已提交正式票型：");
-    lines.push(...pairs);
-  } else {
-    lines.push("本轮为角色选举投票轮。本席位仅完成投票，不发表额外意见。");
-  }
-  const reason = typeof input?.reason === "string" ? input.reason.trim() : "";
-  if (reason) {
-    lines.push("");
-    lines.push(`投票理由：${reason}`);
-  }
-  return lines.join("\n");
-}
-
-export function extractElectionBallotSummaryFromVote(
-  vote: OfficialVote | null,
-  debateAgentId: string
-): {
-  selections: Record<string, string>;
-  reason: string | null;
-  voterSeat: string | null;
-} | null {
-  if (!vote || vote.status !== "open" || vote.kind !== "election") return null;
-  const ballot =
-    (vote.ballots ?? []).find((item) => item && typeof item === "object" && item.debateAgentId === debateAgentId) ?? null;
-  if (!ballot) return null;
-  const rawSelections =
-    ballot && typeof ballot === "object" && "selections" in ballot && ballot.selections && typeof ballot.selections === "object"
-      ? (ballot.selections as Record<string, unknown>)
-      : {};
-  const selections = Object.fromEntries(
-    Object.entries(rawSelections)
-      .filter(([, value]) => typeof value === "string" && Boolean(String(value).trim()))
-      .map(([role, value]) => [String(role), String(value).trim()])
-  );
-  const reason = typeof ballot.reason === "string" ? ballot.reason : null;
-  const voterSeat = typeof ballot.voterSeat === "string" ? ballot.voterSeat : null;
-  if (Object.keys(selections).length <= 0 && !reason && !voterSeat) return null;
-  return { selections, reason, voterSeat };
-}
-
 export function appendWorkflowSummaryLines(lines: string[], workflow: NormalizedDebateWorkflow | null) {
   lines.push("## Rules (summary)");
   if (!workflow?.enabled) {
@@ -1417,30 +1679,21 @@ export function appendWorkflowSummaryLines(lines: string[], workflow: Normalized
     return;
   }
 
-  const hasElectionPhase = hasWorkflowPhase(workflow, "election");
   const hasFinalizationVotePhase = hasWorkflowPhase(workflow, "finalization_vote");
   const hasFinalizationPhase = hasWorkflowPhase(workflow, "finalization");
   lines.push(`- version: v${workflow.workflowVersion}`);
-  lines.push(`- election startRound: ${workflow.election.startRound}`);
   lines.push(
-    `- phase minRounds: analysis=${getWorkflowMinimumAnalysisRounds(workflow)}; election=${hasElectionPhase ? getWorkflowPhaseMinRounds(workflow, "election", 0) : "n/a"}; deliberation=${getWorkflowPhaseMinRounds(workflow, "deliberation", 0)}; finalization_vote=${hasFinalizationVotePhase ? getWorkflowPhaseMinRounds(workflow, "finalization_vote", 0) : "n/a"}; finalization=${hasFinalizationPhase ? getWorkflowPhaseMinRounds(workflow, "finalization", 0) : "n/a"}`
+    `- phase minRounds: analysis=${getWorkflowMinimumAnalysisRounds(workflow)}; deliberation=${getWorkflowPhaseMinRounds(workflow, "deliberation", 0)}; finalization_vote=${hasFinalizationVotePhase ? getWorkflowPhaseMinRounds(workflow, "finalization_vote", 0) : "n/a"}; finalization=${hasFinalizationPhase ? getWorkflowPhaseMinRounds(workflow, "finalization", 0) : "n/a"}`
   );
   lines.push(
     `- phase earliest rounds: deliberation@${getWorkflowEarliestDeliberationRound(workflow)}; finalization_vote@${hasFinalizationVotePhase ? getWorkflowEarliestFinalizationVoteRound(workflow) : "n/a"}; finalization@${hasFinalizationPhase ? getWorkflowEarliestFinalizationRound(workflow) : "n/a"}; completion@${getWorkflowEarliestCompletionRound(workflow)}`
   );
   lines.push(
-    `- election phase: configured=${hasElectionPhase ? "yes" : "no"}; roles=${workflow.election.roles.length ? workflow.election.roles.join("/") : "(none)"}; startRound=${workflow.phaseMachine.transitionRules.election.startRound}; autoOpen=${workflow.phaseMachine.transitionRules.election.autoOpen ? "yes" : "no"}; reopenUntilPassed=${workflow.phaseMachine.transitionRules.election.reopenUntilPassed ? "yes" : "no"}; discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.election.discussionRoundsBetweenVotes}`
-  );
-  lines.push(
     `- consolidation controls: votePhase=${hasFinalizationVotePhase ? "yes" : "no"}; consolidationPhase=${hasFinalizationPhase ? "yes" : "no"}; autoOpenVote=${workflow.phaseMachine.transitionRules.finalization.autoOpenVote ? "yes" : "no"}; requireUnanimousVote=${workflow.phaseMachine.transitionRules.finalization.requireUnanimousVote ? "yes" : "no"}; reopenUntilPassed=${workflow.phaseMachine.transitionRules.finalization.reopenUntilPassed ? "yes" : "no"}; discussionRoundsBetweenVotes=${workflow.phaseMachine.transitionRules.finalization.discussionRoundsBetweenVotes}; requirePhaseForCompletion=${workflow.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "yes" : "no"}`
   );
-  lines.push(`- election roles: ${workflow.election.roles.length ? workflow.election.roles.join(" / ") : "(none)"}`);
   lines.push(
     `- output budget: discussion=${workflow.promptPolicies.outputBudget.discussionMaxTokens ?? "unlimited"}; writing=${workflow.promptPolicies.outputBudget.writingMaxTokens ?? "unlimited"}`
   );
-  const first = workflow.election.speakingOrder.firstRole;
-  const last = workflow.election.speakingOrder.lastRole;
-  lines.push(`- speakingOrder (after election, next-round boundary): first=${first ?? "(none)"}; last=${last ?? "(none)"}`);
   if (workflow.deliverables.requiredFiles.length > 0) {
     lines.push("- required deliverables:");
     for (const file of workflow.deliverables.requiredFiles) {
@@ -1468,16 +1721,6 @@ export function appendWorkflowSummaryLines(lines: string[], workflow: Normalized
     );
     lines.push(
       `- contextAccess unlockAfterPhase: ${workflow.contextAccess.unlockAfterPhase.length ? workflow.contextAccess.unlockAfterPhase.map((rule) => `[${rule.scope}] ${rule.pathPrefix} @ ${rule.phaseKind}`).join(" / ") : "(none)"}`
-    );
-  }
-  if (workflow.seatOrderRules.length === 0) {
-    lines.push("- seatOrderRules: (none)");
-    return;
-  }
-  lines.push("- seatOrderRules:");
-  for (const rule of workflow.seatOrderRules) {
-    lines.push(
-      `  - afterRound=${rule.afterRound}: ${rule.policy.type}${rule.policy.type === "rotate" ? ` offset=${rule.policy.offset}` : ""}`
     );
   }
 }
@@ -1676,7 +1919,7 @@ function buildSharedFolderDirectoryLines(rows: Array<{ path: string; content: st
     if (folder === "final") return "最终交付文件，完成判定通常会看这里。";
     if (folder === "outputs") return "其他共享输出文件。";
     if (folder === "facts") return "结构化事实板与共享工作板。";
-    if (folder === "votes") return "官方投票状态、指令和历史结果。";
+    if (folder === "votes") return "官方投票状态、结论和历史结果。";
     if (folder === "question") return "题目差异和问题变更记录。";
     if (folder === "context") return "运行时上下文、窗口和检查点。";
     return "共享文件夹。";
@@ -2108,8 +2351,7 @@ export async function loadDebateParticipantsInline(userId: string, debateId: str
     );
     return [
       "Seats (read-only):",
-      ...lines,
-      "- NOTE: Seat numbers are positions and may change at round boundaries when workflow seatOrderRules applies."
+      ...lines
     ].join("\n");
   } catch {
     return null;
@@ -2126,7 +2368,6 @@ export function buildWorkflowPhaseInline(input: {
   const isLightweightWorkflow =
     input.workflow?.enabled &&
     input.workflow.completion.mode === "consensus_only" &&
-    input.workflow.election.roles.length === 0 &&
     input.workflow.deliverables.requiredFiles.length === 0 &&
     !input.workflow.ideaBank.rawIdeaBankPath &&
     !Object.values(input.workflow.ideaBank.derivedFiles).some(Boolean) &&
@@ -2206,12 +2447,12 @@ export function buildWorkflowOpeningInline(input: {
 
 export async function loadWorkflowIdeaBankInline(input: {
   workflow: NormalizedDebateWorkflow | null;
-  phaseKind: "analysis" | "election" | "deliberation" | "finalization_vote" | "finalization" | null;
+  phaseKind: "analysis" | "deliberation" | "finalization_vote" | "finalization" | null;
   userId: string;
   debateId: string;
 }) {
   if (!input.workflow?.enabled || !input.phaseKind) return null;
-  if (input.phaseKind === "analysis" || input.phaseKind === "election") return null;
+  if (input.phaseKind === "analysis") return null;
 
   const lines: string[] = ["Idea bank routing (IMPORTANT):"];
   const rawPath = input.workflow.ideaBank.rawIdeaBankPath;
@@ -2277,111 +2518,6 @@ export function rotateOrder<T>(items: T[], offset: number) {
   const k = ((offset % n) + n) % n;
   if (k === 0) return items.slice();
   return [...items.slice(k), ...items.slice(0, k)];
-}
-
-export async function maybeCreateWorkflowSeatReorder(input: {
-  userId: string;
-  debateId: string;
-  participantCount: number;
-  currentTurn: number;
-}) {
-  if (input.participantCount <= 0) return false;
-  if (input.currentTurn % input.participantCount !== 0) return false;
-
-  const completedRounds = Math.floor(input.currentTurn / input.participantCount);
-  if (completedRounds <= 0) return false;
-
-  const workflow = await loadDebateWorkflow(input.userId, input.debateId);
-  if (!workflow?.enabled) return false;
-  const rule = workflow.seatOrderRules.find((r) => r.afterRound === completedRounds) ?? null;
-  if (!rule) return false;
-
-  const existingRaw = await readDebateFile(input.userId, input.debateId, SEATS_PENDING_REORDER_PATH);
-  if (existingRaw) {
-    const existing = safeJsonParse<{ status?: unknown }>(existingRaw);
-    if (existing && existing.status !== "applied") return false;
-  }
-
-  const ids = await query<{ id: string }>(
-    "select id from debate_agents where debate_id = $1 order by turn_order asc",
-    [input.debateId]
-  );
-  const currentOrder = ids.rows.map((row) => String(row.id));
-  if (currentOrder.length !== input.participantCount) return false;
-  if (new Set(currentOrder).size !== currentOrder.length) return false;
-
-  let nextOrder = currentOrder.slice();
-  if (rule.policy.type === "reverse") {
-    nextOrder = currentOrder.slice().reverse();
-  } else if (rule.policy.type === "rotate") {
-    nextOrder = rotateOrder(currentOrder, rule.policy.offset);
-  }
-
-  if (nextOrder.length !== currentOrder.length) return false;
-  if (new Set(nextOrder).size !== nextOrder.length) return false;
-
-  const now = new Date().toISOString();
-  await upsertDebateFile(
-    input.debateId,
-    SEATS_PENDING_REORDER_PATH,
-    JSON.stringify(
-      {
-        order: nextOrder,
-        at: now,
-        reason: "workflow_seatOrderRules",
-        rule: { afterRound: rule.afterRound, policy: rule.policy }
-      },
-      null,
-      2
-    ),
-    now
-  );
-  return true;
-}
-
-export async function maybeApplyPendingSeatReorder(input: {
-  userId: string;
-  debateId: string;
-  participantCount: number;
-  currentTurn: number;
-}) {
-  if (input.participantCount <= 0) return false;
-  if (input.currentTurn % input.participantCount !== 0) return false;
-
-  const raw = await readDebateFile(input.userId, input.debateId, SEATS_PENDING_REORDER_PATH);
-  if (!raw) return false;
-  const parsed = safeJsonParse<{ order?: unknown; status?: unknown }>(raw);
-  if (!parsed || parsed.status === "applied") return false;
-  const order = Array.isArray(parsed.order) ? parsed.order.map((x) => String(x)) : [];
-  if (order.length !== input.participantCount) return false;
-  if (new Set(order).size !== order.length) return false;
-
-  // Verify order set matches existing debate_agents.
-  const ids = await query<{ id: string }>(
-    "select id from debate_agents where debate_id = $1 order by turn_order asc",
-    [input.debateId]
-  );
-  const expected = new Set(ids.rows.map((row) => String(row.id)));
-  for (const item of order) {
-    if (!expected.has(item)) return false;
-  }
-
-  const now = new Date().toISOString();
-  await query("update debate_agents set turn_order = turn_order + 1000 where debate_id = $1", [input.debateId]);
-  for (let index = 0; index < order.length; index += 1) {
-    await query("update debate_agents set turn_order = $3 where debate_id = $1 and id = $2", [
-      input.debateId,
-      order[index],
-      index + 1
-    ]);
-  }
-  await upsertDebateFile(
-    input.debateId,
-    SEATS_PENDING_REORDER_PATH,
-    JSON.stringify({ status: "applied", appliedAt: now, order }, null, 2),
-    now
-  );
-  return true;
 }
 
 export async function toolListFiles(
@@ -3468,7 +3604,7 @@ export async function startAutoSegmentAtBoundary(input: {
 
   const workflowRaw = await readDebateFile(input.userId, input.debateId, WORKFLOW_PATH);
   const workflow = safeParseWorkflowJson(workflowRaw);
-  const directive = (await readDebateFile(input.userId, input.debateId, VOTE_DIRECTIVE_PATH)) ?? "";
+  const officialDecision = (await readDebateFile(input.userId, input.debateId, VOTE_DECISION_PATH)) ?? "";
 
   const lines: string[] = [];
   lines.push(`# Segment Checkpoint · ${seg}`);
@@ -3490,10 +3626,10 @@ export async function startAutoSegmentAtBoundary(input: {
   lines.push("");
   appendWorkflowSummaryLines(lines, workflow);
 
-  if (directive.trim()) {
+  if (officialDecision.trim()) {
     lines.push("");
-    lines.push("## Latest official directive");
-    lines.push(directive.trim());
+    lines.push("## Latest official decision");
+    lines.push(officialDecision.trim());
   }
 
   lines.push("");
@@ -3582,7 +3718,7 @@ export async function startAutoSegmentForDebateAgentAtBoundary(input: {
 
   const workflowRaw = await readDebateFile(input.userId, input.debateId, WORKFLOW_PATH);
   const workflow = safeParseWorkflowJson(workflowRaw);
-  const directive = (await readDebateFile(input.userId, input.debateId, VOTE_DIRECTIVE_PATH)) ?? "";
+  const officialDecision = (await readDebateFile(input.userId, input.debateId, VOTE_DECISION_PATH)) ?? "";
 
   const lines: string[] = [];
   lines.push(`# Segment Checkpoint · ${seg}`);
@@ -3604,10 +3740,10 @@ export async function startAutoSegmentForDebateAgentAtBoundary(input: {
   lines.push("");
   appendWorkflowSummaryLines(lines, workflow);
 
-  if (directive.trim()) {
+  if (officialDecision.trim()) {
     lines.push("");
-    lines.push("## Latest official directive");
-    lines.push(directive.trim());
+    lines.push("## Latest official decision");
+    lines.push(officialDecision.trim());
   }
 
   lines.push("");
@@ -3686,57 +3822,6 @@ export async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
   const workflowEnabled = Boolean(workflow?.enabled);
   if (!workflowEnabled) return { ok: true, opened: false };
 
-  const openRoundNumber = input.endedRound + 1;
-  const shouldOpenElection = shouldAutoOpenWorkflowElectionAtBoundary(workflow, input.endedRound);
-  const electionRules = workflow?.phaseMachine.transitionRules.election;
-  const electionRoles = workflowEnabled ? (workflow?.election.roles ?? []) : [];
-
-  // Prefer election vote when workflow is enabled so appointed roles and speakingOrder can be applied.
-  if (shouldOpenElection && workflowEnabled && electionRoles.length > 0) {
-    const result = await toolVoteOpen({
-      userId: input.userId,
-      debateId: input.debateId,
-      participantCount: input.participantCount,
-      roundNumber: openRoundNumber,
-      title: `第 ${openRoundNumber} 轮 · 角色选举`,
-      kind: "election",
-      bypassStartRound: false,
-      meta: { forcedOpen: true, reason: `after_round_${input.endedRound}`, attempt: 1 }
-    });
-    return { ok: true, opened: Boolean((result as { ok?: unknown }).ok), result };
-  }
-
-  if (
-    workflowEnabled &&
-    electionRules?.autoOpen &&
-    electionRules?.reopenUntilPassed &&
-    latestVote?.status === "closed" &&
-    latestVote.kind === "election" &&
-    !isClosedElectionVotePassed(latestVote)
-  ) {
-    const discussionRoundsBetweenVotes = Math.max(1, Math.floor(Number(electionRules.discussionRoundsBetweenVotes) || 1));
-    const targetVoteRound = latestVote.roundNumber + discussionRoundsBetweenVotes + 1;
-    if (openRoundNumber === targetVoteRound) {
-      const attempt = Math.max(1, Math.floor(Number(latestVote.meta?.attempt) || Number((latestVote.result as { attempt?: unknown }).attempt) || 1)) + 1;
-      const result = await toolVoteOpen({
-        userId: input.userId,
-        debateId: input.debateId,
-        participantCount: input.participantCount,
-        roundNumber: openRoundNumber,
-        title: `第 ${openRoundNumber} 轮 · 角色选举复投`,
-        kind: "election",
-        bypassStartRound: false,
-        meta: {
-          forcedOpen: true,
-          reason: `retry_after_round_${input.endedRound}`,
-          attempt,
-          previousFailedRound: latestVote.roundNumber
-        }
-      });
-      return { ok: true, opened: Boolean((result as { ok?: unknown }).ok), result };
-    }
-  }
-
   const nextRoundNumber = input.endedRound + 1;
   const finalizationRules = workflow?.phaseMachine.transitionRules.finalization;
   const finalizationEntryRound = getWorkflowEarliestFinalizationVoteRound(workflow);
@@ -3796,128 +3881,18 @@ export async function maybeAutoOpenVoteAtBoundaryUsingWorkflow(input: {
     }
   }
 
-  if (!shouldOpenElection) {
-    return { ok: true, opened: false };
-  }
-
-  const startTurn = 1;
-  const endTurn = input.endedRound * input.participantCount;
-
-  const turns = await query<{
-    turn_number: number;
-    seat_number: number | null;
-    content: string;
-    structured_output: unknown;
-    speaker_name: string | null;
-  }>(
-    `
-      select t.turn_number,
-             t.seat_number,
-             t.content,
-             t.structured_output,
-             coalesce(da.display_name, a.name) as speaker_name
-        from debate_turns t
-        join ai_agents a on a.id = t.ai_agent_id
-        left join debate_agents da on da.id = t.debate_agent_id
-        join debates d on d.id = t.debate_id
-       where t.debate_id = $1
-         and d.user_id = $2
-         and t.turn_number between $3 and $4
-       order by t.turn_number asc
-       limit 200
-    `,
-    [input.debateId, input.userId, startTurn, endTurn]
-  );
-
-  const bySeat = new Map<
-    string,
-    {
-      seat: string;
-      name: string;
-      proposals: string[];
-      lastContent: string;
-    }
-  >();
-  for (const row of turns.rows) {
-    const turnNumber = Number(row.turn_number);
-    const seatNumber =
-      row.seat_number === null
-        ? ((turnNumber - 1) % input.participantCount) + 1
-        : Number(row.seat_number);
-    const seat = `Seat-${seatNumber}`;
-    const speakerName = String(row.speaker_name ?? "Unknown");
-
-    const structured = row.structured_output && typeof row.structured_output === "object" ? (row.structured_output as any) : null;
-    const proposed = typeof structured?.proposed_solution === "string" ? structured.proposed_solution : "";
-
-    const info = bySeat.get(seat) ?? { seat, name: speakerName, proposals: [], lastContent: "" };
-    if (!info.name) info.name = speakerName;
-    const proposal = summarizeOptionText(proposed, 220);
-    if (proposal) info.proposals.push(proposal);
-    info.lastContent = String(row.content ?? "");
-    bySeat.set(seat, info);
-  }
-
-  const options: string[] = [];
-  for (let seatNumber = 1; seatNumber <= input.participantCount; seatNumber += 1) {
-    const seat = `Seat-${seatNumber}`;
-    const info = bySeat.get(seat) ?? { seat, name: "Unknown", proposals: [], lastContent: "" };
-    const chosen = info.proposals.length > 0 ? info.proposals[info.proposals.length - 1] : "";
-    const fallback = summarizeOptionText(info.lastContent, 220);
-    const text = chosen || fallback;
-    if (!text) continue;
-    options.push(`${seat}（${info.name}）：${text}`);
-  }
-
-  const minOptionsConfigured = workflow?.voting.custom.minOptions;
-  const maxOptionsConfigured = workflow?.voting.custom.maxOptions;
-  const minOptions =
-    typeof minOptionsConfigured === "number" && Number.isFinite(minOptionsConfigured) && minOptionsConfigured >= 1
-      ? Math.floor(minOptionsConfigured)
-      : 2;
-  const maxOptions =
-    typeof maxOptionsConfigured === "number" && Number.isFinite(maxOptionsConfigured) && maxOptionsConfigured >= 1
-      ? Math.floor(maxOptionsConfigured)
-      : input.participantCount;
-  const minOptionsSafe = Math.max(2, minOptions);
-  const effectiveMax = Math.min(input.participantCount, Math.max(minOptionsSafe, maxOptions));
-
-  const uniqueOptions = Array.from(new Set(options)).slice(0, effectiveMax);
-  if (uniqueOptions.length < 2) {
-    // Fallback: always provide at least two options so voting phase can proceed.
-    uniqueOptions.length = 0;
-    for (let i = 1; i <= effectiveMax; i += 1) {
-      uniqueOptions.push(`Seat-${i}：支持 Seat-${i} 的方案（未提取到明确摘要）`);
-    }
-  }
-
-  const result = await toolVoteOpen({
-    userId: input.userId,
-    debateId: input.debateId,
-    participantCount: input.participantCount,
-    roundNumber: openRoundNumber,
-    title: `第 ${input.endedRound} 轮后 · 方案投票`,
-    kind: "custom",
-    prompt: `请基于前 ${input.endedRound} 轮（Round 1-${input.endedRound}）各席位的表现与方案演进，投票选出你认为最好的方案作为官方结论。`,
-    options: uniqueOptions,
-    allowWithoutWorkflow: false,
-    bypassStartRound: false,
-    meta: { forcedOpen: true, reason: `after_round_${input.endedRound}` }
-  });
-
-  return { ok: true, opened: Boolean((result as { ok?: unknown }).ok), result };
+  return { ok: true, opened: false };
 }
 
 export function buildFallbackVoteAnnouncement(input: {
   debateQuestion: string;
   participantsInline: string | null;
   closed: ClosedOfficialVote;
-  directiveJson: Record<string, unknown> | null;
+  decisionJson: Record<string, unknown> | null;
 }) {
   const kind = input.closed.kind;
   const result = input.closed.result ?? {};
   const winner = typeof (result as any)?.winner === "string" ? String((result as any).winner) : null;
-  const winners = (result as any)?.winners && typeof (result as any).winners === "object" ? (result as any).winners : null;
   const passed = Boolean((result as any)?.passed);
   return [
     `# 第 ${input.closed.roundNumber} 轮 · 投票结果公告`,
@@ -3931,15 +3906,13 @@ export function buildFallbackVoteAnnouncement(input: {
         ? "- Consolidation vote passed"
         : "- Consolidation vote not passed"
       : kind === "custom"
-      ? winner
-        ? `- Winner：${winner}`
-        : "- Winner：未能选出"
-      : winners
-        ? "（见官方指令：角色确认）"
-        : "（未提供 winners）",
+        ? winner
+          ? `- Winner：${winner}`
+          : "- Winner：未能选出"
+        : "- 结果：未提供",
     "",
     ...(input.participantsInline ? [input.participantsInline, ""] : []),
-    ...(input.directiveJson ? ["## 指令数据（JSON）", "```json", JSON.stringify(input.directiveJson, null, 2), "```", ""] : []),
+    ...(input.decisionJson ? ["## 结论数据（JSON）", "```json", JSON.stringify(input.decisionJson, null, 2), "```", ""] : []),
     "请各席位在下一轮以官方投票结果为准继续推进。"
   ].join("\n").trim();
 }
@@ -3959,42 +3932,24 @@ export async function maybeGenerateVoteAnnouncementWithSeat1(input: {
 
   const workflow = await loadDebateWorkflow(input.userId, input.debate.id);
   const participantsInline = await loadDebateParticipantsInline(input.userId, input.debate.id);
-  const directiveJsonRaw = await readDebateFile(input.userId, input.debate.id, VOTE_DIRECTIVE_JSON_PATH);
-  const directiveJson = directiveJsonRaw ? (safeJsonParse<Record<string, unknown>>(directiveJsonRaw) ?? null) : null;
+  const decisionJsonRaw = await readDebateFile(input.userId, input.debate.id, VOTE_DECISION_JSON_PATH);
+  const decisionJson = decisionJsonRaw ? (safeJsonParse<Record<string, unknown>>(decisionJsonRaw) ?? null) : null;
 
   let announcerSeatNumber = 1;
   let announcerRoleLabel: string | null = null;
   let fallbackAnnouncerSeatNumber = 1;
-  let fallbackAnnouncerRoleLabel: string | null = null;
   if (workflow?.enabled) {
     const announcer = workflow.voting.announcement.announcer;
     const fallback = workflow.voting.announcement.fallback;
     if (fallback.type === "seat") {
       fallbackAnnouncerSeatNumber = Math.max(1, Math.floor(Number(fallback.seat) || 1));
-      fallbackAnnouncerRoleLabel = null;
-    } else if (fallback.type === "role") {
-      fallbackAnnouncerRoleLabel = String(fallback.role ?? "").trim() || null;
     }
     if (announcer.type === "seat") {
       announcerSeatNumber = Math.max(1, Math.floor(Number(announcer.seat) || 1));
     } else if (announcer.type === "role") {
       const role = String(announcer.role ?? "").trim();
       if (role) {
-        const appointmentsRaw =
-          directiveJson && typeof (directiveJson as any).appointments === "object" ? ((directiveJson as any).appointments as Record<string, unknown>) : null;
-        const seat =
-          appointmentsRaw &&
-          appointmentsRaw[role] &&
-          typeof appointmentsRaw[role] === "object" &&
-          typeof (appointmentsRaw[role] as any).seat === "string"
-            ? String((appointmentsRaw[role] as any).seat)
-            : "";
-        const match = seat.match(/^Seat-([0-9]{1,6})$/);
-        const n = match ? Number(match[1]) : Number.NaN;
-        if (Number.isFinite(n) && n >= 1) {
-          announcerSeatNumber = Math.floor(n);
-          announcerRoleLabel = role;
-        }
+        announcerRoleLabel = role;
       }
     }
   }
@@ -4016,19 +3971,6 @@ export async function maybeGenerateVoteAnnouncementWithSeat1(input: {
 
   let announcerRow: Record<string, unknown> | null = (announcer.rowCount ?? 0) === 1 ? announcer.rows[0] : null;
   if (!announcerRow) {
-    if (fallbackAnnouncerRoleLabel && directiveJson && typeof (directiveJson as any).appointments === "object") {
-      const appointmentsRaw = (directiveJson as any).appointments as Record<string, unknown>;
-      const seat =
-        appointmentsRaw[fallbackAnnouncerRoleLabel] &&
-        typeof appointmentsRaw[fallbackAnnouncerRoleLabel] === "object" &&
-        typeof (appointmentsRaw[fallbackAnnouncerRoleLabel] as any).seat === "string"
-          ? String((appointmentsRaw[fallbackAnnouncerRoleLabel] as any).seat)
-          : "";
-      const match = seat.match(/^Seat-([0-9]{1,6})$/);
-      const n = match ? Number(match[1]) : Number.NaN;
-      if (Number.isFinite(n) && n >= 1) fallbackAnnouncerSeatNumber = Math.floor(n);
-    }
-
     const fallbackSeat = await query<Record<string, unknown>>(
       `
         select da.id as debate_agent_id,
@@ -4047,7 +3989,6 @@ export async function maybeGenerateVoteAnnouncementWithSeat1(input: {
       return { ok: false, generated: false, error: `Seat-${fallbackAnnouncerSeatNumber} agent not found.` };
     }
     announcerSeatNumber = fallbackAnnouncerSeatNumber;
-    announcerRoleLabel = fallbackAnnouncerRoleLabel;
     announcerRow = fallbackSeat.rows[0];
   }
 
@@ -4105,11 +4046,11 @@ export async function maybeGenerateVoteAnnouncementWithSeat1(input: {
     participantsInline ? `\n\n${participantsInline}` : "",
     proposalInline ? `\n\n${proposalInline}` : "",
     `\n\nOfficial vote closed (JSON):\n\`\`\`json\n${JSON.stringify(input.closed, null, 2)}\n\`\`\``,
-    directiveJson ? `\n\nOfficial directive data (JSON):\n\`\`\`json\n${JSON.stringify(directiveJson, null, 2)}\n\`\`\`` : "",
+    decisionJson ? `\n\nOfficial decision data (JSON):\n\`\`\`json\n${JSON.stringify(decisionJson, null, 2)}\n\`\`\`` : "",
     "\n\nWrite a concise announcement that all seats must follow:",
     "- Title line with round number",
-    "- 3-7 bullet points: winner/appointments, turnout, and next step",
-    "- End with one short directive sentence starting with: OFFICIAL DIRECTIVE:"
+    "- 3-7 bullet points: winner, turnout, and next step",
+    "- End with one short decision sentence starting with: OFFICIAL DECISION:"
   ]
     .join("")
     .trim();
@@ -4160,7 +4101,7 @@ export async function maybeGenerateVoteAnnouncementWithSeat1(input: {
       debateQuestion: input.debate.question,
       participantsInline,
       closed: input.closed,
-      directiveJson
+      decisionJson
     });
 
   await upsertDebateFile(input.debate.id, roundPath, finalContent.trim() + "\n", now);
@@ -4176,6 +4117,8 @@ export async function generateRoundSummary(input: {
   participantCount: number;
   endedRound: number;
   now: string;
+  refreshFactsBoard?: boolean;
+  backlogOnFailure?: boolean;
 }) {
   const summarizer = getWorkflowSummarizerConfig(input.workflow);
   if (!summarizer || !summarizer.perRound) return { ok: false, skipped: true };
@@ -4199,14 +4142,46 @@ export async function generateRoundSummary(input: {
       participantCount: input.participantCount
     });
     if (turnSummaries.length <= 0) {
-      await updateSummaryJob(input.debate.id, {
-        key,
-        kind: "round_summary",
-        label: `第 ${input.endedRound} 轮摘要`,
-        roundNumber: input.endedRound,
-        status: "failed",
-        message: "缺少回摘要，无法生成轮摘要"
-      });
+      if (input.backlogOnFailure !== false) {
+        const queued = await enqueueSummarizerBacklogJob({
+          userId: input.userId,
+          debateId: input.debate.id,
+          now: input.now,
+          job: {
+            key,
+            kind: "round_summary",
+            payload: {
+              userId: input.userId,
+              debateId: input.debate.id,
+              debateAgentId: input.debateAgentId,
+              debateQuestion: input.debate.question,
+              endedRound: input.endedRound,
+              participantCount: input.participantCount,
+              refreshFactsBoard: input.refreshFactsBoard !== false
+            }
+          },
+          errorMessage: "missing_turn_summaries"
+        });
+        await updateSummaryJob(input.debate.id, {
+          key,
+          kind: "round_summary",
+          label: `第 ${input.endedRound} 轮摘要`,
+          roundNumber: input.endedRound,
+          status: "pending",
+          message: `缺少回摘要，已记待补任务（第 ${queued.attemptCount} 次）`,
+          errorReason: queued.lastError,
+          retryAt: queued.availableAt
+        });
+      } else {
+        await updateSummaryJob(input.debate.id, {
+          key,
+          kind: "round_summary",
+          label: `第 ${input.endedRound} 轮摘要`,
+          roundNumber: input.endedRound,
+          status: "failed",
+          message: "缺少回摘要，无法生成轮摘要"
+        });
+      }
       return { ok: false, error: "missing_turn_summaries" };
     }
     const content = await callWorkflowSummarizerMarkdown({
@@ -4225,14 +4200,46 @@ export async function generateRoundSummary(input: {
       maxTokens: 1600
     });
     if (!content) {
-      await updateSummaryJob(input.debate.id, {
-        key,
-        kind: "round_summary",
-        label: `第 ${input.endedRound} 轮摘要`,
-        roundNumber: input.endedRound,
-        status: "failed",
-        message: "轮摘要生成失败"
-      });
+      if (input.backlogOnFailure !== false) {
+        const queued = await enqueueSummarizerBacklogJob({
+          userId: input.userId,
+          debateId: input.debate.id,
+          now: input.now,
+          job: {
+            key,
+            kind: "round_summary",
+            payload: {
+              userId: input.userId,
+              debateId: input.debate.id,
+              debateAgentId: input.debateAgentId,
+              debateQuestion: input.debate.question,
+              endedRound: input.endedRound,
+              participantCount: input.participantCount,
+              refreshFactsBoard: input.refreshFactsBoard !== false
+            }
+          },
+          errorMessage: "empty_round_summary"
+        });
+        await updateSummaryJob(input.debate.id, {
+          key,
+          kind: "round_summary",
+          label: `第 ${input.endedRound} 轮摘要`,
+          roundNumber: input.endedRound,
+          status: "pending",
+          message: `轮摘要生成失败，已记待补任务（第 ${queued.attemptCount} 次）`,
+          errorReason: queued.lastError,
+          retryAt: queued.availableAt
+        });
+      } else {
+        await updateSummaryJob(input.debate.id, {
+          key,
+          kind: "round_summary",
+          label: `第 ${input.endedRound} 轮摘要`,
+          roundNumber: input.endedRound,
+          status: "failed",
+          message: "轮摘要生成失败"
+        });
+      }
       return { ok: false, error: "empty_round_summary" };
     }
     const roundPath = getRoundSummaryPath(input.workflow, input.endedRound);
@@ -4270,17 +4277,215 @@ export async function generateRoundSummary(input: {
     });
     return { ok: true, path: roundPath, content };
   } catch (error) {
-    await updateSummaryJob(input.debate.id, {
-      key,
-      kind: "round_summary",
-      label: `第 ${input.endedRound} 轮摘要`,
-      roundNumber: input.endedRound,
-      status: "failed",
-      message: "轮摘要生成失败"
-    });
-    await logRuntimeEvent("warn", "round summary generation failed", { error: describeRuntimeError(error) });
+    const details = describeRuntimeError(error);
+    if (input.backlogOnFailure !== false) {
+      const queued = await enqueueSummarizerBacklogJob({
+        userId: input.userId,
+        debateId: input.debate.id,
+        now: input.now,
+        job: {
+          key,
+          kind: "round_summary",
+          payload: {
+            userId: input.userId,
+            debateId: input.debate.id,
+            debateAgentId: input.debateAgentId,
+            debateQuestion: input.debate.question,
+            endedRound: input.endedRound,
+            participantCount: input.participantCount,
+            refreshFactsBoard: input.refreshFactsBoard !== false
+          }
+        },
+        errorMessage: truncateErrorMessage(String(details.message ?? "round_summary_failed"))
+      });
+      await updateSummaryJob(input.debate.id, {
+        key,
+        kind: "round_summary",
+        label: `第 ${input.endedRound} 轮摘要`,
+        roundNumber: input.endedRound,
+        status: "pending",
+        message: `轮摘要生成失败，已记待补任务（第 ${queued.attemptCount} 次）`,
+        errorReason: queued.lastError,
+        retryAt: queued.availableAt
+      });
+    } else {
+      await updateSummaryJob(input.debate.id, {
+        key,
+        kind: "round_summary",
+        label: `第 ${input.endedRound} 轮摘要`,
+        roundNumber: input.endedRound,
+        status: "failed",
+        message: "轮摘要生成失败"
+      });
+    }
+    await logRuntimeEvent("warn", "round summary generation failed", { error: details });
     return { ok: false, error };
   }
+}
+
+async function drainSummarizerBacklog(input: {
+  userId: string;
+  debateId: string;
+  debateQuestion: string;
+  workflow: NormalizedDebateWorkflow | null;
+  now: string;
+  limit?: number;
+}) {
+  if (!getWorkflowSummarizerConfig(input.workflow)) return { processed: 0, remaining: 0 };
+  const jobs = await loadSummarizerBacklog(input.userId, input.debateId);
+  if (jobs.length <= 0) return { processed: 0, remaining: 0 };
+  const nowMs = Date.parse(input.now);
+  const ready = jobs.filter((job) => {
+    const availableAtMs = Date.parse(job.availableAt);
+    return !Number.isFinite(availableAtMs) || availableAtMs <= nowMs;
+  });
+  if (ready.length <= 0) return { processed: 0, remaining: jobs.length };
+
+  const limit = Math.max(1, input.limit ?? 3);
+  let processed = 0;
+  for (const job of ready.slice(0, limit)) {
+    if (job.kind === "turn_summary") {
+      const result = await generateTurnSummary({
+        ...job.payload,
+        workflow: input.workflow,
+        now: input.now,
+        backlogOnFailure: false,
+        refreshFactsBoard: job.payload.refreshFactsBoard
+      });
+      if (result.ok) {
+        await removeSummarizerBacklogJob({
+          userId: input.userId,
+          debateId: input.debateId,
+          key: job.key,
+          now: input.now
+        });
+        if (job.payload.refreshFactsBoard && result.content) {
+          await refreshFactsBoardFromSummaries({
+            userId: input.userId,
+            debateId: input.debateId,
+            debateAgentId: job.payload.debateAgentId,
+            debateQuestion: job.payload.debateQuestion,
+            workflow: input.workflow,
+            sourceLabel: `turn-${job.payload.turnNumber}`,
+            sourceSummary: result.content,
+            turnNumber: job.payload.turnNumber,
+            roundNumber: job.payload.roundNumber,
+            now: input.now
+          });
+        }
+      } else if (!result.skipped) {
+        await enqueueSummarizerBacklogJob({
+          userId: input.userId,
+          debateId: input.debateId,
+          now: input.now,
+          job: {
+            key: job.key,
+            kind: "turn_summary",
+            payload: job.payload
+          },
+          errorMessage:
+            typeof result.error === "string"
+              ? result.error
+              : truncateErrorMessage(String(describeRuntimeError(result.error).message ?? "turn_summary_failed"))
+        });
+      }
+      processed += 1;
+      continue;
+    }
+
+    if (job.kind === "round_summary") {
+      const result = await generateRoundSummary({
+        userId: input.userId,
+        debate: { id: input.debateId, question: job.payload.debateQuestion },
+        debateAgentId: job.payload.debateAgentId,
+        workflow: input.workflow,
+        participantCount: job.payload.participantCount,
+        endedRound: job.payload.endedRound,
+        now: input.now,
+        backlogOnFailure: false,
+        refreshFactsBoard: job.payload.refreshFactsBoard
+      });
+      if (result.ok) {
+        await removeSummarizerBacklogJob({
+          userId: input.userId,
+          debateId: input.debateId,
+          key: job.key,
+          now: input.now
+        });
+        if (job.payload.refreshFactsBoard && result.content) {
+          await refreshFactsBoardFromSummaries({
+            userId: input.userId,
+            debateId: input.debateId,
+            debateAgentId: job.payload.debateAgentId,
+            debateQuestion: job.payload.debateQuestion,
+            workflow: input.workflow,
+            sourceLabel: `round-${job.payload.endedRound}`,
+            sourceSummary: result.content,
+            roundNumber: job.payload.endedRound,
+            now: input.now
+          });
+        }
+      } else if (!result.skipped) {
+        await enqueueSummarizerBacklogJob({
+          userId: input.userId,
+          debateId: input.debateId,
+          now: input.now,
+          job: {
+            key: job.key,
+            kind: "round_summary",
+            payload: job.payload
+          },
+          errorMessage:
+            typeof result.error === "string"
+              ? result.error
+              : truncateErrorMessage(String(describeRuntimeError(result.error).message ?? "round_summary_failed"))
+        });
+      }
+      processed += 1;
+      continue;
+    }
+
+    const result = await refreshFactsBoardFromSummaries({
+      userId: input.userId,
+      debateId: input.debateId,
+      debateAgentId: job.payload.debateAgentId,
+      debateQuestion: job.payload.debateQuestion,
+      workflow: input.workflow,
+      sourceLabel: job.payload.sourceLabel,
+      sourceSummary: job.payload.sourceSummary,
+      turnNumber: job.payload.turnNumber,
+      roundNumber: job.payload.roundNumber,
+      now: input.now,
+      backlogOnFailure: false
+    });
+    if (result.ok) {
+      await removeSummarizerBacklogJob({
+        userId: input.userId,
+        debateId: input.debateId,
+        key: job.key,
+        now: input.now
+      });
+    } else if (!result.skipped) {
+      await enqueueSummarizerBacklogJob({
+        userId: input.userId,
+        debateId: input.debateId,
+        now: input.now,
+        job: {
+          key: job.key,
+          kind: "facts_board",
+          payload: job.payload
+        },
+        errorMessage:
+          typeof result.error === "string"
+            ? result.error
+            : truncateErrorMessage(String(describeRuntimeError(result.error).message ?? "facts_board_failed"))
+      });
+    }
+    processed += 1;
+  }
+
+  const remaining = (await loadSummarizerBacklog(input.userId, input.debateId)).length;
+  return { processed, remaining };
 }
 
 export async function runDebate(id: string, userId: string) {
@@ -4340,41 +4545,22 @@ export async function runDebate(id: string, userId: string) {
         throw new AppError("VALIDATION_ERROR", 400, "Debate requires at least 2 agents");
       }
 
-      const workflowReorderCreated = await maybeCreateWorkflowSeatReorder({
-        userId,
-        debateId: id,
-        participantCount,
-        currentTurn: debate.currentTurn
-      });
-      if (workflowReorderCreated) {
-        emitDebateLiveEvent(id, {
-          type: "status",
-          debateId: id,
-          message: "讨论规则：已生成下一轮席位顺序调整",
-          at: new Date().toISOString()
-        });
-      }
-
-      const reorderApplied = await maybeApplyPendingSeatReorder({
-        userId,
-        debateId: id,
-        participantCount,
-        currentTurn: debate.currentTurn
-      });
-      if (reorderApplied) {
-        emitDebateLiveEvent(id, {
-          type: "status",
-          debateId: id,
-          message: "已应用席位顺序调整（下一轮生效）",
-          at: new Date().toISOString()
-        });
-        participantRows = await query<Record<string, unknown>>(
-          "select * from debate_agents where debate_id = $1 order by turn_order asc",
-          [id]
-        );
-      }
-
       const workflowBeforeTurn = await loadDebateWorkflow(userId, id);
+      try {
+        await drainSummarizerBacklog({
+          userId,
+          debateId: id,
+          debateQuestion: debate.question,
+          workflow: workflowBeforeTurn,
+          now: new Date().toISOString(),
+          limit: 3
+        });
+      } catch (error) {
+        await logRuntimeEvent("warn", "summarizer backlog drain failed", {
+          debateId: id,
+          error: describeRuntimeError(error)
+        });
+      }
       const openVoteBeforeTurn = await loadOpenVote(userId, id);
       const latestVoteBeforeTurn = await loadLatestVote(userId, id);
       const closedVoteRoundsBeforeTurn = await listClosedOfficialVoteRounds(userId, id);
@@ -4489,13 +4675,6 @@ export async function runDebate(id: string, userId: string) {
             toolCallsCount: number;
           }
         | null = null;
-      let electionBallotSummary:
-        | {
-            selections: Record<string, string>;
-            reason: string | null;
-            voterSeat: string | null;
-          }
-        | null = null;
       let retryCount = 0;
       const messageNumber = debate.currentTurn + 1;
       const roundNumber = actualRoundNumber;
@@ -4521,16 +4700,6 @@ export async function runDebate(id: string, userId: string) {
           promptChars =
             typeof (result as { promptChars?: unknown }).promptChars === "number"
               ? Number((result as { promptChars: number }).promptChars)
-              : null;
-          electionBallotSummary =
-            result && typeof result === "object" && "electionBallotSummary" in result
-              ? ((result as {
-                  electionBallotSummary?: {
-                    selections: Record<string, string>;
-                    reason: string | null;
-                    voterSeat: string | null;
-                  } | null;
-                }).electionBallotSummary ?? null)
               : null;
           generationDiagnostics =
             result && typeof result === "object" && "diagnostics" in result
@@ -4564,18 +4733,7 @@ export async function runDebate(id: string, userId: string) {
         stage: "parsing"
       });
       const parsed = parseResponse(raw);
-      const persistedElectionBallotSummary =
-        openVoteBeforeTurn?.status === "open" && openVoteBeforeTurn.kind === "election"
-          ? electionBallotSummary ?? extractElectionBallotSummaryFromVote(await loadOpenVote(userId, id), String(currentParticipant.id))
-          : null;
-      const persistedResponse =
-        openVoteBeforeTurn?.status === "open" && openVoteBeforeTurn.kind === "election"
-          ? {
-              ...parsed,
-              content: buildElectionVoteOnlyContent(persistedElectionBallotSummary ?? undefined),
-              structuredOutput: null as StructuredOutput | null
-            }
-          : parsed;
+      const persistedResponse = parsed;
       emitDebateLiveEvent(id, {
         type: "status",
         debateId: id,
@@ -4673,8 +4831,7 @@ export async function runDebate(id: string, userId: string) {
             persistedChars: persistedResponse.content.length,
             parseStatus: persistedResponse.parseStatus,
             structuredOutput: Boolean(persistedResponse.structuredOutput),
-            voteOnlyOverride:
-              Boolean(openVoteBeforeTurn?.status === "open" && openVoteBeforeTurn.kind === "election")
+            voteOnlyOverride: false
           }
         });
       } catch (error) {
@@ -4803,7 +4960,8 @@ export async function runDebate(id: string, userId: string) {
           turnNumber: messageNumber,
           agentName: eventAgentName,
           content: persistedResponse.content,
-          now: createdAt
+          now: createdAt,
+          refreshFactsBoard: debate.enableSharedFacts
         });
         if (debate.enableSharedFacts && turnSummary.ok && turnSummary.content) {
           await refreshFactsBoardFromSummaries({
@@ -4854,9 +5012,7 @@ export async function runDebate(id: string, userId: string) {
       const endedRound = mapSpeechRoundIndexToActualRound(endedSpeechRoundIndex, closedVoteRoundsBeforeTurn);
       const openVoteBeforeUpdate = await loadOpenVote(userId, id);
       const latestVoteBeforeUpdate = await loadLatestVote(userId, id);
-      const mustKeepRunningForVote =
-        Boolean(openVoteBeforeUpdate) ||
-        Boolean(workflow?.enabled) && isBoundary && shouldAutoOpenWorkflowElectionAtBoundary(workflow, endedRound);
+      const mustKeepRunningForVote = Boolean(openVoteBeforeUpdate);
       const finalizationPhase = resolveCurrentWorkflowPhase({
         workflow,
         roundNumber: endedRound + 1,
@@ -4983,7 +5139,8 @@ export async function runDebate(id: string, userId: string) {
               workflow,
               participantCount,
               endedRound,
-              now: createdAt
+              now: createdAt,
+              refreshFactsBoard: debate.enableSharedFacts
             });
           } catch (error) {
             await logRuntimeEvent("warn", "round summary failed", { debateId: id, error: describeRuntimeError(error) });
@@ -5012,6 +5169,22 @@ export async function runDebate(id: string, userId: string) {
                 error: describeRuntimeError(error)
               });
             }
+          }
+
+          try {
+            await drainSummarizerBacklog({
+              userId,
+              debateId: id,
+              debateQuestion: debate.question,
+              workflow,
+              now: createdAt,
+              limit: 6
+            });
+          } catch (error) {
+            await logRuntimeEvent("warn", "summarizer backlog drain failed after boundary", {
+              debateId: id,
+              error: describeRuntimeError(error)
+            });
           }
 
           try {

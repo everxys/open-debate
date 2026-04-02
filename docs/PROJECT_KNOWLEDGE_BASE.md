@@ -140,13 +140,13 @@ while debate.status == running:
 - 审计：每次共享文件读写会进入 `debate_fil_activity_logs`
 
 6. 工作流与官方投票
-- `workflow.json` 定义 phase、选举、席位顺序、收束条件、必交付文件
+- `workflow.json` 定义固定角色席位下的 phase、收束条件、必交付文件、总结器和上下文访问规则
 - 官方投票状态保存在 `votes/open.json`
 - 封票后产出：
   - `votes/round-<n>.json`
   - `votes/round-<n>.md`
-  - `votes/directive.md/json`
-- 角色类型不是 DB 字段，而是从“最近一次成功 election 结果”反推出任意角色名；具体职责以 `workflow.rolesMeta` 为准
+  - `votes/decision.md/json`
+- 平台不再使用任命后角色；每个席位只保留固定基础角色，具体职责以策略里的 system prompt 和 `workflow.rolesMeta` 为准
 
 魔法数字/硬编码：
 - Session 7 天

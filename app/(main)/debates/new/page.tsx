@@ -86,6 +86,9 @@ type PromptPreviewDialogState =
       value: string;
     };
 
+const QUESTION_HISTORY_STORAGE_KEY = "open-debate:new-debate-question-history";
+const QUESTION_HISTORY_LIMIT = 12;
+
 const initialForm = {
   question: "",
   maxTurns: 10,
@@ -97,6 +100,25 @@ function summarizePrompt(value: string) {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (!normalized) return "未配置";
   return normalized.length > 120 ? `${normalized.slice(0, 120)}...` : normalized;
+}
+
+function summarizeQuestionHistoryItem(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return "空白问题";
+  return normalized.length > 80 ? `${normalized.slice(0, 80)}...` : normalized;
+}
+
+function assignAgentsEvenly(rows: BindingRow[], agentIds: string[]) {
+  if (rows.length === 0 || agentIds.length === 0) return rows;
+  return rows.map((row, index) => ({
+    ...row,
+    agentId: agentIds[index % agentIds.length] ?? ""
+  }));
+}
+
+function pickRandomAgentId(agentIds: string[]) {
+  if (agentIds.length === 0) return "";
+  return agentIds[Math.floor(Math.random() * agentIds.length)] ?? "";
 }
 
 export default function NewDebatePage() {
@@ -119,6 +141,8 @@ export default function NewDebatePage() {
   const [bindingRows, setBindingRows] = useState<BindingRow[]>([]);
   const [summaryAgentId, setSummaryAgentId] = useState("");
   const [promptPreviewDialog, setPromptPreviewDialog] = useState<PromptPreviewDialogState>(null);
+  const [questionHistory, setQuestionHistory] = useState<string[]>([]);
+  const [questionHistoryOpen, setQuestionHistoryOpen] = useState(false);
 
   function newRowId() {
     if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
@@ -279,10 +303,59 @@ export default function NewDebatePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(QUESTION_HISTORY_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      setQuestionHistory(
+        parsed
+          .filter((item): item is string => typeof item === "string")
+          .map((item) => item.trim())
+          .filter(Boolean)
+          .slice(0, QUESTION_HISTORY_LIMIT)
+      );
+    } catch {
+      // ignore invalid local history
+    }
+  }, []);
+
   function toggleAgent(id: string) {
     setSelectedAgentIds((current) =>
       current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
     );
+  }
+
+  function applyFairStrategyBinding() {
+    const enabled = bindingRows.filter((row) => row.enabled);
+    if (enabled.length === 0) {
+      showToast("error", "没有可分配的启用席位");
+      return;
+    }
+    if (agents.length === 0) {
+      showToast("error", "还没有可用的 AI 配置");
+      return;
+    }
+
+    const assigned = assignAgentsEvenly(enabled, agents.map((agent) => agent.id));
+    const byRowId = new Map(assigned.map((row) => [row.rowId, row.agentId]));
+    setBindingRows((current) =>
+      current.map((row) => (byRowId.has(row.rowId) ? { ...row, agentId: byRowId.get(row.rowId) ?? "" } : row))
+    );
+    showToast("success", `已均匀分配 ${agents.length} 台 AI 到 ${enabled.length} 个启用席位`);
+  }
+
+  function assignRandomSummaryAgent() {
+    if (agents.length === 0) {
+      showToast("error", "还没有可用的 AI 配置");
+      return;
+    }
+    const nextId = pickRandomAgentId(agents.map((agent) => agent.id));
+    setSummaryAgentId(nextId);
+    const picked = agents.find((agent) => agent.id === nextId);
+    showToast("success", picked ? `已为总结器随机选择：${picked.name}` : "已为总结器随机选择一台 AI");
   }
 
   const rolesById = useMemo(() => {
@@ -340,6 +413,16 @@ export default function NewDebatePage() {
         return;
       }
 
+      const trimmedQuestion = form.question.trim();
+      if (typeof window !== "undefined" && trimmedQuestion) {
+        const nextHistory = [trimmedQuestion, ...questionHistory.filter((item) => item !== trimmedQuestion)].slice(
+          0,
+          QUESTION_HISTORY_LIMIT
+        );
+        setQuestionHistory(nextHistory);
+        window.localStorage.setItem(QUESTION_HISTORY_STORAGE_KEY, JSON.stringify(nextHistory));
+      }
+
       showToast("success", "创建成功");
       router.push(`/debates/${payload.data?.id}`);
     } finally {
@@ -388,6 +471,7 @@ export default function NewDebatePage() {
             <textarea
               value={form.question}
               onChange={(event) => setForm({ ...form, question: event.target.value })}
+              onFocus={() => setQuestionHistoryOpen(true)}
               placeholder="请输入辩论问题（至少 10 个字）。如果策略启用了点子库，请只写作品目标、世界前提和最高原则，不要把 100+ 点子再塞进这里。"
               maxLength={50_000}
               style={{ height: "60vh", resize: "none", overflowY: "auto" }}
@@ -489,14 +573,71 @@ export default function NewDebatePage() {
               放大
             </button>
           </div>
+          <div style={{ position: "relative" }}>
             <textarea
-            value={form.question}
-            onChange={(event) => setForm({ ...form, question: event.target.value })}
-            placeholder="请输入辩论问题（至少 10 个字）。如果策略启用了点子库，请只写作品目标、世界前提和最高原则，不要把 100+ 点子再塞进这里。"
-            maxLength={50_000}
-            rows={7}
-            style={{ height: 180, maxHeight: 180, overflowY: "auto", resize: "none" }}
-          />
+              value={form.question}
+              onChange={(event) => setForm({ ...form, question: event.target.value })}
+              onFocus={() => setQuestionHistoryOpen(true)}
+              onBlur={() => window.setTimeout(() => setQuestionHistoryOpen(false), 120)}
+              placeholder="请输入辩论问题（至少 10 个字）。如果策略启用了点子库，请只写作品目标、世界前提和最高原则，不要把 100+ 点子再塞进这里。"
+              maxLength={50_000}
+              rows={7}
+              style={{ height: 180, maxHeight: 180, overflowY: "auto", resize: "none" }}
+            />
+            {questionHistoryOpen && questionHistory.length > 0 ? (
+              <div
+                className="panel stack"
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 6px)",
+                  left: 0,
+                  right: 0,
+                  zIndex: 20,
+                  maxHeight: 240,
+                  overflowY: "auto",
+                  gap: 8
+                }}
+              >
+                <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                  <strong style={{ fontSize: 13 }}>最近填写过的问题</strong>
+                  <button
+                    className="btn btn-muted"
+                    type="button"
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      setQuestionHistory([]);
+                      if (typeof window !== "undefined") {
+                        window.localStorage.removeItem(QUESTION_HISTORY_STORAGE_KEY);
+                      }
+                    }}
+                  >
+                    清空
+                  </button>
+                </div>
+                {questionHistory.map((item, index) => (
+                  <button
+                    key={`${index}-${item.slice(0, 20)}`}
+                    className="btn btn-muted"
+                    type="button"
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      setForm((current) => ({ ...current, question: item }));
+                      setQuestionHistoryOpen(false);
+                    }}
+                    style={{
+                      justifyContent: "flex-start",
+                      textAlign: "left",
+                      whiteSpace: "normal",
+                      lineHeight: 1.5
+                    }}
+                    title={item}
+                  >
+                    {summarizeQuestionHistoryItem(item)}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <span className="muted">支持长文本，输入框会固定高度并滚动</span>
             <span className="muted">
@@ -712,16 +853,26 @@ export default function NewDebatePage() {
                 <label style={{ fontWeight: 600 }}>
                   策略角色映射（已选 {enabledRows.length}）
                 </label>
-                <span className="muted">
-                  至少选择 2 个角色；同一个 AI 配置可以重复绑定（会作为多个席位发言）
-                  {hasDuplicateStrategyAgentIds ? " · 当前存在重复绑定" : ""}
-                </span>
+                <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                  <button className="btn" type="button" onClick={applyFairStrategyBinding}>
+                    均匀分配 AI
+                  </button>
+                  <span className="muted">
+                    至少选择 2 个角色；同一个 AI 配置可以重复绑定（会作为多个席位发言）
+                    {hasDuplicateStrategyAgentIds ? " · 当前存在重复绑定" : ""}
+                  </span>
+                </div>
               </div>
             {workflowSummarizer?.enabled ? (
               <div className="panel stack">
-                <div>
-                  <strong>总结器 AI 绑定</strong>
-                  <div className="muted">这台 AI 只负责回摘要、轮摘要和事实板整理，不参与正式发言和投票。</div>
+                <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <strong>总结器 AI 绑定</strong>
+                    <div className="muted">这台 AI 只负责回摘要、轮摘要和事实板整理，不参与正式发言和投票。</div>
+                  </div>
+                  <button className="btn" type="button" onClick={assignRandomSummaryAgent}>
+                    随机 AI
+                  </button>
                 </div>
                 <select value={summaryAgentId} onChange={(event) => setSummaryAgentId(event.target.value)} style={{ flex: 1 }}>
                   <option value="">选择一台总结器 AI</option>
