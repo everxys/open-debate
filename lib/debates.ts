@@ -1848,7 +1848,10 @@ export async function startDebate(id: string) {
           and da.debate_id = $1
           and (
             lower(replace(f.path, '\\\\', '/')) like 'debate/%'
-            or lower(replace(f.path, '\\\\', '/')) like 'context/%'
+            or (
+              lower(replace(f.path, '\\\\', '/')) like 'context/%'
+              and lower(replace(f.path, '\\\\', '/')) <> 'context/base_role.json'
+            )
             or lower(replace(f.path, '\\\\', '/')) like 'facts/%'
             or lower(replace(f.path, '\\\\', '/')) like 'votes/%'
             or lower(replace(f.path, '\\\\', '/')) like 'question/%'

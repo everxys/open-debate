@@ -225,6 +225,7 @@ export default function StrategyDetailPage() {
   const [selectedRoleIds, setSelectedRoleIds] = useState<Set<string>>(() => new Set());
   const roleSelectionAnchorIndexRef = useRef<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSavingAll, setIsSavingAll] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDuplicatingRole, setIsDuplicatingRole] = useState(false);
   const [isFavoriting, setIsFavoriting] = useState(false);
@@ -643,7 +644,7 @@ export default function StrategyDetailPage() {
     }
   }
 
-  async function save() {
+  async function save(options?: { silent?: boolean }) {
     if (!id || !canSave || isSaving) return;
     setIsSaving(true);
     try {
@@ -664,10 +665,11 @@ export default function StrategyDetailPage() {
       const payload = await readPayload(response);
       if (!response.ok) {
         showToast("error", payload.error?.message ?? "保存失败");
-        return;
+        return false;
       }
-      showToast("success", "已保存");
+      if (!options?.silent) showToast("success", "已保存");
       await load();
+      return true;
     } finally {
       setIsSaving(false);
     }
@@ -714,7 +716,7 @@ export default function StrategyDetailPage() {
     setWorkflowPromptDialog(null);
   }
 
-  async function saveWorkflowPhasePrompts() {
+  async function saveWorkflowPhasePrompts(options?: { silent?: boolean }) {
     if (!id || !detail?.canEdit || workflowPhasePromptsSaving) return;
     setWorkflowPhasePromptsSaving(true);
     try {
@@ -731,7 +733,7 @@ export default function StrategyDetailPage() {
       const payload = await readPayload(response);
       if (!response.ok) {
         showToast("error", payload.error?.message ?? "保存阶段注入提示词失败");
-        return;
+        return false;
       }
       const phases = Array.isArray(payload.data?.phases) ? payload.data.phases : [];
       setWorkflowPhasePrompts(
@@ -760,7 +762,8 @@ export default function StrategyDetailPage() {
           }
         };
       });
-      showToast("success", "已保存阶段注入提示词");
+      if (!options?.silent) showToast("success", "已保存阶段注入提示词");
+      return true;
     } finally {
       setWorkflowPhasePromptsSaving(false);
     }
@@ -812,11 +815,11 @@ export default function StrategyDetailPage() {
     }));
   }
 
-  async function saveWorkflowContextAccess() {
+  async function saveWorkflowContextAccess(options?: { silent?: boolean }) {
     if (!id || !detail?.canEdit || workflowContextAccessSaving) return;
     if (!workflowConfig) {
       showToast("error", "workflow 配置尚未加载完成");
-      return;
+      return false;
     }
 
     setWorkflowContextAccessSaving(true);
@@ -857,7 +860,7 @@ export default function StrategyDetailPage() {
       const payload = await readPayload(response);
       if (!response.ok) {
         showToast("error", payload.error?.message ?? "保存上下文读取策略失败");
-        return;
+        return false;
       }
       const nextWorkflowConfig =
         payload.data?.workflowConfig && typeof payload.data.workflowConfig === "object"
@@ -865,17 +868,18 @@ export default function StrategyDetailPage() {
           : workflowConfig;
       setWorkflowConfig(nextWorkflowConfig);
       setWorkflowContextAccess(normalizeContextAccessPayload(nextWorkflowConfig.contextAccess));
-      showToast("success", "已保存上下文读取策略");
+      if (!options?.silent) showToast("success", "已保存上下文读取策略");
+      return true;
     } finally {
       setWorkflowContextAccessSaving(false);
     }
   }
 
-  async function saveWorkflowSummarizer() {
+  async function saveWorkflowSummarizer(options?: { silent?: boolean }) {
     if (!id || !detail?.canEdit || workflowSummarizerSaving) return;
     if (!workflowConfig) {
       showToast("error", "workflow 配置尚未加载完成");
-      return;
+      return false;
     }
 
     setWorkflowSummarizerSaving(true);
@@ -909,7 +913,7 @@ export default function StrategyDetailPage() {
       const payload = await readPayload(response);
       if (!response.ok) {
         showToast("error", payload.error?.message ?? "保存独立总结器失败");
-        return;
+        return false;
       }
       const nextWorkflowConfig =
         payload.data?.workflowConfig && typeof payload.data.workflowConfig === "object"
@@ -917,9 +921,28 @@ export default function StrategyDetailPage() {
           : workflowConfig;
       setWorkflowConfig(nextWorkflowConfig);
       setWorkflowSummarizer(normalizeSummarizerPayload(nextWorkflowConfig.summarizer));
-      showToast("success", "已保存独立总结器");
+      if (!options?.silent) showToast("success", "已保存独立总结器");
+      return true;
     } finally {
       setWorkflowSummarizerSaving(false);
+    }
+  }
+
+  async function saveAll() {
+    if (!id || !detail?.canEdit || !canSave || isSavingAll) return;
+    setIsSavingAll(true);
+    try {
+      const basicOk = await save({ silent: true });
+      if (!basicOk) return;
+      const phaseOk = await saveWorkflowPhasePrompts({ silent: true });
+      if (!phaseOk) return;
+      const contextOk = await saveWorkflowContextAccess({ silent: true });
+      if (!contextOk) return;
+      const summarizerOk = await saveWorkflowSummarizer({ silent: true });
+      if (!summarizerOk) return;
+      showToast("success", "已保存全部修改");
+    } finally {
+      setIsSavingAll(false);
     }
   }
 
@@ -1057,8 +1080,21 @@ export default function StrategyDetailPage() {
           </label>
           {detail.canEdit ? (
             <>
-              <button className="btn btn-primary" disabled={!canSave || isSaving} onClick={() => void save()}>
-                {isSaving ? "保存中..." : "保存"}
+              <button
+                className="btn btn-primary"
+                disabled={
+                  !canSave ||
+                  isSavingAll ||
+                  isSaving ||
+                  workflowPhasePromptsSaving ||
+                  workflowContextAccessSaving ||
+                  workflowSummarizerSaving
+                }
+                onClick={() => void saveAll()}
+              >
+                {isSavingAll || isSaving || workflowPhasePromptsSaving || workflowContextAccessSaving || workflowSummarizerSaving
+                  ? "保存中..."
+                  : "保存全部"}
               </button>
               <button className="btn btn-danger" disabled={isDeleting} onClick={() => void deleteOne()}>
                 {isDeleting ? "删除中..." : "删除"}
@@ -1079,11 +1115,6 @@ export default function StrategyDetailPage() {
             <strong>独立总结器（可选）</strong>
             <div className="muted">策略可以声明一台独立总结器，用于每回摘要、每轮摘要和结构化事实板。真正绑定哪台 AI，会在“使用策略”创建辩论时再选择。</div>
           </div>
-          {detail.canEdit ? (
-            <button className="btn btn-primary" disabled={workflowSummarizerSaving} onClick={() => void saveWorkflowSummarizer()}>
-              {workflowSummarizerSaving ? "保存中..." : "保存总结器"}
-            </button>
-          ) : null}
         </div>
 
         <label className="row" style={{ alignItems: "center", gap: 8 }}>
@@ -1228,11 +1259,6 @@ export default function StrategyDetailPage() {
             <strong>讨论增强提示词（可选）</strong>
             <div className="muted">默认不需要复杂 workflow；只有当你希望某些讨论阶段带特殊规则时，才需要在这里补充开局提示词或阶段提示词。</div>
           </div>
-          {detail.canEdit ? (
-            <button className="btn btn-primary" disabled={workflowPhasePromptsLoading || workflowPhasePromptsSaving} onClick={() => void saveWorkflowPhasePrompts()}>
-              {workflowPhasePromptsSaving ? "保存中..." : "保存提示词"}
-            </button>
-          ) : null}
         </div>
 
         {workflowPhasePromptsLoading ? (
@@ -1284,15 +1310,6 @@ export default function StrategyDetailPage() {
             <strong>上下文读取规则（可选）</strong>
             <div className="muted">默认可以完全不配。只有当某些目录需要“每次都读 / 按需读 / 到特定阶段再解锁”时，才需要在这里加规则。</div>
           </div>
-          {detail.canEdit ? (
-            <button
-              className="btn btn-primary"
-              disabled={workflowContextAccessLoading || workflowContextAccessSaving}
-              onClick={() => void saveWorkflowContextAccess()}
-            >
-              {workflowContextAccessSaving ? "保存中..." : "保存读取规则"}
-            </button>
-          ) : null}
         </div>
 
         {workflowContextAccessLoading ? (
