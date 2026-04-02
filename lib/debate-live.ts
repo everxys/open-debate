@@ -20,7 +20,14 @@ export type DebateLiveProgress = {
   updatedAt: string;
 };
 
-export type DebateSummaryJobStatus = "pending" | "running" | "failed" | "completed";
+export type DebateSummaryJobStatus =
+  | "queued"
+  | "running"
+  | "retry_wait"
+  | "blocked"
+  | "failed"
+  | "completed"
+  | "dead_letter";
 
 export type DebateSummaryJob = {
   key: string;
@@ -32,6 +39,9 @@ export type DebateSummaryJob = {
   message: string | null;
   errorReason: string | null;
   retryAt: string | null;
+  attemptCount: number | null;
+  blockedReason: string | null;
+  deadLetter: boolean;
   updatedAt: string;
 };
 
@@ -93,12 +103,20 @@ export function emitDebateLiveEvent(debateId: string, event: DebateLiveEvent) {
 
 export function setDebateSummaryJob(
   debateId: string,
-  job: Omit<DebateSummaryJob, "updatedAt"> & { updatedAt?: string }
+  job: Omit<DebateSummaryJob, "updatedAt" | "attemptCount" | "blockedReason" | "deadLetter"> & {
+    updatedAt?: string;
+    attemptCount?: number | null;
+    blockedReason?: string | null;
+    deadLetter?: boolean;
+  }
 ) {
   const store = getStore();
   const jobs = store.summaryJobsByDebateId.get(debateId) ?? new Map<string, DebateSummaryJob>();
   const next: DebateSummaryJob = {
     ...job,
+    attemptCount: job.attemptCount ?? null,
+    blockedReason: job.blockedReason ?? null,
+    deadLetter: Boolean(job.deadLetter),
     updatedAt: job.updatedAt ?? new Date().toISOString()
   };
   jobs.set(next.key, next);

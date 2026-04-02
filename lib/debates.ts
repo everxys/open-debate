@@ -929,6 +929,50 @@ export async function deleteDebate(id: string) {
   return { id };
 }
 
+export async function deleteStoppedDebates(options?: { maxCompletedRounds?: number | null }) {
+  const session = await requireSessionUser();
+  const maxCompletedRounds =
+    typeof options?.maxCompletedRounds === "number" && Number.isFinite(options.maxCompletedRounds)
+      ? Math.max(0, Math.floor(options.maxCompletedRounds))
+      : null;
+  const result = await query<{ id: string }>(
+    `
+      with target as (
+        select d.id
+          from debates d
+         where d.user_id = $1
+           and d.status = 'stopped'
+           and (
+             $2::int is null
+             or floor(
+               d.current_turn::numeric
+               / greatest(
+                   1,
+                   coalesce(
+                     (
+                       select count(*)::int
+                         from debate_agents da
+                        where da.debate_id = d.id
+                     ),
+                     0
+                   )
+                 )::numeric
+             ) < $2::int
+           )
+      )
+      delete from debates d
+      using target t
+      where d.id = t.id
+      returning d.id
+    `,
+    [session.userId, maxCompletedRounds]
+  );
+  return {
+    deletedCount: result.rows.length,
+    ids: result.rows.map((row) => String(row.id))
+  };
+}
+
 export async function listDebateTurns(
   id: string,
   options?: {

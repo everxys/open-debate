@@ -117,22 +117,31 @@ type TurnWindowState = {
 type SummaryJob = {
   key: string;
   kind: "turn_summary" | "round_summary" | "facts_board";
-  status: "pending" | "running" | "failed" | "completed";
+  status: "queued" | "running" | "retry_wait" | "blocked" | "failed" | "completed" | "dead_letter";
   label: string;
   turnNumber: number | null;
   roundNumber: number | null;
   message: string | null;
   errorReason: string | null;
   retryAt: string | null;
+  attemptCount?: number | null;
+  blockedReason?: string | null;
+  deadLetter?: boolean;
   updatedAt: string;
 };
 
 function formatSummaryJobDetail(job: SummaryJob) {
   const parts: string[] = [];
   if (job.message) parts.push(job.message);
+  if (job.attemptCount) parts.push(`尝试：${job.attemptCount}`);
   if (job.errorReason) parts.push(`原因：${job.errorReason}`);
+  if (job.blockedReason) parts.push(`阻塞：${job.blockedReason}`);
   if (job.retryAt) parts.push(`下次重试：${new Date(job.retryAt).toLocaleString()}`);
   return parts.join(" · ");
+}
+
+function isPendingSummaryJob(job: SummaryJob) {
+  return job.status === "queued" || job.status === "retry_wait" || job.status === "blocked";
 }
 
 type DebateRoundDirectoryItemProps = {
@@ -744,10 +753,10 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
     onSelectTurn
   } = props;
   const roundSummaryFailedJobs = summaryJobs.filter(
-    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && job.status === "failed"
+    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && (job.status === "failed" || job.status === "dead_letter")
   );
   const roundSummaryPendingJobs = summaryJobs.filter(
-    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && job.status === "pending"
+    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && isPendingSummaryJob(job)
   );
   const roundSummaryRunning = summaryJobs.some(
     (job) => (job.kind === "round_summary" || job.kind === "facts_board") && job.status === "running"
@@ -871,10 +880,10 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
             const turnInRound = ((turn.turnNumber - 1) % agentCount) + 1;
             const seat = turn.seatNumber ? `Seat-${turn.seatNumber}` : "";
             const turnSummaryFailedJobs = summaryJobs.filter(
-              (job) => job.kind === "turn_summary" && job.turnNumber === turn.turnNumber && job.status === "failed"
+              (job) => job.kind === "turn_summary" && job.turnNumber === turn.turnNumber && (job.status === "failed" || job.status === "dead_letter")
             );
             const turnSummaryPendingJobs = summaryJobs.filter(
-              (job) => job.kind === "turn_summary" && job.turnNumber === turn.turnNumber && job.status === "pending"
+              (job) => job.kind === "turn_summary" && job.turnNumber === turn.turnNumber && isPendingSummaryJob(job)
             );
             const turnSummaryRunning = summaryJobs.some(
               (job) => job.kind === "turn_summary" && job.turnNumber === turn.turnNumber && job.status === "running"
@@ -1597,6 +1606,10 @@ function StatusSummaryPanel(props: {
   liveDisplayMessage: number | null;
   liveStatus: string;
   showWorkflowPhaseUi: boolean;
+  summaryJobs: SummaryJob[];
+  summaryActionBusy: boolean;
+  onRetryFailedSummaryJobs: () => void;
+  onRebuildFactsBoard: () => void;
 }) {
   const runtimeNoticeBadgeClass =
     props.debate.runtimeNoticeKind === "recovering"
@@ -1616,6 +1629,18 @@ function StatusSummaryPanel(props: {
       : props.debate.runtimeNoticeKind === "interrupted"
         ? "已自动暂停"
         : "已自动恢复";
+  const summaryCounts = props.summaryJobs.reduce(
+    (acc, job) => {
+      if (job.kind === "turn_summary") acc.turn += 1;
+      else if (job.kind === "round_summary") acc.round += 1;
+      else acc.facts += 1;
+      if (job.status === "running") acc.running += 1;
+      else if (isPendingSummaryJob(job)) acc.pending += 1;
+      else if (job.status === "failed" || job.status === "dead_letter") acc.failed += 1;
+      return acc;
+    },
+    { turn: 0, round: 0, facts: 0, running: 0, pending: 0, failed: 0 }
+  );
   return (
     <Fragment>
       {props.debate.status === "running" ? (
@@ -1665,6 +1690,38 @@ function StatusSummaryPanel(props: {
       {props.debate.lastErrorCode || props.debate.lastErrorMessage ? (
         <div className="muted">
           失败原因: {[props.debate.lastErrorCode, props.debate.lastErrorMessage].filter(Boolean).join(" · ")}
+        </div>
+      ) : null}
+      {props.summaryJobs.length > 0 ? (
+        <div className="panel stack" style={{ gap: 8 }}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+            <strong>总结任务</strong>
+            <span className="muted">
+              回摘要 {summaryCounts.turn} · 轮摘要 {summaryCounts.round} · 事实板 {summaryCounts.facts}
+            </span>
+          </div>
+          <div className="muted">
+            运行中 {summaryCounts.running} · 待补 {summaryCounts.pending} · 失败 {summaryCounts.failed}
+          </div>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <button className="btn" type="button" disabled={props.summaryActionBusy} onClick={props.onRetryFailedSummaryJobs}>
+              {props.summaryActionBusy ? "处理中..." : "重试失败总结"}
+            </button>
+            <button className="btn" type="button" disabled={props.summaryActionBusy} onClick={props.onRebuildFactsBoard}>
+              {props.summaryActionBusy ? "处理中..." : "重建 facts board"}
+            </button>
+          </div>
+          <div className="stack" style={{ gap: 6, maxHeight: 220, overflowY: "auto" }}>
+            {props.summaryJobs.slice(0, 24).map((job) => (
+              <div key={job.key} className="softBox" style={{ padding: "8px 10px" }}>
+                <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+                  <strong>{job.label}</strong>
+                  <span className="muted">{job.status}</span>
+                </div>
+                {formatSummaryJobDetail(job) ? <div className="muted">{formatSummaryJobDetail(job)}</div> : null}
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
     </Fragment>
@@ -3124,6 +3181,7 @@ export default function DebateDetailPage() {
   const [liveAgentName, setLiveAgentName] = useState<string>("");
   const [liveStatus, setLiveStatus] = useState<string>("");
   const [summaryJobsByKey, setSummaryJobsByKey] = useState<Record<string, SummaryJob>>({});
+  const [summaryActionBusy, setSummaryActionBusy] = useState(false);
   const [liveText, setLiveText] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [activeLive, setActiveLive] = useState(false);
@@ -3728,6 +3786,38 @@ export default function DebateDetailPage() {
     }
   }, [id, loadContextUsage, loadContextUsageTotals, loadOpenVoteState, loadVoteIndex, showToast, updateTurnWindow]);
 
+  const postSummaryJobAction = useCallback(
+    async (action: string, extra?: Record<string, unknown>) => {
+      if (!id) return;
+      setSummaryActionBusy(true);
+      try {
+        const response = await fetch(`/api/debates/${id}/summary-jobs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, ...(extra ?? {}) })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload?.error?.message ?? "总结任务操作失败");
+        }
+        showToast("success", "总结任务已提交");
+      } catch (error) {
+        showToast("error", error instanceof Error ? error.message : "总结任务操作失败");
+      } finally {
+        setSummaryActionBusy(false);
+      }
+    },
+    [id, showToast]
+  );
+
+  const handleRetryFailedSummaryJobs = useCallback(() => {
+    void postSummaryJobAction("retry_failed");
+  }, [postSummaryJobAction]);
+
+  const handleRebuildFactsBoard = useCallback(() => {
+    void postSummaryJobAction("rebuild_facts");
+  }, [postSummaryJobAction]);
+
   useEffect(() => {
     if (!id) return;
     void loadDebate().catch(() => {});
@@ -4016,7 +4106,7 @@ export default function DebateDetailPage() {
           }
           return { ...current, [job.key]: job };
         });
-        if ((job.status === "running" || job.status === "pending") && job.message) {
+        if ((job.status === "running" || isPendingSummaryJob(job)) && job.message) {
           setLiveStatus(job.message);
         }
       } catch {
@@ -4468,7 +4558,7 @@ export default function DebateDetailPage() {
   const liveSummaryJobs = useMemo(
     () =>
       Object.values(summaryJobsByKey)
-        .filter((job) => job.status === "pending" || job.status === "running" || job.status === "failed")
+        .filter((job) => job.status !== "completed")
         .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt)),
     [summaryJobsByKey]
   );
@@ -5054,6 +5144,10 @@ export default function DebateDetailPage() {
               liveDisplayMessage={liveDisplayMessage}
               liveStatus={liveStatus}
               showWorkflowPhaseUi={showWorkflowPhaseUi}
+              summaryJobs={liveSummaryJobs}
+              summaryActionBusy={summaryActionBusy}
+              onRetryFailedSummaryJobs={handleRetryFailedSummaryJobs}
+              onRebuildFactsBoard={handleRebuildFactsBoard}
             />
           </Fragment>
         ) : leftTab === "participants" ? (

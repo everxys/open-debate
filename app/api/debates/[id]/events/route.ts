@@ -2,6 +2,7 @@ import { query } from "@/lib/db";
 import { subscribeDebateLiveEvents, getDebateLiveProgress } from "@/lib/debate-live";
 import { toErrorResponse } from "@/lib/http";
 import { readSession } from "@/lib/session";
+import { listActiveDebateSummaryJobs, toDebateSummaryJobLiveView } from "@/lib/summary-jobs";
 
 export const runtime = "nodejs";
 
@@ -37,7 +38,7 @@ export async function GET(
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
+      async start(controller) {
         let unsubscribe = () => {};
         const abort = () => {
           controller.close();
@@ -46,10 +47,18 @@ export async function GET(
         };
 
         const initial = getDebateLiveProgress(id);
+        const dbJobs = await listActiveDebateSummaryJobs(id).catch(() => []);
+        const mergedJobs = new Map<string, ReturnType<typeof toDebateSummaryJobLiveView>>();
+        for (const job of dbJobs) {
+          mergedJobs.set(job.jobKey, toDebateSummaryJobLiveView(job));
+        }
+        for (const job of initial.summaryJobs) {
+          mergedJobs.set(job.key, job);
+        }
         if (initial.progress) {
           controller.enqueue(encoder.encode(sseEvent("turn_start", { progress: initial.progress })));
         }
-        for (const job of initial.summaryJobs) {
+        for (const job of mergedJobs.values()) {
           controller.enqueue(encoder.encode(sseEvent("summary_job", { debateId: id, job })));
         }
         controller.enqueue(encoder.encode(sseEvent("hello", { at: new Date().toISOString() })));

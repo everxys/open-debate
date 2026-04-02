@@ -36,7 +36,6 @@ import {
   QUESTION_LATEST_DIFF_PATH,
   ROUND_SUMMARY_DIR,
   SHARED_FACTS_PATH,
-  SUMMARIZER_BACKLOG_PATH,
   TURN_SUMMARY_DIR,
   VOTE_ANNOUNCEMENT_PATH,
   VOTE_ANNOUNCEMENT_PREFIX,
@@ -112,6 +111,15 @@ import {
   looksLikeToolsUnsupported,
   summarizeOptionText
 } from "@/lib/runtime/provider-shared";
+import {
+  completeDebateSummaryJob,
+  enqueueDebateSummaryJob,
+  failDebateSummaryJob,
+  markBlockedDebateSummaryJob,
+  scheduleDebateSummaryJobRetry,
+  type DebateSummaryJobKind,
+  type DebateSummaryJobRecord
+} from "@/lib/summary-jobs";
 import {
   getDebateRunSnapshot,
   releaseDebateRun,
@@ -720,17 +728,17 @@ function getWorkflowSummarizerConfig(workflow: NormalizedDebateWorkflow | null) 
   return workflow.summarizer;
 }
 
-function getTurnSummaryPath(workflow: NormalizedDebateWorkflow | null, roundNumber: number, turnNumber: number) {
+export function getTurnSummaryPath(workflow: NormalizedDebateWorkflow | null, roundNumber: number, turnNumber: number) {
   const baseDir = workflow?.summarizer.outputPaths.turnSummaryDir || TURN_SUMMARY_DIR;
   return `${baseDir}round-${roundNumber}/turn-${turnNumber}.md`;
 }
 
-function getRoundSummaryPath(workflow: NormalizedDebateWorkflow | null, roundNumber: number) {
+export function getRoundSummaryPath(workflow: NormalizedDebateWorkflow | null, roundNumber: number) {
   const baseDir = workflow?.summarizer.outputPaths.roundSummaryDir || ROUND_SUMMARY_DIR;
   return `${baseDir}round-${roundNumber}.md`;
 }
 
-function getFactsBoardPath(workflow: NormalizedDebateWorkflow | null) {
+export function getFactsBoardPath(workflow: NormalizedDebateWorkflow | null) {
   return workflow?.summarizer.outputPaths.factsBoardPath || SHARED_FACTS_PATH;
 }
 
@@ -933,156 +941,73 @@ function combineSummarizerPrompt(customPrompt: string | null | undefined, basePr
   return [`Summary instructions:\n${trimmed}`, basePrompt].join("\n\n---\n\n").trim();
 }
 
-type SummarizerBacklogJob =
-  | {
-      key: string;
-      kind: "turn_summary";
-      status: "pending";
-      createdAt: string;
-      updatedAt: string;
-      availableAt: string;
-      attemptCount: number;
-      lastError: string | null;
-      payload: {
-        userId: string;
-        debateId: string;
-        debateAgentId: string;
-        debateQuestion: string;
-        roundNumber: number;
-        turnNumber: number;
-        agentName: string;
-        content: string;
-        refreshFactsBoard: boolean;
-      };
-    }
-  | {
-      key: string;
-      kind: "round_summary";
-      status: "pending";
-      createdAt: string;
-      updatedAt: string;
-      availableAt: string;
-      attemptCount: number;
-      lastError: string | null;
-      payload: {
-        userId: string;
-        debateId: string;
-        debateAgentId: string;
-        debateQuestion: string;
-        endedRound: number;
-        participantCount: number;
-        refreshFactsBoard: boolean;
-      };
-    }
-  | {
-      key: string;
-      kind: "facts_board";
-      status: "pending";
-      createdAt: string;
-      updatedAt: string;
-      availableAt: string;
-      attemptCount: number;
-      lastError: string | null;
-      payload: {
-        userId: string;
-        debateId: string;
-        debateAgentId: string;
-        debateQuestion: string;
-        sourceLabel: string;
-        sourceSummary: string;
-        turnNumber: number | null;
-        roundNumber: number | null;
-      };
-    };
-
-function isSummarizerBacklogJob(value: unknown): value is SummarizerBacklogJob {
-  if (!value || typeof value !== "object") return false;
-  const record = value as Record<string, unknown>;
-  return (
-    typeof record.key === "string" &&
-    (record.kind === "turn_summary" || record.kind === "round_summary" || record.kind === "facts_board") &&
-    record.status === "pending" &&
-    typeof record.createdAt === "string" &&
-    typeof record.updatedAt === "string" &&
-    typeof record.availableAt === "string" &&
-    typeof record.attemptCount === "number" &&
-    "payload" in record
-  );
+function countMarkdownSections(content: string) {
+  return (content.match(/^##\s+/gm) ?? []).length;
 }
 
-async function loadSummarizerBacklog(userId: string, debateId: string) {
-  const raw = await readDebateFile(userId, debateId, SUMMARIZER_BACKLOG_PATH);
-  if (!raw?.trim()) return [] as SummarizerBacklogJob[];
-  const parsed = safeJsonParse<unknown>(raw);
-  if (!Array.isArray(parsed)) return [] as SummarizerBacklogJob[];
-  return parsed.filter(isSummarizerBacklogJob).sort((left, right) => left.availableAt.localeCompare(right.availableAt));
-}
-
-async function saveSummarizerBacklog(debateId: string, jobs: SummarizerBacklogJob[], now: string) {
-  if (jobs.length <= 0) {
-    await upsertDebateFile(debateId, SUMMARIZER_BACKLOG_PATH, "[]\n", now);
-    return;
+function validateSummarizerOutput(
+  kind: "turn_summary" | "round_summary" | "facts_board",
+  content: string
+) {
+  const normalized = content.trim();
+  if (!normalized) return "empty_output";
+  if (/^\s*(error|exception|traceback)\b/i.test(normalized)) return "invalid_output_error_echo";
+  if (kind === "turn_summary") {
+    if (normalized.length < 160) return "turn_summary_too_short";
+    if (countMarkdownSections(normalized) < 4) return "turn_summary_missing_sections";
+    return null;
   }
-  await upsertDebateFile(debateId, SUMMARIZER_BACKLOG_PATH, `${JSON.stringify(jobs, null, 2)}\n`, now);
+  if (kind === "round_summary") {
+    if (normalized.length < 320) return "round_summary_too_short";
+    if (countMarkdownSections(normalized) < 5) return "round_summary_missing_sections";
+    return null;
+  }
+  if (normalized.length < 180) return "facts_board_too_short";
+  if (countMarkdownSections(normalized) < 5) return "facts_board_missing_sections";
+  return null;
 }
 
-function getSummarizerBacklogDelayMs(attemptCount: number) {
-  if (attemptCount <= 1) return 15_000;
-  if (attemptCount <= 3) return 60_000;
-  return 5 * 60_000;
+function getSummaryJobLabel(kind: DebateSummaryJobKind, roundNumber?: number | null, turnNumber?: number | null) {
+  if (kind === "turn_summary") return `第 ${roundNumber ?? "?"} 轮第 ${turnNumber ?? "?"} 回摘要`;
+  if (kind === "round_summary") return `第 ${roundNumber ?? "?"} 轮摘要`;
+  return "结构化事实板";
 }
 
-async function enqueueSummarizerBacklogJob(input: {
-  userId: string;
-  debateId: string;
-  now: string;
-  job: Omit<SummarizerBacklogJob, "status" | "createdAt" | "updatedAt" | "availableAt" | "attemptCount" | "lastError">;
-  errorMessage: string | null;
-}) {
-  const jobs = await loadSummarizerBacklog(input.userId, input.debateId);
-  const existingIndex = jobs.findIndex((job) => job.key === input.job.key);
-  const existing = existingIndex >= 0 ? jobs[existingIndex] : null;
-  const attemptCount = existing ? existing.attemptCount + 1 : 1;
-  const availableAt = new Date(Date.now() + getSummarizerBacklogDelayMs(attemptCount)).toISOString();
-  const nextJob: SummarizerBacklogJob = {
-    ...input.job,
-    status: "pending",
-    createdAt: existing?.createdAt ?? input.now,
-    updatedAt: input.now,
-    availableAt,
-    attemptCount,
-    lastError: input.errorMessage
-  } as SummarizerBacklogJob;
-  if (existingIndex >= 0) jobs.splice(existingIndex, 1, nextJob);
-  else jobs.push(nextJob);
-  await saveSummarizerBacklog(input.debateId, jobs, input.now);
-  return nextJob;
+function mapSummaryJobStatusToLiveStatus(status: DebateSummaryJobRecord["status"]) {
+  return status;
 }
 
-async function removeSummarizerBacklogJob(input: {
-  userId: string;
-  debateId: string;
-  key: string;
-  now: string;
-}) {
-  const jobs = await loadSummarizerBacklog(input.userId, input.debateId);
-  const next = jobs.filter((job) => job.key !== input.key);
-  if (next.length === jobs.length) return;
-  await saveSummarizerBacklog(input.debateId, next, input.now);
+async function syncSummaryJobToLive(job: DebateSummaryJobRecord, message?: string | null, blockedReason?: string | null) {
+  setDebateSummaryJob(job.debateId, {
+    key: job.jobKey,
+    kind: job.kind,
+    label: getSummaryJobLabel(job.kind, job.roundNumber, job.turnNumber),
+    turnNumber: job.turnNumber,
+    roundNumber: job.roundNumber,
+    status: mapSummaryJobStatusToLiveStatus(job.status),
+    message: message ?? null,
+    errorReason: blockedReason ?? job.lastError,
+    retryAt: job.nextRetryAt,
+    attemptCount: job.attemptCount,
+    blockedReason,
+    deadLetter: job.status === "dead_letter"
+  });
 }
 
 async function updateSummaryJob(
   debateId: string,
   job: {
     key: string;
-    kind: "turn_summary" | "round_summary" | "facts_board";
+    kind: DebateSummaryJobKind;
     label: string;
     turnNumber?: number | null;
     roundNumber?: number | null;
-    status: "pending" | "running" | "failed" | "completed";
+    status: DebateSummaryJobRecord["status"];
     message: string | null;
     errorReason?: string | null;
     retryAt?: string | null;
+    attemptCount?: number | null;
+    blockedReason?: string | null;
   }
 ) {
   setDebateSummaryJob(debateId, {
@@ -1094,7 +1019,10 @@ async function updateSummaryJob(
     status: job.status,
     message: job.message,
     errorReason: job.errorReason ?? null,
-    retryAt: job.retryAt ?? null
+    retryAt: job.retryAt ?? null,
+    attemptCount: job.attemptCount ?? null,
+    blockedReason: job.blockedReason ?? null,
+    deadLetter: job.status === "dead_letter"
   });
   if (job.status === "completed") {
     clearDebateSummaryJob(debateId, job.key);
@@ -1113,7 +1041,6 @@ export async function generateTurnSummary(input: {
   content: string;
   now: string;
   refreshFactsBoard?: boolean;
-  backlogOnFailure?: boolean;
 }) {
   const summarizer = getWorkflowSummarizerConfig(input.workflow);
   if (!summarizer || !summarizer.perTurn) return { ok: false, skipped: true };
@@ -1147,41 +1074,9 @@ export async function generateTurnSummary(input: {
       ),
       maxTokens: 900
     });
-    if (!content) {
-      if (input.backlogOnFailure !== false) {
-        const queued = await enqueueSummarizerBacklogJob({
-          userId: input.userId,
-          debateId: input.debateId,
-          now: input.now,
-          job: {
-            key,
-            kind: "turn_summary",
-            payload: {
-              userId: input.userId,
-              debateId: input.debateId,
-              debateAgentId: input.debateAgentId,
-              debateQuestion: input.debateQuestion,
-              roundNumber: input.roundNumber,
-              turnNumber: input.turnNumber,
-              agentName: input.agentName,
-              content: input.content,
-              refreshFactsBoard: input.refreshFactsBoard !== false
-            }
-          },
-          errorMessage: "empty_summary"
-        });
-        await updateSummaryJob(input.debateId, {
-          key,
-          kind: "turn_summary",
-          label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
-          turnNumber: input.turnNumber,
-          roundNumber: input.roundNumber,
-          status: "pending",
-          message: `回摘要生成失败，已记待补任务（第 ${queued.attemptCount} 次）`,
-          errorReason: queued.lastError,
-          retryAt: queued.availableAt
-        });
-      } else {
+    const nextContent = content?.trim() ?? "";
+    const invalidReason = validateSummarizerOutput("turn_summary", nextContent);
+    if (invalidReason) {
       await updateSummaryJob(input.debateId, {
         key,
         kind: "turn_summary",
@@ -1189,10 +1084,10 @@ export async function generateTurnSummary(input: {
         turnNumber: input.turnNumber,
         roundNumber: input.roundNumber,
         status: "failed",
-        message: "回摘要生成失败"
+        message: "回摘要生成失败",
+        errorReason: invalidReason
       });
-      }
-      return { ok: false, error: "empty_summary" };
+      return { ok: false, error: invalidReason };
     }
     const path = getTurnSummaryPath(input.workflow, input.roundNumber, input.turnNumber);
     await writeSummarizerDebateFile({
@@ -1202,7 +1097,7 @@ export async function generateTurnSummary(input: {
       turnNumber: input.turnNumber,
       roundNumber: input.roundNumber,
       path,
-      content: `${content.trim()}\n`,
+      content: `${nextContent}\n`,
       reason: "summarizer:turn_summary",
       now: input.now
     });
@@ -1216,7 +1111,7 @@ export async function generateTurnSummary(input: {
         turnNumberStart: input.turnNumber,
         turnNumberEnd: input.turnNumber,
         roundNumber: input.roundNumber,
-        content,
+        content: nextContent,
         now: input.now
       });
     } catch {
@@ -1230,53 +1125,19 @@ export async function generateTurnSummary(input: {
       status: "completed",
       message: "回摘要已完成"
     });
-    return { ok: true, path, content };
+    return { ok: true, path, content: nextContent };
   } catch (error) {
     const details = describeRuntimeError(error);
-    if (input.backlogOnFailure !== false) {
-      const queued = await enqueueSummarizerBacklogJob({
-        userId: input.userId,
-        debateId: input.debateId,
-        now: input.now,
-        job: {
-          key,
-          kind: "turn_summary",
-          payload: {
-            userId: input.userId,
-            debateId: input.debateId,
-            debateAgentId: input.debateAgentId,
-            debateQuestion: input.debateQuestion,
-            roundNumber: input.roundNumber,
-            turnNumber: input.turnNumber,
-            agentName: input.agentName,
-            content: input.content,
-            refreshFactsBoard: input.refreshFactsBoard !== false
-          }
-        },
-        errorMessage: truncateErrorMessage(String(details.message ?? "turn_summary_failed"))
-      });
-      await updateSummaryJob(input.debateId, {
-        key,
-        kind: "turn_summary",
-        label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
-        turnNumber: input.turnNumber,
-        roundNumber: input.roundNumber,
-        status: "pending",
-        message: `回摘要生成失败，已记待补任务（第 ${queued.attemptCount} 次）`,
-        errorReason: queued.lastError,
-        retryAt: queued.availableAt
-      });
-    } else {
-      await updateSummaryJob(input.debateId, {
-        key,
-        kind: "turn_summary",
-        label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
-        turnNumber: input.turnNumber,
-        roundNumber: input.roundNumber,
-        status: "failed",
-        message: "回摘要生成失败"
-      });
-    }
+    await updateSummaryJob(input.debateId, {
+      key,
+      kind: "turn_summary",
+      label: `第 ${input.roundNumber} 轮第 ${input.turnNumber} 回摘要`,
+      turnNumber: input.turnNumber,
+      roundNumber: input.roundNumber,
+      status: "failed",
+      message: "回摘要生成失败",
+      errorReason: truncateErrorMessage(String(details.message ?? "turn_summary_failed"))
+    });
     await logRuntimeEvent("warn", "turn summary generation failed", { debateId: input.debateId, error: details });
     return { ok: false, error };
   }
@@ -1333,7 +1194,6 @@ export async function refreshFactsBoardFromSummaries(input: {
   turnNumber?: number | null;
   roundNumber?: number | null;
   now: string;
-  backlogOnFailure?: boolean;
 }) {
   if (!ENABLE_DEBATE_MEMORY) return { ok: false, skipped: true };
   const summarizer = getWorkflowSummarizerConfig(input.workflow);
@@ -1369,40 +1229,9 @@ export async function refreshFactsBoardFromSummaries(input: {
       ),
       maxTokens: 1200
     });
-    if (!content) {
-      if (input.backlogOnFailure !== false) {
-        const queued = await enqueueSummarizerBacklogJob({
-          userId: input.userId,
-          debateId: input.debateId,
-          now: input.now,
-          job: {
-            key,
-            kind: "facts_board",
-            payload: {
-              userId: input.userId,
-              debateId: input.debateId,
-              debateAgentId: input.debateAgentId,
-              debateQuestion: input.debateQuestion,
-              sourceLabel: input.sourceLabel,
-              sourceSummary: input.sourceSummary,
-              turnNumber: input.turnNumber ?? null,
-              roundNumber: input.roundNumber ?? null
-            }
-          },
-          errorMessage: "empty_facts_board"
-        });
-        await updateSummaryJob(input.debateId, {
-          key,
-          kind: "facts_board",
-          label: "结构化事实板",
-          turnNumber: input.turnNumber ?? null,
-          roundNumber: input.roundNumber ?? null,
-          status: "pending",
-          message: `事实板整理失败，已记待补任务（第 ${queued.attemptCount} 次）`,
-          errorReason: queued.lastError,
-          retryAt: queued.availableAt
-        });
-      } else {
+    const nextContent = content?.trim() ?? "";
+    const invalidReason = validateSummarizerOutput("facts_board", nextContent);
+    if (invalidReason) {
       await updateSummaryJob(input.debateId, {
         key,
         kind: "facts_board",
@@ -1410,10 +1239,10 @@ export async function refreshFactsBoardFromSummaries(input: {
         turnNumber: input.turnNumber ?? null,
         roundNumber: input.roundNumber ?? null,
         status: "failed",
-        message: "事实板整理失败"
+        message: "事实板整理失败",
+        errorReason: invalidReason
       });
-      }
-      return { ok: false, error: "empty_facts_board" };
+      return { ok: false, error: invalidReason };
     }
     await writeSummarizerDebateFile({
       userId: input.userId,
@@ -1422,7 +1251,7 @@ export async function refreshFactsBoardFromSummaries(input: {
       turnNumber: input.turnNumber ?? 0,
       roundNumber: input.roundNumber ?? 0,
       path: boardPath,
-      content: `${content.trim()}\n`,
+      content: `${nextContent}\n`,
       reason: "summarizer:facts_board",
       now: input.now
     });
@@ -1436,7 +1265,7 @@ export async function refreshFactsBoardFromSummaries(input: {
         turnNumberStart: input.turnNumber ?? undefined,
         turnNumberEnd: input.turnNumber ?? undefined,
         roundNumber: input.roundNumber ?? undefined,
-        content,
+        content: nextContent,
         now: input.now
       });
     } catch {
@@ -1450,52 +1279,19 @@ export async function refreshFactsBoardFromSummaries(input: {
       status: "completed",
       message: "事实板已更新"
     });
-    return { ok: true, path: boardPath, content };
+    return { ok: true, path: boardPath, content: nextContent };
   } catch (error) {
     const details = describeRuntimeError(error);
-    if (input.backlogOnFailure !== false) {
-      const queued = await enqueueSummarizerBacklogJob({
-        userId: input.userId,
-        debateId: input.debateId,
-        now: input.now,
-        job: {
-          key,
-          kind: "facts_board",
-          payload: {
-            userId: input.userId,
-            debateId: input.debateId,
-            debateAgentId: input.debateAgentId,
-            debateQuestion: input.debateQuestion,
-            sourceLabel: input.sourceLabel,
-            sourceSummary: input.sourceSummary,
-            turnNumber: input.turnNumber ?? null,
-            roundNumber: input.roundNumber ?? null
-          }
-        },
-        errorMessage: truncateErrorMessage(String(details.message ?? "facts_board_failed"))
-      });
-      await updateSummaryJob(input.debateId, {
-        key,
-        kind: "facts_board",
-        label: "结构化事实板",
-        turnNumber: input.turnNumber ?? null,
-        roundNumber: input.roundNumber ?? null,
-        status: "pending",
-        message: `事实板整理失败，已记待补任务（第 ${queued.attemptCount} 次）`,
-        errorReason: queued.lastError,
-        retryAt: queued.availableAt
-      });
-    } else {
-      await updateSummaryJob(input.debateId, {
-        key,
-        kind: "facts_board",
-        label: "结构化事实板",
-        turnNumber: input.turnNumber ?? null,
-        roundNumber: input.roundNumber ?? null,
-        status: "failed",
-        message: "事实板整理失败"
-      });
-    }
+    await updateSummaryJob(input.debateId, {
+      key,
+      kind: "facts_board",
+      label: "结构化事实板",
+      turnNumber: input.turnNumber ?? null,
+      roundNumber: input.roundNumber ?? null,
+      status: "failed",
+      message: "事实板整理失败",
+      errorReason: truncateErrorMessage(String(details.message ?? "facts_board_failed"))
+    });
     await logRuntimeEvent("warn", "facts board refresh failed", { debateId: input.debateId, error: details });
     return { ok: false, error };
   }
@@ -4094,7 +3890,6 @@ export async function generateRoundSummary(input: {
   endedRound: number;
   now: string;
   refreshFactsBoard?: boolean;
-  backlogOnFailure?: boolean;
 }) {
   const summarizer = getWorkflowSummarizerConfig(input.workflow);
   if (!summarizer || !summarizer.perRound) return { ok: false, skipped: true };
@@ -4118,46 +3913,15 @@ export async function generateRoundSummary(input: {
       participantCount: input.participantCount
     });
     if (turnSummaries.length <= 0) {
-      if (input.backlogOnFailure !== false) {
-        const queued = await enqueueSummarizerBacklogJob({
-          userId: input.userId,
-          debateId: input.debate.id,
-          now: input.now,
-          job: {
-            key,
-            kind: "round_summary",
-            payload: {
-              userId: input.userId,
-              debateId: input.debate.id,
-              debateAgentId: input.debateAgentId,
-              debateQuestion: input.debate.question,
-              endedRound: input.endedRound,
-              participantCount: input.participantCount,
-              refreshFactsBoard: input.refreshFactsBoard !== false
-            }
-          },
-          errorMessage: "missing_turn_summaries"
-        });
-        await updateSummaryJob(input.debate.id, {
-          key,
-          kind: "round_summary",
-          label: `第 ${input.endedRound} 轮摘要`,
-          roundNumber: input.endedRound,
-          status: "pending",
-          message: `缺少回摘要，已记待补任务（第 ${queued.attemptCount} 次）`,
-          errorReason: queued.lastError,
-          retryAt: queued.availableAt
-        });
-      } else {
-        await updateSummaryJob(input.debate.id, {
-          key,
-          kind: "round_summary",
-          label: `第 ${input.endedRound} 轮摘要`,
-          roundNumber: input.endedRound,
-          status: "failed",
-          message: "缺少回摘要，无法生成轮摘要"
-        });
-      }
+      await updateSummaryJob(input.debate.id, {
+        key,
+        kind: "round_summary",
+        label: `第 ${input.endedRound} 轮摘要`,
+        roundNumber: input.endedRound,
+        status: "failed",
+        message: "缺少回摘要，无法生成轮摘要",
+        errorReason: "missing_turn_summaries"
+      });
       return { ok: false, error: "missing_turn_summaries" };
     }
     const content = await callWorkflowSummarizerMarkdown({
@@ -4175,48 +3939,19 @@ export async function generateRoundSummary(input: {
       ),
       maxTokens: 1600
     });
-    if (!content) {
-      if (input.backlogOnFailure !== false) {
-        const queued = await enqueueSummarizerBacklogJob({
-          userId: input.userId,
-          debateId: input.debate.id,
-          now: input.now,
-          job: {
-            key,
-            kind: "round_summary",
-            payload: {
-              userId: input.userId,
-              debateId: input.debate.id,
-              debateAgentId: input.debateAgentId,
-              debateQuestion: input.debate.question,
-              endedRound: input.endedRound,
-              participantCount: input.participantCount,
-              refreshFactsBoard: input.refreshFactsBoard !== false
-            }
-          },
-          errorMessage: "empty_round_summary"
-        });
-        await updateSummaryJob(input.debate.id, {
-          key,
-          kind: "round_summary",
-          label: `第 ${input.endedRound} 轮摘要`,
-          roundNumber: input.endedRound,
-          status: "pending",
-          message: `轮摘要生成失败，已记待补任务（第 ${queued.attemptCount} 次）`,
-          errorReason: queued.lastError,
-          retryAt: queued.availableAt
-        });
-      } else {
-        await updateSummaryJob(input.debate.id, {
-          key,
-          kind: "round_summary",
-          label: `第 ${input.endedRound} 轮摘要`,
-          roundNumber: input.endedRound,
-          status: "failed",
-          message: "轮摘要生成失败"
-        });
-      }
-      return { ok: false, error: "empty_round_summary" };
+    const nextContent = content?.trim() ?? "";
+    const invalidReason = validateSummarizerOutput("round_summary", nextContent);
+    if (invalidReason) {
+      await updateSummaryJob(input.debate.id, {
+        key,
+        kind: "round_summary",
+        label: `第 ${input.endedRound} 轮摘要`,
+        roundNumber: input.endedRound,
+        status: "failed",
+        message: "轮摘要生成失败",
+        errorReason: invalidReason
+      });
+      return { ok: false, error: invalidReason };
     }
     const roundPath = getRoundSummaryPath(input.workflow, input.endedRound);
     await writeSummarizerDebateFile({
@@ -4226,7 +3961,7 @@ export async function generateRoundSummary(input: {
       turnNumber: input.endedRound * Math.max(1, input.participantCount),
       roundNumber: input.endedRound,
       path: roundPath,
-      content: `${content.trim()}\n`,
+      content: `${nextContent}\n`,
       reason: "summarizer:round_summary",
       now: input.now
     });
@@ -4238,7 +3973,7 @@ export async function generateRoundSummary(input: {
         sourceType: "round_summary",
         sourcePath: roundPath,
         roundNumber: input.endedRound,
-        content,
+        content: nextContent,
         now: input.now
       });
     } catch {
@@ -4251,217 +3986,277 @@ export async function generateRoundSummary(input: {
       status: "completed",
       message: "轮摘要已完成"
     });
-    return { ok: true, path: roundPath, content };
+    return { ok: true, path: roundPath, content: nextContent };
   } catch (error) {
     const details = describeRuntimeError(error);
-    if (input.backlogOnFailure !== false) {
-      const queued = await enqueueSummarizerBacklogJob({
-        userId: input.userId,
-        debateId: input.debate.id,
-        now: input.now,
-        job: {
-          key,
-          kind: "round_summary",
-          payload: {
-            userId: input.userId,
-            debateId: input.debate.id,
-            debateAgentId: input.debateAgentId,
-            debateQuestion: input.debate.question,
-            endedRound: input.endedRound,
-            participantCount: input.participantCount,
-            refreshFactsBoard: input.refreshFactsBoard !== false
-          }
-        },
-        errorMessage: truncateErrorMessage(String(details.message ?? "round_summary_failed"))
-      });
-      await updateSummaryJob(input.debate.id, {
-        key,
-        kind: "round_summary",
-        label: `第 ${input.endedRound} 轮摘要`,
-        roundNumber: input.endedRound,
-        status: "pending",
-        message: `轮摘要生成失败，已记待补任务（第 ${queued.attemptCount} 次）`,
-        errorReason: queued.lastError,
-        retryAt: queued.availableAt
-      });
-    } else {
-      await updateSummaryJob(input.debate.id, {
-        key,
-        kind: "round_summary",
-        label: `第 ${input.endedRound} 轮摘要`,
-        roundNumber: input.endedRound,
-        status: "failed",
-        message: "轮摘要生成失败"
-      });
-    }
+    await updateSummaryJob(input.debate.id, {
+      key,
+      kind: "round_summary",
+      label: `第 ${input.endedRound} 轮摘要`,
+      roundNumber: input.endedRound,
+      status: "failed",
+      message: "轮摘要生成失败",
+      errorReason: truncateErrorMessage(String(details.message ?? "round_summary_failed"))
+    });
     await logRuntimeEvent("warn", "round summary generation failed", { error: details });
     return { ok: false, error };
   }
 }
 
-async function drainSummarizerBacklog(input: {
+async function enqueueTurnSummaryJob(input: {
   userId: string;
   debateId: string;
+  debateAgentId: string;
   debateQuestion: string;
   workflow: NormalizedDebateWorkflow | null;
-  now: string;
-  limit?: number;
+  roundNumber: number;
+  turnNumber: number;
+  agentName: string;
+  content: string;
+  refreshFactsBoard: boolean;
 }) {
-  if (!getWorkflowSummarizerConfig(input.workflow)) return { processed: 0, remaining: 0 };
-  const jobs = await loadSummarizerBacklog(input.userId, input.debateId);
-  if (jobs.length <= 0) return { processed: 0, remaining: 0 };
-  const nowMs = Date.parse(input.now);
-  const ready = jobs.filter((job) => {
-    const availableAtMs = Date.parse(job.availableAt);
-    return !Number.isFinite(availableAtMs) || availableAtMs <= nowMs;
+  const summarizer = getWorkflowSummarizerConfig(input.workflow);
+  if (!summarizer || !summarizer.perTurn) return null;
+  const record = await enqueueDebateSummaryJob({
+    debateId: input.debateId,
+    kind: "turn_summary",
+    jobKey: `turn:${input.turnNumber}`,
+    turnNumber: input.turnNumber,
+    roundNumber: input.roundNumber,
+    payload: {
+      userId: input.userId,
+      debateId: input.debateId,
+      debateAgentId: input.debateAgentId,
+      debateQuestion: input.debateQuestion,
+      roundNumber: input.roundNumber,
+      turnNumber: input.turnNumber,
+      agentName: input.agentName,
+      content: input.content,
+      refreshFactsBoard: input.refreshFactsBoard
+    }
   });
-  if (ready.length <= 0) return { processed: 0, remaining: jobs.length };
+  await syncSummaryJobToLive(record, "AI 总结排队中...");
+  return record;
+}
 
-  const limit = Math.max(1, input.limit ?? 3);
-  let processed = 0;
-  for (const job of ready.slice(0, limit)) {
+async function enqueueRoundSummaryJob(input: {
+  userId: string;
+  debateId: string;
+  debateAgentId: string;
+  debateQuestion: string;
+  workflow: NormalizedDebateWorkflow | null;
+  participantCount: number;
+  roundNumber: number;
+  refreshFactsBoard: boolean;
+}) {
+  const summarizer = getWorkflowSummarizerConfig(input.workflow);
+  if (!summarizer || !summarizer.perRound) return null;
+  const dependsOnKeys = Array.from({ length: Math.max(0, input.participantCount) }, (_, index) => {
+    const turnNumber = (input.roundNumber - 1) * input.participantCount + index + 1;
+    return `turn:${turnNumber}`;
+  });
+  const blocked = dependsOnKeys.length > 0;
+  const record = await enqueueDebateSummaryJob({
+    debateId: input.debateId,
+    kind: "round_summary",
+    jobKey: `round:${input.roundNumber}`,
+    roundNumber: input.roundNumber,
+    dependsOnKeys,
+    status: blocked ? "blocked" : "queued",
+    payload: {
+      userId: input.userId,
+      debateId: input.debateId,
+      debateAgentId: input.debateAgentId,
+      debateQuestion: input.debateQuestion,
+      endedRound: input.roundNumber,
+      participantCount: input.participantCount,
+      refreshFactsBoard: input.refreshFactsBoard
+    }
+  });
+  await syncSummaryJobToLive(
+    record,
+    blocked ? "等待本轮回摘要完成" : "AI 总结排队中...",
+    blocked ? "missing_turn_summaries" : null
+  );
+  return record;
+}
+
+async function enqueueFactsBoardJob(input: {
+  debateId: string;
+  sourceKey: string;
+  turnNumber?: number | null;
+  roundNumber?: number | null;
+  payload: Record<string, unknown>;
+}) {
+  const record = await enqueueDebateSummaryJob({
+    debateId: input.debateId,
+    kind: "facts_board",
+    jobKey: `facts:${input.sourceKey}`,
+    turnNumber: input.turnNumber ?? null,
+    roundNumber: input.roundNumber ?? null,
+    payload: input.payload
+  });
+  await syncSummaryJobToLive(record, "AI 总结排队中...");
+  return record;
+}
+
+async function updateDbSummaryJobLive(job: DebateSummaryJobRecord, message?: string | null, blockedReason?: string | null) {
+  await syncSummaryJobToLive(job, message, blockedReason);
+}
+
+export async function runSummaryJobByRecord(job: DebateSummaryJobRecord) {
+  const payload = job.payload;
+  const workflow = await loadDebateWorkflow(String(payload.userId ?? ""), job.debateId);
+  const summarizer = getWorkflowSummarizerConfig(workflow);
+  if (!summarizer?.enabled) {
+    const failed = await failDebateSummaryJob(job.id, "summarizer_disabled");
+    await updateDbSummaryJobLive(failed, "总结器未启用");
+    return failed;
+  }
+  if (!summarizer.aiAgentId) {
+    const failed = await failDebateSummaryJob(job.id, "summarizer_ai_missing");
+    await updateDbSummaryJobLive(failed, "总结器配置失效");
+    return failed;
+  }
+
+  await updateDbSummaryJobLive(job, "AI 总结中...");
+  try {
     if (job.kind === "turn_summary") {
       const result = await generateTurnSummary({
-        ...job.payload,
-        workflow: input.workflow,
-        now: input.now,
-        backlogOnFailure: false,
-        refreshFactsBoard: job.payload.refreshFactsBoard
+        userId: String(payload.userId),
+        debateId: job.debateId,
+        debateAgentId: String(payload.debateAgentId),
+        debateQuestion: String(payload.debateQuestion),
+        workflow,
+        roundNumber: Number(payload.roundNumber),
+        turnNumber: Number(payload.turnNumber),
+        agentName: String(payload.agentName),
+        content: String(payload.content ?? ""),
+        now: new Date().toISOString(),
+        refreshFactsBoard: Boolean(payload.refreshFactsBoard)
       });
-      if (result.ok) {
-        await removeSummarizerBacklogJob({
-          userId: input.userId,
-          debateId: input.debateId,
-          key: job.key,
-          now: input.now
+      if (!result.ok) {
+        const retried = await scheduleDebateSummaryJobRetry({
+          id: job.id,
+          attemptCount: job.attemptCount,
+          errorMessage: truncateErrorMessage(String(result.error ?? "turn_summary_failed"))
         });
-        if (job.payload.refreshFactsBoard && result.content) {
-          await refreshFactsBoardFromSummaries({
-            userId: input.userId,
-            debateId: input.debateId,
-            debateAgentId: job.payload.debateAgentId,
-            debateQuestion: job.payload.debateQuestion,
-            workflow: input.workflow,
-            sourceLabel: `turn-${job.payload.turnNumber}`,
+        await updateDbSummaryJobLive(retried, retried.status === "dead_letter" ? "回摘要进入死信" : "回摘要待重试");
+        return retried;
+      }
+      const completed = await completeDebateSummaryJob(job.id);
+      await updateDbSummaryJobLive(completed, "回摘要已完成");
+      if (Boolean(payload.refreshFactsBoard) && result.content) {
+        await enqueueFactsBoardJob({
+          debateId: job.debateId,
+          sourceKey: `turn:${Number(payload.turnNumber)}`,
+          turnNumber: Number(payload.turnNumber),
+          roundNumber: Number(payload.roundNumber),
+          payload: {
+            userId: String(payload.userId),
+            debateId: job.debateId,
+            debateAgentId: String(payload.debateAgentId),
+            debateQuestion: String(payload.debateQuestion),
+            sourceLabel: `turn-${Number(payload.turnNumber)}`,
             sourceSummary: result.content,
-            turnNumber: job.payload.turnNumber,
-            roundNumber: job.payload.roundNumber,
-            now: input.now
-          });
-        }
-      } else if (!result.skipped) {
-        await enqueueSummarizerBacklogJob({
-          userId: input.userId,
-          debateId: input.debateId,
-          now: input.now,
-          job: {
-            key: job.key,
-            kind: "turn_summary",
-            payload: job.payload
-          },
-          errorMessage:
-            typeof result.error === "string"
-              ? result.error
-              : truncateErrorMessage(String(describeRuntimeError(result.error).message ?? "turn_summary_failed"))
+            turnNumber: Number(payload.turnNumber),
+            roundNumber: Number(payload.roundNumber)
+          }
         });
       }
-      processed += 1;
-      continue;
+      return completed;
     }
 
     if (job.kind === "round_summary") {
       const result = await generateRoundSummary({
-        userId: input.userId,
-        debate: { id: input.debateId, question: job.payload.debateQuestion },
-        debateAgentId: job.payload.debateAgentId,
-        workflow: input.workflow,
-        participantCount: job.payload.participantCount,
-        endedRound: job.payload.endedRound,
-        now: input.now,
-        backlogOnFailure: false,
-        refreshFactsBoard: job.payload.refreshFactsBoard
+        userId: String(payload.userId),
+        debate: { id: job.debateId, question: String(payload.debateQuestion) },
+        debateAgentId: String(payload.debateAgentId),
+        workflow,
+        participantCount: Number(payload.participantCount),
+        endedRound: Number(payload.endedRound),
+        now: new Date().toISOString(),
+        refreshFactsBoard: Boolean(payload.refreshFactsBoard)
       });
-      if (result.ok) {
-        await removeSummarizerBacklogJob({
-          userId: input.userId,
-          debateId: input.debateId,
-          key: job.key,
-          now: input.now
-        });
-        if (job.payload.refreshFactsBoard && result.content) {
-          await refreshFactsBoardFromSummaries({
-            userId: input.userId,
-            debateId: input.debateId,
-            debateAgentId: job.payload.debateAgentId,
-            debateQuestion: job.payload.debateQuestion,
-            workflow: input.workflow,
-            sourceLabel: `round-${job.payload.endedRound}`,
-            sourceSummary: result.content,
-            roundNumber: job.payload.endedRound,
-            now: input.now
-          });
+      if (!result.ok) {
+        const message =
+          typeof result.error === "string" && result.error === "missing_turn_summaries"
+            ? "missing_turn_summaries"
+            : truncateErrorMessage(String(result.error ?? "round_summary_failed"));
+        if (message === "missing_turn_summaries") {
+          const blocked = await markBlockedDebateSummaryJob(job.id, message);
+          await updateDbSummaryJobLive(blocked, "等待本轮回摘要完成", message);
+          return blocked;
         }
-      } else if (!result.skipped) {
-        await enqueueSummarizerBacklogJob({
-          userId: input.userId,
-          debateId: input.debateId,
-          now: input.now,
-          job: {
-            key: job.key,
-            kind: "round_summary",
-            payload: job.payload
-          },
-          errorMessage:
-            typeof result.error === "string"
-              ? result.error
-              : truncateErrorMessage(String(describeRuntimeError(result.error).message ?? "round_summary_failed"))
+        const retried = await scheduleDebateSummaryJobRetry({
+          id: job.id,
+          attemptCount: job.attemptCount,
+          errorMessage: message
+        });
+        await updateDbSummaryJobLive(retried, retried.status === "dead_letter" ? "轮摘要进入死信" : "轮摘要待重试");
+        return retried;
+      }
+      const completed = await completeDebateSummaryJob(job.id);
+      await updateDbSummaryJobLive(completed, "轮摘要已完成");
+      if (Boolean(payload.refreshFactsBoard) && result.content) {
+        await enqueueFactsBoardJob({
+          debateId: job.debateId,
+          sourceKey: `round:${Number(payload.endedRound)}`,
+          roundNumber: Number(payload.endedRound),
+          payload: {
+            userId: String(payload.userId),
+            debateId: job.debateId,
+            debateAgentId: String(payload.debateAgentId),
+            debateQuestion: String(payload.debateQuestion),
+            sourceLabel: `round-${Number(payload.endedRound)}`,
+            sourceSummary: result.content,
+            turnNumber: null,
+            roundNumber: Number(payload.endedRound)
+          }
         });
       }
-      processed += 1;
-      continue;
+      return completed;
     }
 
     const result = await refreshFactsBoardFromSummaries({
-      userId: input.userId,
-      debateId: input.debateId,
-      debateAgentId: job.payload.debateAgentId,
-      debateQuestion: job.payload.debateQuestion,
-      workflow: input.workflow,
-      sourceLabel: job.payload.sourceLabel,
-      sourceSummary: job.payload.sourceSummary,
-      turnNumber: job.payload.turnNumber,
-      roundNumber: job.payload.roundNumber,
-      now: input.now,
-      backlogOnFailure: false
+      userId: String(payload.userId),
+      debateId: job.debateId,
+      debateAgentId: String(payload.debateAgentId),
+      debateQuestion: String(payload.debateQuestion),
+      workflow,
+      sourceLabel: String(payload.sourceLabel),
+      sourceSummary: String(payload.sourceSummary ?? ""),
+      turnNumber: payload.turnNumber === null || payload.turnNumber === undefined ? null : Number(payload.turnNumber),
+      roundNumber: payload.roundNumber === null || payload.roundNumber === undefined ? null : Number(payload.roundNumber),
+      now: new Date().toISOString()
     });
-    if (result.ok) {
-      await removeSummarizerBacklogJob({
-        userId: input.userId,
-        debateId: input.debateId,
-        key: job.key,
-        now: input.now
+    if (!result.ok) {
+      const retried = await scheduleDebateSummaryJobRetry({
+        id: job.id,
+        attemptCount: job.attemptCount,
+        errorMessage: truncateErrorMessage(String(result.error ?? "facts_board_failed"))
       });
-    } else if (!result.skipped) {
-      await enqueueSummarizerBacklogJob({
-        userId: input.userId,
-        debateId: input.debateId,
-        now: input.now,
-        job: {
-          key: job.key,
-          kind: "facts_board",
-          payload: job.payload
-        },
-        errorMessage:
-          typeof result.error === "string"
-            ? result.error
-            : truncateErrorMessage(String(describeRuntimeError(result.error).message ?? "facts_board_failed"))
-      });
+      await updateDbSummaryJobLive(retried, retried.status === "dead_letter" ? "事实板进入死信" : "事实板待重试");
+      return retried;
     }
-    processed += 1;
+    const completed = await completeDebateSummaryJob(job.id);
+    await updateDbSummaryJobLive(completed, "事实板已完成");
+    return completed;
+  } catch (error) {
+    const retried = await scheduleDebateSummaryJobRetry({
+      id: job.id,
+      attemptCount: job.attemptCount,
+      errorMessage: truncateErrorMessage(String(describeRuntimeError(error).message ?? "summary_job_failed"))
+    });
+    await updateDbSummaryJobLive(retried, retried.status === "dead_letter" ? "总结任务进入死信" : "总结任务待重试");
+    await logRuntimeEvent("warn", "summary job execution failed", {
+      debateId: job.debateId,
+      jobKey: job.jobKey,
+      kind: job.kind,
+      error: describeRuntimeError(error)
+    });
+    return retried;
   }
-
-  const remaining = (await loadSummarizerBacklog(input.userId, input.debateId)).length;
-  return { processed, remaining };
 }
 
 export async function runDebate(id: string, userId: string) {
@@ -4523,21 +4318,6 @@ export async function runDebate(id: string, userId: string) {
       }
 
       const workflowBeforeTurn = await loadDebateWorkflow(userId, id);
-      try {
-        await drainSummarizerBacklog({
-          userId,
-          debateId: id,
-          debateQuestion: debate.question,
-          workflow: workflowBeforeTurn,
-          now: new Date().toISOString(),
-          limit: 3
-        });
-      } catch (error) {
-        await logRuntimeEvent("warn", "summarizer backlog drain failed", {
-          debateId: id,
-          error: describeRuntimeError(error)
-        });
-      }
       const openVoteBeforeTurn = await loadOpenVote(userId, id);
       const latestVoteBeforeTurn = await loadLatestVote(userId, id);
       const closedVoteRoundsBeforeTurn = await listClosedOfficialVoteRounds(userId, id);
@@ -4932,7 +4712,7 @@ export async function runDebate(id: string, userId: string) {
 
       const workflow = await loadDebateWorkflow(userId, id);
       try {
-        const turnSummary = await generateTurnSummary({
+        await enqueueTurnSummaryJob({
           userId,
           debateId: id,
           debateAgentId: String(currentParticipant.id),
@@ -4942,25 +4722,10 @@ export async function runDebate(id: string, userId: string) {
           turnNumber: messageNumber,
           agentName: eventAgentName,
           content: persistedResponse.content,
-          now: createdAt,
           refreshFactsBoard: debate.enableSharedFacts
         });
-        if (debate.enableSharedFacts && turnSummary.ok && turnSummary.content) {
-          await refreshFactsBoardFromSummaries({
-            userId,
-            debateId: id,
-            debateAgentId: String(currentParticipant.id),
-            debateQuestion: debate.question,
-            workflow,
-            sourceLabel: `turn-${messageNumber}`,
-            sourceSummary: turnSummary.content,
-            turnNumber: messageNumber,
-            roundNumber,
-            now: createdAt
-          });
-        }
       } catch (error) {
-        await logRuntimeEvent("warn", "turn summarizer pipeline failed", {
+        await logRuntimeEvent("warn", "turn summary enqueue failed", {
           debateId: id,
           error: describeRuntimeError(error)
         });
@@ -5111,62 +4876,21 @@ export async function runDebate(id: string, userId: string) {
             emitDebateLiveEvent(id, {
               type: "status",
               debateId: id,
-              message: `正在生成第 ${endedRound} 轮总结...`,
+              message: `第 ${endedRound} 轮总结已入队，后台处理中...`,
               at: new Date().toISOString()
             });
-            await generateRoundSummary({
+            await enqueueRoundSummaryJob({
               userId,
-              debate: { id: debate.id, question: debate.question },
+              debateId: debate.id,
               debateAgentId: String(currentParticipant.id),
+              debateQuestion: debate.question,
               workflow,
               participantCount,
-              endedRound,
-              now: createdAt,
+              roundNumber: endedRound,
               refreshFactsBoard: debate.enableSharedFacts
             });
           } catch (error) {
-            await logRuntimeEvent("warn", "round summary failed", { debateId: id, error: describeRuntimeError(error) });
-          }
-
-          if (debate.enableSharedFacts) {
-            try {
-              const roundSummaryPath = getRoundSummaryPath(workflow, endedRound);
-              const roundSummaryContent = await readDebateFile(userId, id, roundSummaryPath);
-              if (roundSummaryContent?.trim()) {
-                await refreshFactsBoardFromSummaries({
-                  userId,
-                  debateId: id,
-                  debateAgentId: String(currentParticipant.id),
-                  debateQuestion: debate.question,
-                  workflow,
-                  sourceLabel: `round-${endedRound}`,
-                  sourceSummary: roundSummaryContent,
-                  roundNumber: endedRound,
-                  now: createdAt
-                });
-              }
-            } catch (error) {
-              await logRuntimeEvent("warn", "round facts board refresh failed", {
-                debateId: id,
-                error: describeRuntimeError(error)
-              });
-            }
-          }
-
-          try {
-            await drainSummarizerBacklog({
-              userId,
-              debateId: id,
-              debateQuestion: debate.question,
-              workflow,
-              now: createdAt,
-              limit: 6
-            });
-          } catch (error) {
-            await logRuntimeEvent("warn", "summarizer backlog drain failed after boundary", {
-              debateId: id,
-              error: describeRuntimeError(error)
-            });
+            await logRuntimeEvent("warn", "round summary enqueue failed", { debateId: id, error: describeRuntimeError(error) });
           }
 
           try {

@@ -63,6 +63,9 @@ export default function DebatesPage() {
   const [loadError, setLoadError] = useState<string>("");
   const [selectedFinishedIds, setSelectedFinishedIds] = useState<string[]>([]);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [clearMenuOpen, setClearMenuOpen] = useState(false);
+  const [clearBelowRounds, setClearBelowRounds] = useState("1");
+  const [purgingStopped, setPurgingStopped] = useState(false);
 
   async function load(nextScope: "mine" | "shared" = scope) {
     setLoadError("");
@@ -181,6 +184,30 @@ export default function DebatesPage() {
     }
   }
 
+  async function purgeStoppedDebates(maxCompletedRounds: number) {
+    if (scope !== "mine") return;
+    if (purgingStopped) return;
+
+    setPurgingStopped(true);
+    try {
+      const response = await fetch("/api/debates/purge-stopped", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ maxCompletedRounds })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        window.alert(payload.error?.message ?? "清理失败");
+        return;
+      }
+      setSelectedFinishedIds([]);
+      setClearMenuOpen(false);
+      await load("mine");
+    } finally {
+      setPurgingStopped(false);
+    }
+  }
+
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -192,6 +219,13 @@ export default function DebatesPage() {
   const finished = debates.filter((debate) =>
     ["completed", "stopped", "failed"].includes(debate.status)
   );
+  const stopped = debates.filter((debate) => debate.status === "stopped");
+  const clearThreshold = Math.max(0, Number.parseInt(clearBelowRounds || "0", 10) || 0);
+  const stoppedBelowThreshold = stopped.filter((debate) => {
+    const count = Math.max(1, Number(debate.agentCount ?? 0) || 1);
+    const completedRounds = Math.floor((Number(debate.currentTurn ?? 0) || 0) / count);
+    return completedRounds < clearThreshold;
+  });
 
   return (
     <div className="grid" style={{ gap: 20 }}>
@@ -317,12 +351,15 @@ export default function DebatesPage() {
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h3 style={{ margin: 0 }}>已结束</h3>
           {scope === "mine" ? (
-            <div className="row" style={{ gap: 8 }}>
+            <div className="row" style={{ gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <button className="btn" disabled={stopped.length === 0 || purgingStopped} onClick={() => setClearMenuOpen((current) => !current)}>
+                {purgingStopped ? "清空中..." : "清空..."}
+              </button>
               <button className="btn" disabled={finished.length === 0} onClick={() => setSelectedFinishedIds(finished.map((d) => d.id))}>
                 全选
               </button>
               <button className="btn" disabled={selectedFinishedIds.length === 0} onClick={() => setSelectedFinishedIds([])}>
-                清空
+                清空选择
               </button>
               <button className="btn btn-danger" disabled={selectedFinishedIds.length === 0 || bulkDeleting} onClick={() => void deleteSelectedFinished()}>
                 {bulkDeleting ? "删除中..." : `删除所选 (${selectedFinishedIds.length})`}
@@ -429,6 +466,72 @@ export default function DebatesPage() {
           {finished.length === 0 ? <div className="muted">暂无已结束的辩论</div> : null}
         </div>
       </section>
+      {scope === "mine" && clearMenuOpen ? (
+        <div
+          onClick={() => {
+            if (!purgingStopped) setClearMenuOpen(false);
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0, 0, 0, 0.45)",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 80,
+            padding: 16
+          }}
+        >
+          <div
+            className="panel"
+            onClick={(event) => event.stopPropagation()}
+            style={{ width: "min(520px, 100%)", display: "grid", gap: 12 }}
+          >
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+              <strong>清空已停止辩论</strong>
+              <button className="btn" disabled={purgingStopped} onClick={() => setClearMenuOpen(false)}>
+                关闭
+              </button>
+            </div>
+            <div className="muted">只处理 `status = stopped` 的辩论，不影响 `completed` 或 `failed`。</div>
+            <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <span>清空已完成轮数小于</span>
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={clearBelowRounds}
+                onChange={(event) => setClearBelowRounds(event.target.value)}
+                style={{ width: 96 }}
+              />
+              <span>轮的已停止辩论</span>
+            </div>
+            <div className="muted">
+              当前将删除 {stoppedBelowThreshold.length} 场符合条件的已停止辩论。
+            </div>
+            <div className="row" style={{ gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button className="btn" disabled={purgingStopped} onClick={() => setClearMenuOpen(false)}>
+                取消
+              </button>
+              <button
+                className="btn btn-danger"
+                disabled={purgingStopped || stoppedBelowThreshold.length === 0}
+                onClick={() => {
+                  if (
+                    !window.confirm(
+                      `确定清空已完成轮数小于 ${clearThreshold} 轮的已停止辩论 ${stoppedBelowThreshold.length} 场吗？`
+                    )
+                  ) {
+                    return;
+                  }
+                  void purgeStoppedDebates(clearThreshold);
+                }}
+              >
+                {purgingStopped ? "清空中..." : `确认清空${stoppedBelowThreshold.length > 0 ? ` (${stoppedBelowThreshold.length})` : ""}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

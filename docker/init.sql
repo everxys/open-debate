@@ -258,6 +258,34 @@ create table if not exists debate_files (
 create index if not exists idx_debate_files_debate_id_updated_at
   on debate_files (debate_id, updated_at desc);
 
+create table if not exists debate_summary_jobs (
+  id uuid primary key default gen_random_uuid(),
+  debate_id uuid not null references debates(id) on delete cascade,
+  kind text not null check (kind in ('turn_summary', 'round_summary', 'facts_board')),
+  status text not null check (status in ('queued', 'running', 'retry_wait', 'blocked', 'failed', 'completed', 'dead_letter')),
+  job_key text not null,
+  turn_number integer null,
+  round_number integer null,
+  depends_on_keys jsonb not null default '[]'::jsonb,
+  payload_json jsonb not null default '{}'::jsonb,
+  attempt_count integer not null default 0,
+  last_error text null,
+  next_retry_at timestamptz null,
+  locked_by text null,
+  locked_at timestamptz null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  completed_at timestamptz null,
+  unique (debate_id, job_key)
+);
+
+create index if not exists idx_debate_summary_jobs_status_retry
+  on debate_summary_jobs (status, next_retry_at asc nulls first, updated_at asc);
+create index if not exists idx_debate_summary_jobs_debate_status
+  on debate_summary_jobs (debate_id, status, updated_at desc);
+create index if not exists idx_debate_summary_jobs_kind_round_turn
+  on debate_summary_jobs (debate_id, kind, round_number asc, turn_number asc);
+
 create table if not exists debate_file_versions (
   id uuid primary key default gen_random_uuid(),
   debate_id uuid not null references debates(id) on delete cascade,

@@ -1,3 +1,14 @@
+## 2026-04-02
+
+- 辩论列表页的已结束区域改成统一的 `清空...` 弹窗：现在只保留“按已完成轮数阈值批量清空 stopped 辩论”，不再暴露“一键清空全部已停止辩论”，避免误删。
+- `/api/debates/purge-stopped` 后端接口已同步收口，只接受“按轮数阈值清空 stopped 辩论”的请求，不再保留任何“清空全部已停止辩论”的分支。
+- AI 总结系统重构为数据库任务队列：新增 `debate_summary_jobs` 表承载 `turn_summary / round_summary / facts_board` 三类总结任务，支持 `queued / running / retry_wait / blocked / failed / completed / dead_letter` 状态、依赖、重试、锁与恢复，不再使用 `context/summarizer_backlog.json` 作为真源。
+- 辩论主流程与总结完全解耦：主循环现在只负责在每回/每轮边界 enqueue 总结任务，不再等待回摘要、轮摘要或 facts board 完成，下一回讨论可以直接继续推进；总结改由独立后台 worker 抢占任务并异步执行。
+- 新增总结 worker 与恢复逻辑：服务启动后会自动启动 summary worker，周期性回收超时 `running` 任务并继续处理 `queued / retry_wait / blocked` 任务；即使 debate 已 `completed`，总结任务也会继续后台补齐。
+- 总结输出加了轻量 post-check：回摘要、轮摘要、facts board 现在会校验最小长度与必需 Markdown section，避免把空摘要、报错回显或明显垃圾内容直接写入文件。
+- 辩论页升级了“总结任务”可观测性：状态栏现在会显示总结任务总览、待补/失败数量和活跃任务列表，并支持直接触发 `重试失败总结` 与 `重建 facts board`；发言目录和轮目录的“AI 总结中 / 待补生成 / 失败”标记已改为读取新的数据库 job 状态。
+- 新增 `app/api/debates/[id]/summary-jobs` 接口，支持查看总结任务列表以及手动执行 `retry_failed / rebuild_turn / rebuild_round / rebuild_facts`，为后续更完整的总结控制台打下基础。
+
 ## 2026-03-31
 
 - 原始发言归档继续细化：运行时不再把一整轮都塞进单个 `debate/answers/round-<n>.md`，而是进一步拆成 `debate/answers/round-<n>/turn-<m>.md`，做到每一回一个文件，避免单轮文件继续膨胀。

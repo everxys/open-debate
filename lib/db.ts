@@ -5,6 +5,7 @@ const globalPool = globalThis as typeof globalThis & {
   openDebatePool?: Pool;
   openDebateSchemaReady?: Promise<void>;
   openDebateRuntimeRecoveryScheduled?: boolean;
+  openDebateSummaryWorkerScheduled?: boolean;
 };
 
 /** Schedule debate runtime recovery after DB is ready */
@@ -19,6 +20,21 @@ function scheduleDebateRuntimeRecovery(reason = "db_ready") {
       .catch((error) => {
         globalPool.openDebateRuntimeRecoveryScheduled = false;
         console.error("debate runtime recovery bootstrap failed", error);
+      });
+  });
+}
+
+function scheduleSummaryJobWorker(reason = "db_ready") {
+  if (typeof window !== "undefined") return;
+  if (globalPool.openDebateSummaryWorkerScheduled) return;
+
+  globalPool.openDebateSummaryWorkerScheduled = true;
+  queueMicrotask(() => {
+    void import("@/lib/summary-job-worker")
+      .then(({ ensureSummaryJobWorkerStarted }) => ensureSummaryJobWorkerStarted(reason))
+      .catch((error) => {
+        globalPool.openDebateSummaryWorkerScheduled = false;
+        console.error("summary job worker bootstrap failed", error);
       });
   });
 }
@@ -79,6 +95,7 @@ export async function ensureDbReady(): Promise<Pool> {
   }
   await globalPool.openDebateSchemaReady;
   scheduleDebateRuntimeRecovery();
+  scheduleSummaryJobWorker();
   return pool;
 }
 
@@ -149,8 +166,40 @@ async function ensureSchema(pool: Pool) {
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_created_at on debate_file_activity_logs (debate_id, created_at desc, id desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_action_created_at on debate_file_activity_logs (debate_id, action, created_at desc, id desc)");
   await pool.query(`
+    create table if not exists debate_summary_jobs (
+      id uuid primary key,
+      debate_id uuid not null,
+      kind text not null,
+      status text not null,
+      job_key text not null,
+      turn_number int null,
+      round_number int null,
+      depends_on_keys jsonb not null default '[]'::jsonb,
+      payload_json jsonb not null default '{}'::jsonb,
+      attempt_count int not null default 0,
+      last_error text null,
+      next_retry_at timestamptz null,
+      locked_by text null,
+      locked_at timestamptz null,
+      created_at timestamptz not null,
+      updated_at timestamptz not null,
+      completed_at timestamptz null,
+      unique (debate_id, job_key)
+    )
+  `);
+  await pool.query("create index if not exists idx_debate_summary_jobs_status_retry on debate_summary_jobs (status, next_retry_at asc nulls first, updated_at asc)");
+  await pool.query("create index if not exists idx_debate_summary_jobs_debate_status on debate_summary_jobs (debate_id, status, updated_at desc)");
+  await pool.query("create index if not exists idx_debate_summary_jobs_kind_round_turn on debate_summary_jobs (debate_id, kind, round_number asc, turn_number asc)");
+  await pool.query(`
     do $$
     begin
+      if not exists (
+        select 1 from pg_constraint where conname = 'debate_summary_jobs_debate_id_fkey'
+      ) then
+        alter table debate_summary_jobs
+          add constraint debate_summary_jobs_debate_id_fkey
+          foreign key (debate_id) references debates(id) on delete cascade;
+      end if;
       if not exists (
         select 1 from pg_constraint where conname = 'debate_file_versions_debate_id_fkey'
       ) then
@@ -185,6 +234,20 @@ async function ensureSchema(pool: Pool) {
         alter table debate_file_activity_logs
           add constraint debate_file_activity_logs_target_debate_agent_id_fkey
           foreign key (target_debate_agent_id) references debate_agents(id) on delete set null;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'debate_summary_jobs_kind_check'
+      ) then
+        alter table debate_summary_jobs
+          add constraint debate_summary_jobs_kind_check
+          check (kind in ('turn_summary', 'round_summary', 'facts_board'));
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'debate_summary_jobs_status_check'
+      ) then
+        alter table debate_summary_jobs
+          add constraint debate_summary_jobs_status_check
+          check (status in ('queued', 'running', 'retry_wait', 'blocked', 'failed', 'completed', 'dead_letter'));
       end if;
       if not exists (
         select 1 from pg_constraint where conname = 'debate_file_activity_logs_action_check'

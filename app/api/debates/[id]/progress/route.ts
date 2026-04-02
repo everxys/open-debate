@@ -2,6 +2,7 @@ import { query } from "@/lib/db";
 import { getDebateLiveProgress } from "@/lib/debate-live";
 import { toErrorResponse } from "@/lib/http";
 import { readSession } from "@/lib/session";
+import { listActiveDebateSummaryJobs, toDebateSummaryJobLiveView } from "@/lib/summary-jobs";
 
 export const runtime = "nodejs";
 
@@ -37,7 +38,17 @@ export async function GET(
       });
     }
 
-    return new Response(JSON.stringify({ success: true, data: getDebateLiveProgress(id) }), {
+    const live = getDebateLiveProgress(id);
+    const dbJobs = await listActiveDebateSummaryJobs(id).catch(() => []);
+    const mergedJobs = new Map<string, ReturnType<typeof toDebateSummaryJobLiveView>>();
+    for (const job of dbJobs) {
+      mergedJobs.set(job.jobKey, toDebateSummaryJobLiveView(job));
+    }
+    for (const job of live.summaryJobs) {
+      mergedJobs.set(job.key, job);
+    }
+
+    return new Response(JSON.stringify({ success: true, data: { progress: live.progress, summaryJobs: [...mergedJobs.values()] } }), {
       headers: { "Content-Type": "application/json" }
     });
   } catch (error) {
