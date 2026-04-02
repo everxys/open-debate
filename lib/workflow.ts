@@ -5,17 +5,9 @@ export type WorkflowCompletionMode = "consensus_only" | "consensus_plus_outputs"
 export type DebateWorkflowContextAccessRule = {
   scope?: WorkflowContextAccessScope;
   pathPrefix?: string;
-  label?: string | null;
   maxFiles?: number | null;
   maxCharsPerFile?: number | null;
   recursive?: boolean;
-};
-
-export type DebateWorkflowRoleMeta = {
-  label?: string | null;
-  category?: "coordinator" | "reviewer" | "contributor" | "custom" | null;
-  summary?: string | null;
-  writingPolicy?: "coordinate" | "review" | "contribute" | null;
 };
 
 export type DebateWorkflowQualityChecks = {
@@ -76,18 +68,9 @@ export type DebateWorkflowConfig = {
       minOptions?: number | null;
       maxOptions?: number | null;
     };
-    announcement?: {
-      announcer?:
-        | { type?: "seat"; seat?: number }
-        | { type?: "role"; role?: string | null };
-      fallback?:
-        | { type?: "seat"; seat?: number }
-        | { type?: "role"; role?: string | null };
-    };
     governance?: {
       tieBreaker?: "revote" | "seat_order";
       maxTieRounds?: number;
-      fallbackMode?: string | null;
     };
   };
 
@@ -98,12 +81,6 @@ export type DebateWorkflowConfig = {
   };
 
   promptPolicies?: {
-    openingPrompt?: string | null;
-    round1Fairness?: boolean;
-    responseFormat?: {
-      requireMarkdown?: boolean;
-      forbidRawJson?: boolean;
-    };
     outputBudget?: {
       discussionMaxTokens?: number | null;
       writingMaxTokens?: number | null;
@@ -114,11 +91,6 @@ export type DebateWorkflowConfig = {
     allowedPaths?: string[];
     requiredFiles?: Array<{
       path?: string;
-      ownerRole?: string | null;
-      draftRole?: string | null;
-      reviewRole?: string | null;
-      finalRole?: string | null;
-      description?: string | null;
       minChars?: number | null;
       minMarkdownHeadings?: number | null;
       requiredSnippets?: string[];
@@ -141,7 +113,6 @@ export type DebateWorkflowConfig = {
     };
   };
   summarizer?: DebateWorkflowSummarizerConfig;
-  rolesMeta?: Record<string, DebateWorkflowRoleMeta>;
   contextAccess?: {
     alwaysRead?: DebateWorkflowContextAccessRule[];
     readWhenNeeded?: DebateWorkflowContextAccessRule[];
@@ -180,18 +151,9 @@ export type NormalizedDebateWorkflow = {
       minOptions: number | null;
       maxOptions: number | null;
     };
-    announcement: {
-      announcer:
-        | { type: "seat"; seat: number }
-        | { type: "role"; role: string };
-      fallback:
-        | { type: "seat"; seat: number }
-        | { type: "role"; role: string };
-    };
     governance: {
       tieBreaker: "revote" | "seat_order";
       maxTieRounds: number;
-      fallbackMode: string | null;
     };
   };
   consensus: {
@@ -200,12 +162,6 @@ export type NormalizedDebateWorkflow = {
     requireAllSeats: boolean;
   };
   promptPolicies: {
-    openingPrompt: string | null;
-    round1Fairness: boolean;
-    responseFormat: {
-      requireMarkdown: boolean;
-      forbidRawJson: boolean;
-    };
     outputBudget: {
       discussionMaxTokens: number | null;
       writingMaxTokens: number | null;
@@ -215,11 +171,6 @@ export type NormalizedDebateWorkflow = {
     allowedPaths: string[];
     requiredFiles: Array<{
       path: string;
-      ownerRole: string | null;
-      draftRole: WorkflowDeliverableRole | null;
-      reviewRole: WorkflowDeliverableRole | null;
-      finalRole: WorkflowDeliverableRole | null;
-      description: string | null;
       minChars: number | null;
       minMarkdownHeadings: number | null;
       requiredSnippets: string[];
@@ -265,20 +216,10 @@ export type NormalizedDebateWorkflow = {
       factsBoardPath: string;
     };
   };
-  rolesMeta: Record<
-    string,
-    {
-      label: string | null;
-      category: "coordinator" | "reviewer" | "contributor" | "custom";
-      summary: string | null;
-      writingPolicy: "coordinate" | "review" | "contribute" | null;
-    }
-  >;
   contextAccess: {
     alwaysRead: Array<{
       scope: WorkflowContextAccessScope;
       pathPrefix: string;
-      label: string | null;
       maxFiles: number;
       maxCharsPerFile: number;
       recursive: boolean;
@@ -286,7 +227,6 @@ export type NormalizedDebateWorkflow = {
     readWhenNeeded: Array<{
       scope: WorkflowContextAccessScope;
       pathPrefix: string;
-      label: string | null;
       maxFiles: number;
       maxCharsPerFile: number;
       recursive: boolean;
@@ -295,7 +235,6 @@ export type NormalizedDebateWorkflow = {
       phaseKind: WorkflowPhaseKind;
       scope: WorkflowContextAccessScope;
       pathPrefix: string;
-      label: string | null;
       maxFiles: number;
       maxCharsPerFile: number;
       recursive: boolean;
@@ -303,7 +242,6 @@ export type NormalizedDebateWorkflow = {
   };
 };
 
-export type WorkflowDeliverableRole = string;
 export type NormalizedWorkflowRequiredFile = NormalizedDebateWorkflow["deliverables"]["requiredFiles"][number];
 export type NormalizedWorkflowContextAccessRule = NormalizedDebateWorkflow["contextAccess"]["alwaysRead"][number];
 export type NormalizedWorkflowPhaseGateRule = NormalizedDebateWorkflow["contextAccess"]["unlockAfterPhase"][number];
@@ -336,25 +274,13 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
     },
     voting: {
       custom: { minOptions: 2, maxOptions: null },
-      announcement: {
-        announcer: { type: "seat", seat: 1 },
-        fallback: { type: "seat", seat: 1 }
-      },
       governance: {
         tieBreaker: "revote",
-        maxTieRounds: 2,
-        fallbackMode: "manual_review"
+        maxTieRounds: 2
       }
     },
     consensus: { enabled: true, minAvgScore: 8, requireAllSeats: true },
     promptPolicies: {
-      openingPrompt:
-        "Keep the discussion readable and concrete. State tradeoffs, assumptions, and reasons clearly. Prefer a few strong points over many shallow ones.",
-      round1Fairness: true,
-      responseFormat: {
-        requireMarkdown: true,
-        forbidRawJson: true
-      },
       outputBudget: {
         discussionMaxTokens: 1200,
         writingMaxTokens: 2400
@@ -394,7 +320,6 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
         factsBoardPath: "facts/board.md"
       }
     },
-    rolesMeta: {},
     contextAccess: {
       alwaysRead: [],
       readWhenNeeded: [],
@@ -407,17 +332,9 @@ export function formatRequiredDeliverableSummary(
   file: NormalizedWorkflowRequiredFile,
   style: "plain" | "display" = "plain"
 ) {
-  const roleSummary = [
-    file.draftRole ? `draft:${file.draftRole}` : "",
-    file.reviewRole ? `review:${file.reviewRole}` : "",
-    file.finalRole ? `final:${file.finalRole}` : ""
-  ]
-    .filter(Boolean)
-    .join(" / ");
   if (style === "display") {
     return [
       file.path,
-      roleSummary ? ` (${roleSummary})` : "",
       file.minChars ? ` (min ${file.minChars} chars)` : "",
       file.minMarkdownHeadings ? ` (min ${file.minMarkdownHeadings} headings)` : "",
       file.requiredSnippets.length ? ` (required ${file.requiredSnippets.join("/")})` : "",
@@ -430,9 +347,6 @@ export function formatRequiredDeliverableSummary(
   }
 
   const details: string[] = [];
-  if (file.draftRole) details.push(`draft=${file.draftRole}`);
-  if (file.reviewRole) details.push(`review=${file.reviewRole}`);
-  if (file.finalRole) details.push(`final=${file.finalRole}`);
   if (file.minChars) details.push(`minChars=${file.minChars}`);
   if (file.minMarkdownHeadings) details.push(`minHeadings=${file.minMarkdownHeadings}`);
   if (file.requiredSnippets.length) details.push(`required=${file.requiredSnippets.join("/")}`);
@@ -445,47 +359,13 @@ export function formatRequiredDeliverableSummary(
     );
   }
   const suffix = details.length ? ` ${details.join(" ")}` : "";
-  const description = file.description ? ` :: ${file.description}` : "";
-  return `${file.path}${suffix}${description}`;
+  return `${file.path}${suffix}`;
 }
 
 function toTrimmedString(value: unknown) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
-}
-
-function normalizeWorkflowDeliverableRole(value: unknown): WorkflowDeliverableRole | null {
-  const trimmed = toTrimmedString(value);
-  return trimmed ?? null;
-}
-
-function resolveRequiredFileRoles(input: {
-  ownerRole: string | null;
-  draftRole: WorkflowDeliverableRole | null;
-  reviewRole: WorkflowDeliverableRole | null;
-  finalRole: WorkflowDeliverableRole | null;
-}) {
-  if (input.draftRole || input.reviewRole || input.finalRole) {
-    return {
-      draftRole: input.draftRole,
-      reviewRole: input.reviewRole,
-      finalRole: input.finalRole
-    };
-  }
-  const normalizedOwner = normalizeWorkflowDeliverableRole(input.ownerRole);
-  if (!normalizedOwner) {
-    return {
-      draftRole: null,
-      reviewRole: null,
-      finalRole: null
-    };
-  }
-  return {
-    draftRole: normalizedOwner,
-    reviewRole: null,
-    finalRole: normalizedOwner
-  };
 }
 
 function toPositiveInt(value: unknown) {
@@ -529,31 +409,13 @@ function normalizeWorkflowFilePath(value: unknown) {
   return normalized;
 }
 
-function normalizeSeatOrRoleSelector(
-  value: unknown,
-  fallback: { type: "seat"; seat: number }
-) {
-  const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-  const selectorType = toTrimmedString(obj?.type);
-  if (selectorType === "role") {
-    const role = toTrimmedString(obj?.role);
-    if (role) return { type: "role" as const, role };
-  }
-  return { type: "seat" as const, seat: toPositiveInt(obj?.seat) ?? fallback.seat };
-}
-
 function normalizeVoting(value: unknown): NormalizedDebateWorkflow["voting"] {
   if (typeof value !== "object" || value === null) {
     return {
       custom: { minOptions: null as number | null, maxOptions: null as number | null },
-      announcement: {
-        announcer: { type: "seat" as const, seat: 1 },
-        fallback: { type: "seat" as const, seat: 1 }
-      },
       governance: {
         tieBreaker: "revote" as const,
-        maxTieRounds: 2,
-        fallbackMode: "manual_review"
+        maxTieRounds: 2
       }
     };
   }
@@ -562,23 +424,15 @@ function normalizeVoting(value: unknown): NormalizedDebateWorkflow["voting"] {
   const customObj = typeof customRaw === "object" && customRaw !== null ? (customRaw as Record<string, unknown>) : null;
   const minOptions = toPositiveIntOrNull(customObj?.minOptions);
   const maxOptions = toPositiveIntOrNull(customObj?.maxOptions);
-
-  const announcementRaw = obj.announcement;
-  const announcementObj =
-    typeof announcementRaw === "object" && announcementRaw !== null ? (announcementRaw as Record<string, unknown>) : null;
-  const announcer = normalizeSeatOrRoleSelector(announcementObj?.announcer, { type: "seat", seat: 1 });
-  const fallback = normalizeSeatOrRoleSelector(announcementObj?.fallback, { type: "seat", seat: 1 });
   const governanceRaw = obj.governance;
   const governanceObj =
     typeof governanceRaw === "object" && governanceRaw !== null ? (governanceRaw as Record<string, unknown>) : null;
   const tieBreakerRaw = toTrimmedString(governanceObj?.tieBreaker);
   const tieBreaker = tieBreakerRaw === "seat_order" ? "seat_order" : "revote";
   const maxTieRounds = toPositiveInt(governanceObj?.maxTieRounds) ?? 2;
-  const fallbackMode = governanceObj?.fallbackMode === null ? null : toTrimmedString(governanceObj?.fallbackMode) ?? "manual_review";
   return {
     custom: { minOptions, maxOptions },
-    announcement: { announcer, fallback },
-    governance: { tieBreaker, maxTieRounds, fallbackMode }
+    governance: { tieBreaker, maxTieRounds }
   };
 }
 
@@ -709,54 +563,6 @@ function normalizeSummarizer(value: unknown): NormalizedDebateWorkflow["summariz
   };
 }
 
-function normalizeRolesMeta(value: unknown): NormalizedDebateWorkflow["rolesMeta"] {
-  if (typeof value !== "object" || value === null) return {};
-  const obj = value as Record<string, unknown>;
-  const entries = Object.entries(obj)
-    .map(([role, raw]) => {
-      const trimmedRole = toTrimmedString(role);
-      if (!trimmedRole || typeof raw !== "object" || raw === null) return null;
-      const meta = raw as Record<string, unknown>;
-      const categoryRaw = toTrimmedString(meta.category);
-      const category =
-        categoryRaw === "coordinator" || categoryRaw === "reviewer" || categoryRaw === "contributor"
-          ? categoryRaw
-          : "custom";
-      const writingPolicyRaw = toTrimmedString(meta.writingPolicy);
-      const writingPolicy =
-        writingPolicyRaw === "coordinate" || writingPolicyRaw === "review" || writingPolicyRaw === "contribute"
-          ? writingPolicyRaw
-          : null;
-      return [
-        trimmedRole,
-        {
-          label: meta.label === null ? null : toTrimmedString(meta.label),
-          category,
-          summary: meta.summary === null ? null : toTrimmedString(meta.summary),
-          writingPolicy
-        }
-      ] as const;
-    })
-    .filter((item): item is readonly [
-      string,
-      {
-        label: string | null;
-        category: "coordinator" | "reviewer" | "contributor" | "custom";
-        summary: string | null;
-        writingPolicy: "coordinate" | "review" | "contribute" | null;
-      }
-    ] => Boolean(item));
-  return Object.fromEntries(entries);
-}
-
-function normalizeRoles(value: unknown) {
-  return Array.isArray(value)
-    ? value
-        .map((r) => toTrimmedString(r))
-        .filter((r): r is string => Boolean(r))
-    : [];
-}
-
 function normalizePhaseIdentifier(kind: string, id: string, title: string) {
   return id;
 }
@@ -869,29 +675,14 @@ function normalizePhaseMachine(value: unknown) {
 
 function normalizePromptPolicies(value: unknown) {
   const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-  const responseFormatRaw = obj?.responseFormat;
-  const responseFormatObj =
-    typeof responseFormatRaw === "object" && responseFormatRaw !== null
-      ? (responseFormatRaw as Record<string, unknown>)
-      : null;
   const outputBudgetRaw = obj?.outputBudget;
   const outputBudgetObj =
     typeof outputBudgetRaw === "object" && outputBudgetRaw !== null
       ? (outputBudgetRaw as Record<string, unknown>)
       : null;
-  const round1FairnessRaw = obj?.round1Fairness;
-  const openingPromptRaw = obj?.openingPrompt;
-  const requireMarkdownRaw = responseFormatObj?.requireMarkdown;
-  const forbidRawJsonRaw = responseFormatObj?.forbidRawJson;
   const discussionMaxTokensRaw = outputBudgetObj?.discussionMaxTokens;
   const writingMaxTokensRaw = outputBudgetObj?.writingMaxTokens;
   return {
-    openingPrompt: openingPromptRaw === null ? null : toTrimmedString(openingPromptRaw),
-    round1Fairness: round1FairnessRaw === undefined ? true : Boolean(round1FairnessRaw),
-    responseFormat: {
-      requireMarkdown: requireMarkdownRaw === undefined ? true : Boolean(requireMarkdownRaw),
-      forbidRawJson: forbidRawJsonRaw === undefined ? true : Boolean(forbidRawJsonRaw)
-    },
     outputBudget: {
       discussionMaxTokens:
         discussionMaxTokensRaw === null ? null : (toPositiveInt(discussionMaxTokensRaw) ?? 1800),
@@ -918,13 +709,6 @@ function normalizeDeliverables(value: unknown) {
       const fileObj = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : null;
       const path = normalizeWorkflowFilePath(fileObj?.path);
       if (!path) return null;
-      const ownerRole = fileObj?.ownerRole === null ? null : toTrimmedString(fileObj?.ownerRole);
-      const resolvedRoles = resolveRequiredFileRoles({
-        ownerRole,
-        draftRole: normalizeWorkflowDeliverableRole(fileObj?.draftRole),
-        reviewRole: normalizeWorkflowDeliverableRole(fileObj?.reviewRole),
-        finalRole: normalizeWorkflowDeliverableRole(fileObj?.finalRole)
-      });
       const requiredSnippets = Array.isArray(fileObj?.requiredSnippets)
         ? fileObj.requiredSnippets
             .map((item) => toTrimmedString(item))
@@ -935,11 +719,6 @@ function normalizeDeliverables(value: unknown) {
       });
       return {
         path,
-        ownerRole,
-        draftRole: resolvedRoles.draftRole,
-        reviewRole: resolvedRoles.reviewRole,
-        finalRole: resolvedRoles.finalRole,
-        description: fileObj?.description === null ? null : toTrimmedString(fileObj?.description),
         minChars: toPositiveIntOrNull(fileObj?.minChars),
         minMarkdownHeadings: toPositiveIntOrNull(fileObj?.minMarkdownHeadings),
         requiredSnippets,
@@ -951,11 +730,6 @@ function normalizeDeliverables(value: unknown) {
         item
       ): item is {
         path: string;
-        ownerRole: string | null;
-        draftRole: WorkflowDeliverableRole | null;
-        reviewRole: WorkflowDeliverableRole | null;
-        finalRole: WorkflowDeliverableRole | null;
-        description: string | null;
         minChars: number | null;
         minMarkdownHeadings: number | null;
         requiredSnippets: string[];
@@ -1003,7 +777,6 @@ function normalizeContextAccessRule(
 ): {
   scope: WorkflowContextAccessScope;
   pathPrefix: string;
-  label: string | null;
   maxFiles: number;
   maxCharsPerFile: number;
   recursive: boolean;
@@ -1015,7 +788,6 @@ function normalizeContextAccessRule(
   return {
     scope,
     pathPrefix,
-    label: obj?.label === null ? null : toTrimmedString(obj?.label),
     maxFiles: toPositiveInt(obj?.maxFiles) ?? 6,
     maxCharsPerFile: toPositiveInt(obj?.maxCharsPerFile) ?? 4_000,
     recursive: obj?.recursive === undefined ? true : Boolean(obj?.recursive)
@@ -1085,7 +857,6 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
   });
   const ideaBank = normalizeIdeaBank((anyInput as { ideaBank?: unknown }).ideaBank);
   const summarizer = normalizeSummarizer((anyInput as { summarizer?: unknown }).summarizer);
-  const rolesMeta = normalizeRolesMeta((anyInput as { rolesMeta?: unknown }).rolesMeta);
   let contextAccess: NormalizedDebateWorkflow["contextAccess"];
   try {
     contextAccess = normalizeContextAccess((anyInput as { contextAccess?: unknown }).contextAccess);
@@ -1104,7 +875,6 @@ export function normalizeDebateWorkflow(input: unknown): NormalizedDebateWorkflo
     completion,
     ideaBank,
     summarizer,
-    rolesMeta,
     contextAccess
   };
 }
@@ -1139,14 +909,9 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
         minOptions: normalized.voting.custom.minOptions,
         maxOptions: normalized.voting.custom.maxOptions
       },
-      announcement: {
-        announcer: normalized.voting.announcement.announcer,
-        fallback: normalized.voting.announcement.fallback
-      },
       governance: {
         tieBreaker: normalized.voting.governance.tieBreaker as "revote" | "seat_order",
-        maxTieRounds: normalized.voting.governance.maxTieRounds,
-        fallbackMode: normalized.voting.governance.fallbackMode
+        maxTieRounds: normalized.voting.governance.maxTieRounds
       }
     },
     consensus: {
@@ -1155,12 +920,6 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
       requireAllSeats: normalized.consensus.requireAllSeats
     },
     promptPolicies: {
-      openingPrompt: normalized.promptPolicies.openingPrompt,
-      round1Fairness: normalized.promptPolicies.round1Fairness,
-      responseFormat: {
-        requireMarkdown: normalized.promptPolicies.responseFormat.requireMarkdown,
-        forbidRawJson: normalized.promptPolicies.responseFormat.forbidRawJson
-      },
       outputBudget: {
         discussionMaxTokens: normalized.promptPolicies.outputBudget.discussionMaxTokens,
         writingMaxTokens: normalized.promptPolicies.outputBudget.writingMaxTokens
@@ -1170,11 +929,6 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
       allowedPaths: normalized.deliverables.allowedPaths,
       requiredFiles: normalized.deliverables.requiredFiles.map((file) => ({
         path: file.path,
-        ownerRole: file.ownerRole,
-        draftRole: file.draftRole,
-        reviewRole: file.reviewRole,
-        finalRole: file.finalRole,
-        description: file.description,
         minChars: file.minChars,
         minMarkdownHeadings: file.minMarkdownHeadings,
         requiredSnippets: file.requiredSnippets,
@@ -1214,22 +968,10 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
         factsBoardPath: normalized.summarizer.outputPaths.factsBoardPath
       }
     },
-    rolesMeta: Object.fromEntries(
-      Object.entries(normalized.rolesMeta).map(([role, meta]) => [
-        role,
-        {
-          label: meta.label,
-          category: meta.category === "custom" ? null : meta.category,
-          summary: meta.summary,
-          writingPolicy: meta.writingPolicy
-        }
-      ])
-    ),
     contextAccess: {
       alwaysRead: normalized.contextAccess.alwaysRead.map((rule) => ({
         scope: rule.scope,
         pathPrefix: rule.pathPrefix,
-        label: rule.label,
         maxFiles: rule.maxFiles,
         maxCharsPerFile: rule.maxCharsPerFile,
         recursive: rule.recursive
@@ -1237,7 +979,6 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
       readWhenNeeded: normalized.contextAccess.readWhenNeeded.map((rule) => ({
         scope: rule.scope,
         pathPrefix: rule.pathPrefix,
-        label: rule.label,
         maxFiles: rule.maxFiles,
         maxCharsPerFile: rule.maxCharsPerFile,
         recursive: rule.recursive
@@ -1246,7 +987,6 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
         phaseKind: rule.phaseKind,
         scope: rule.scope,
         pathPrefix: rule.pathPrefix,
-        label: rule.label,
         maxFiles: rule.maxFiles,
         maxCharsPerFile: rule.maxCharsPerFile,
         recursive: rule.recursive

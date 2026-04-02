@@ -40,7 +40,6 @@ type WorkflowPhaseKind = WorkflowPhasePrompt["kind"];
 type WorkflowContextAccessRule = {
   scope: "shared" | "seat";
   pathPrefix: string;
-  label: string;
   maxFiles: number;
   maxCharsPerFile: number;
   recursive: boolean;
@@ -87,7 +86,7 @@ type WorkflowConfigPayload = {
 type WorkflowPromptDialogState =
   | null
   | {
-      type: "opening" | "phase";
+      type: "phase";
       title: string;
       description: string;
       value: string;
@@ -112,7 +111,6 @@ function createContextAccessRule(): WorkflowContextAccessRule {
   return {
     scope: "shared",
     pathPrefix: "",
-    label: "",
     maxFiles: 6,
     maxCharsPerFile: 4000,
     recursive: true
@@ -133,7 +131,6 @@ function normalizeContextAccessPayload(value: unknown): WorkflowContextAccess {
     return {
       scope: rule?.scope === "seat" ? "seat" : "shared",
       pathPrefix: typeof rule?.pathPrefix === "string" ? rule.pathPrefix : "",
-      label: typeof rule?.label === "string" ? rule.label : "",
       maxFiles:
         typeof rule?.maxFiles === "number" && Number.isFinite(rule.maxFiles) && rule.maxFiles > 0
           ? Math.floor(rule.maxFiles)
@@ -234,7 +231,6 @@ export default function StrategyDetailPage() {
   const [isForking, setIsForking] = useState(false);
   const [isExportingFolder, setIsExportingFolder] = useState(false);
   const [isImportingFolder, setIsImportingFolder] = useState(false);
-  const [workflowOpeningPrompt, setWorkflowOpeningPrompt] = useState("");
   const [workflowPhasePrompts, setWorkflowPhasePrompts] = useState<WorkflowPhasePrompt[]>([]);
   const [workflowPhasePromptsLoading, setWorkflowPhasePromptsLoading] = useState(false);
   const [workflowPhasePromptsSaving, setWorkflowPhasePromptsSaving] = useState(false);
@@ -303,7 +299,6 @@ export default function StrategyDetailPage() {
       if (!workflowResponse.ok) {
         showToast("error", workflowPayload.error?.message ?? "加载阶段注入提示词失败");
       } else {
-        setWorkflowOpeningPrompt(typeof workflowPayload.data?.openingPrompt === "string" ? workflowPayload.data.openingPrompt : "");
         const phases = Array.isArray(workflowPayload.data?.phases) ? workflowPayload.data.phases : [];
         setWorkflowPhasePrompts(
           phases.map((phase: Record<string, unknown>) => ({
@@ -713,11 +708,6 @@ export default function StrategyDetailPage() {
 
   function applyWorkflowPromptDialog() {
     if (!workflowPromptDialog) return;
-    if (workflowPromptDialog.type === "opening") {
-      setWorkflowOpeningPrompt(workflowPromptDialog.value);
-      setWorkflowPromptDialog(null);
-      return;
-    }
     if (typeof workflowPromptDialog.phaseIndex === "number") {
       updateWorkflowPhasePrompt(workflowPromptDialog.phaseIndex, workflowPromptDialog.value);
     }
@@ -732,7 +722,6 @@ export default function StrategyDetailPage() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          openingPrompt: workflowOpeningPrompt.trim() ? workflowOpeningPrompt : null,
           phases: workflowPhasePrompts.map((phase) => ({
             id: phase.id,
             injectedPrompt: phase.injectedPrompt.trim() ? phase.injectedPrompt : null
@@ -765,10 +754,6 @@ export default function StrategyDetailPage() {
         if (!current) return current;
         return {
           ...current,
-          promptPolicies: {
-            ...(typeof current.promptPolicies === "object" && current.promptPolicies !== null ? (current.promptPolicies as Record<string, unknown>) : {}),
-            openingPrompt: typeof payload.data?.openingPrompt === "string" ? payload.data.openingPrompt : workflowOpeningPrompt
-          },
           phaseMachine: {
             ...(typeof current.phaseMachine === "object" && current.phaseMachine !== null ? (current.phaseMachine as Record<string, unknown>) : {}),
             phases
@@ -846,7 +831,6 @@ export default function StrategyDetailPage() {
               alwaysRead: workflowContextAccess.alwaysRead.map((rule) => ({
                 scope: rule.scope,
                 pathPrefix: rule.pathPrefix.trim(),
-                label: rule.label.trim() || null,
                 maxFiles: Math.max(1, Math.floor(rule.maxFiles || 1)),
                 maxCharsPerFile: Math.max(200, Math.floor(rule.maxCharsPerFile || 200)),
                 recursive: rule.recursive
@@ -854,7 +838,6 @@ export default function StrategyDetailPage() {
               readWhenNeeded: workflowContextAccess.readWhenNeeded.map((rule) => ({
                 scope: rule.scope,
                 pathPrefix: rule.pathPrefix.trim(),
-                label: rule.label.trim() || null,
                 maxFiles: Math.max(1, Math.floor(rule.maxFiles || 1)),
                 maxCharsPerFile: Math.max(200, Math.floor(rule.maxCharsPerFile || 200)),
                 recursive: rule.recursive
@@ -863,7 +846,6 @@ export default function StrategyDetailPage() {
                 phaseKind: rule.phaseKind,
                 scope: rule.scope,
                 pathPrefix: rule.pathPrefix.trim(),
-                label: rule.label.trim() || null,
                 maxFiles: Math.max(1, Math.floor(rule.maxFiles || 1)),
                 maxCharsPerFile: Math.max(200, Math.floor(rule.maxCharsPerFile || 200)),
                 recursive: rule.recursive
@@ -1257,32 +1239,6 @@ export default function StrategyDetailPage() {
           <div className="muted">加载中...</div>
         ) : (
           <div className="grid" style={{ gap: 12 }}>
-            <div className="softBox stack">
-              <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-                <strong>开局注入提示词</strong>
-                <span className="muted">opening</span>
-              </div>
-              <div className="muted">在第 1 轮开始时统一注入，用来规定整场辩论开局必须先做什么、不能做什么。</div>
-              <div className="softBox" style={{ whiteSpace: "pre-wrap" }}>
-                {summarizePrompt(workflowOpeningPrompt)}
-              </div>
-              <div className="row" style={{ justifyContent: "flex-end" }}>
-                <button
-                  className="btn"
-                  type="button"
-                  onClick={() =>
-                    openWorkflowPromptDialog({
-                      type: "opening",
-                      title: "开局注入提示词",
-                      description: "在第 1 轮开始时统一注入，用来规定整场辩论开局必须先做什么、不能做什么。",
-                      value: workflowOpeningPrompt
-                    })
-                  }
-                >
-                  {detail.canEdit ? "查看 / 编辑" : "查看"}
-                </button>
-              </div>
-            </div>
             {workflowPhasePrompts.length <= 0 ? (
               <div className="muted">当前策略没有额外流程阶段，默认直接按普通讨论方式运行。</div>
             ) : null}
@@ -1377,10 +1333,6 @@ export default function StrategyDetailPage() {
                       <input value={rule.pathPrefix} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { pathPrefix: event.target.value })} placeholder="例如 prompts/ 或 final/" />
                     </div>
                     <div className="field">
-                      <label>说明（可选）</label>
-                      <input value={rule.label} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { label: event.target.value })} placeholder="这批文件是做什么的" />
-                    </div>
-                    <div className="field">
                       <label>单目录最多自动读几个文件</label>
                       <input type="number" min={1} value={rule.maxFiles} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { maxFiles: Number(event.target.value) || 1 })} />
                     </div>
@@ -1429,10 +1381,6 @@ export default function StrategyDetailPage() {
                     <div className="field">
                       <label>目录前缀</label>
                       <input value={rule.pathPrefix} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { pathPrefix: event.target.value })} placeholder="例如 references/ 或 facts/" />
-                    </div>
-                    <div className="field">
-                      <label>说明（可选）</label>
-                      <input value={rule.label} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { label: event.target.value })} />
                     </div>
                     <div className="field">
                       <label>单目录最多自动读几个文件</label>
@@ -1492,10 +1440,6 @@ export default function StrategyDetailPage() {
                     <div className="field">
                       <label>目录前缀</label>
                       <input value={rule.pathPrefix} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { pathPrefix: event.target.value })} placeholder="例如 final/ 或 playbook/" />
-                    </div>
-                    <div className="field">
-                      <label>说明（可选）</label>
-                      <input value={rule.label} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { label: event.target.value })} />
                     </div>
                     <div className="field">
                       <label>单目录最多自动读几个文件</label>

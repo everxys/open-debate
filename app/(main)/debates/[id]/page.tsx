@@ -38,6 +38,7 @@ type DebateAgent = {
   id: string;
   debateAgentId: string;
   displayName: string;
+  baseRoleName: string;
   name: string;
   provider: string;
   contextLength: number | null;
@@ -87,6 +88,7 @@ type TurnSummary = {
   createdAt: string;
   agent: {
     name: string;
+    baseRoleName: string;
     provider: string;
   };
 };
@@ -399,15 +401,11 @@ function formatWorkflowRulesMarkdown(raw: string) {
 
   if (lightweight) {
     rules.push("**默认讨论模式**");
-    rules.push(`- 开局注入提示词：${parsed.promptPolicies.openingPrompt ? "已配置" : "未配置"}`);
     rules.push("- 讨论会从第 1 轮直接开始，不默认插入额外流程阶段。");
     rules.push(`- 完成模式：${parsed.completion.mode}`);
-    rules.push(`- 输出格式：${parsed.promptPolicies.responseFormat.requireMarkdown ? "Markdown" : "不强制 Markdown"}`);
-    rules.push(`- 禁止原始 JSON：${parsed.promptPolicies.responseFormat.forbidRawJson ? "是" : "否"}`);
     rules.push(
       `- 单轮输出预算：讨论=${parsed.promptPolicies.outputBudget.discussionMaxTokens ?? "不设上限"}；写作=${parsed.promptPolicies.outputBudget.writingMaxTokens ?? "不设上限"}`
     );
-    rules.push(`- Round 1 公平性提示：${parsed.promptPolicies.round1Fairness ? "开启" : "关闭"}`);
     rules.push(
       `- 允许写入路径：${parsed.deliverables.allowedPaths.length ? parsed.deliverables.allowedPaths.join(" / ") : "（无）"}`
     );
@@ -422,7 +420,6 @@ function formatWorkflowRulesMarkdown(raw: string) {
   }
 
   rules.push("**阶段机**");
-  rules.push(`- 开局注入提示词：${parsed.promptPolicies.openingPrompt ? "已配置" : "未配置"}`);
   if (parsed.phaseMachine.phases.length === 0) {
     rules.push("- （未配置）");
   } else {
@@ -437,7 +434,6 @@ function formatWorkflowRulesMarkdown(raw: string) {
   rules.push("**官方投票**");
   rules.push(`- 平票处理：${parsed.voting.governance.tieBreaker === "seat_order" ? "按席位顺序决胜" : "重新投票"}`);
   rules.push(`- 最大平票重投次数：${parsed.voting.governance.maxTieRounds}`);
-  rules.push(`- 平票后建议模式：${parsed.voting.governance.fallbackMode ?? "（无）"}`);
   rules.push("- 平台当前使用固定角色席位；Host 负责主持流程，不使用动态换位。");
   rules.push("");
 
@@ -452,12 +448,9 @@ function formatWorkflowRulesMarkdown(raw: string) {
   rules.push(
     `- 收束阶段已配置：${parsed.phaseMachine.phases.some((phase) => phase.kind === "finalization") ? "是" : "否"}；必须先进入收束阶段才能完成=${parsed.phaseMachine.transitionRules.finalization.requirePhaseForCompletion ? "是" : "否"}`
   );
-  rules.push(`- 输出格式：${parsed.promptPolicies.responseFormat.requireMarkdown ? "Markdown" : "不强制 Markdown"}`);
-  rules.push(`- 禁止原始 JSON：${parsed.promptPolicies.responseFormat.forbidRawJson ? "是" : "否"}`);
   rules.push(
     `- 单轮输出预算：讨论=${parsed.promptPolicies.outputBudget.discussionMaxTokens ?? "不设上限"}；写作=${parsed.promptPolicies.outputBudget.writingMaxTokens ?? "不设上限"}`
   );
-  rules.push(`- Round 1 公平性提示：${parsed.promptPolicies.round1Fairness ? "开启" : "关闭"}`);
   rules.push(
     `- 允许写入路径：${parsed.deliverables.allowedPaths.length ? parsed.deliverables.allowedPaths.join(" / ") : "（无）"}`
   );
@@ -889,7 +882,7 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
                 }}
               >
                 <span>
-                  {`#${turn.turnNumber} · 第 ${round} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${turn.agent.name}`}
+                  {`#${turn.turnNumber} · 第 ${round} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${turn.agent.baseRoleName} · ${turn.agent.name}`}
                 </span>
                 <span className="muted"> · {new Date(turn.createdAt).toLocaleTimeString()}</span>
                 {turnSummaryFailed ? (
@@ -1484,7 +1477,7 @@ function ParticipantsPanel(props: {
                 #{agent.turnOrder} {agent.displayName}
                 <span className="muted">
                   {" "}
-                  · {agent.name} · 发言 {agent.turnCount}
+                  · {agent.baseRoleName} · {agent.name} · 发言 {agent.turnCount}
                 </span>
               </span>
               {props.isOwner ? (
@@ -1748,7 +1741,7 @@ function DebateViewerPanel(props: {
                 {(() => {
                   const turnInRound = ((props.viewer.turn.turnNumber - 1) % props.agentCount) + 1;
                   const seat = props.viewer.turn.seatNumber ? `Seat-${props.viewer.turn.seatNumber}` : "";
-                  return `#${props.viewer.turn.turnNumber} · 第 ${props.viewer.turn.roundNumber} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${props.viewer.turn.agent.name}`;
+                  return `#${props.viewer.turn.turnNumber} · 第 ${props.viewer.turn.roundNumber} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${props.viewer.turn.agent.baseRoleName} · ${props.viewer.turn.agent.name}`;
                 })()}
               </strong>
               <span className="muted">{props.viewer.turn.contentLength} chars</span>

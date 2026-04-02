@@ -15,26 +15,30 @@ import {
   toCanonicalWorkflowConfig
 } from "@/lib/workflow";
 
-const DISPLAY_NAME_ADJECTIVES = ["青", "赤", "白", "玄", "金", "银", "苍", "墨", "紫", "绿", "蓝", "橙"];
-const DISPLAY_NAME_NOUNS = ["狐", "狼", "鹰", "鲸", "蛇", "虎", "鹿", "鸦", "猫", "犬", "熊", "龙", "雀"];
-const MAX_DISPLAY_NAME_ATTEMPTS = 80;
-
-function pickRandomElement<T>(items: T[]) {
-  if (items.length === 0) throw new Error("pickRandomElement: empty list");
-  return items[Math.floor(Math.random() * items.length)] as T;
-}
-
 function createUniqueDisplayName(used: Set<string>) {
-  for (let attempt = 0; attempt < MAX_DISPLAY_NAME_ATTEMPTS; attempt += 1) {
-    const name = `${pickRandomElement(DISPLAY_NAME_ADJECTIVES)}${pickRandomElement(DISPLAY_NAME_NOUNS)}`;
+  let index = used.size + 1;
+  while (true) {
+    const name = `AI-${index}`;
     if (!used.has(name)) {
       used.add(name);
       return name;
     }
+    index += 1;
   }
-  const fallback = `席位-${randomUUID().slice(0, 8)}`;
-  used.add(fallback);
-  return fallback;
+}
+
+function normalizePreferredDisplayName(value: string | null | undefined) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized ? normalized.slice(0, 80) : null;
+}
+
+function resolveDisplayName(used: Set<string>, preferred?: string | null) {
+  const normalizedPreferred = normalizePreferredDisplayName(preferred);
+  if (normalizedPreferred && !used.has(normalizedPreferred)) {
+    used.add(normalizedPreferred);
+    return normalizedPreferred;
+  }
+  return createUniqueDisplayName(used);
 }
 
 function buildFileActivityDiagnosticLabels(input: {
@@ -113,12 +117,6 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<Retur
   lines.push(`- completion mode: ${workflow.completion.mode}`);
   lines.push(`- vote tieBreaker: ${workflow.voting.governance.tieBreaker}`);
   lines.push(`- vote maxTieRounds: ${workflow.voting.governance.maxTieRounds}`);
-  lines.push(`- vote fallbackMode: ${workflow.voting.governance.fallbackMode ?? "(none)"}`);
-  lines.push(`- round1 fairness: ${workflow.promptPolicies.round1Fairness ? "enabled" : "disabled"}`);
-  lines.push(`- opening prompt: ${workflow.promptPolicies.openingPrompt ? "configured" : "none"}`);
-  lines.push(
-    `- response format: markdown=${workflow.promptPolicies.responseFormat.requireMarkdown ? "yes" : "no"}; rawJson=${workflow.promptPolicies.responseFormat.forbidRawJson ? "forbidden" : "allowed"}`
-  );
   lines.push(
     `- output budget: discussion=${workflow.promptPolicies.outputBudget.discussionMaxTokens}; writing=${workflow.promptPolicies.outputBudget.writingMaxTokens}`
   );
@@ -580,7 +578,7 @@ async function createDebateWithStrategy(
     enableSharedFacts: boolean;
     strategy: {
       strategyId: string;
-      bindings: Array<{ roleId: string; agentId: string }>;
+      bindings: Array<{ roleId: string; agentId: string; displayName?: string | null }>;
       summaryAgentId?: string | null;
     };
   }
@@ -628,7 +626,7 @@ async function createDebateWithStrategy(
       const insertParticipant = await insertDebateAgent({
         debateId: debate.id,
         agentId: binding.agentId,
-        displayName: createUniqueDisplayName(usedDisplayNames),
+        displayName: resolveDisplayName(usedDisplayNames, binding.displayName),
         turnOrder: index + 1,
         now
       });
@@ -669,6 +667,7 @@ async function createDebateWithStrategy(
 export async function getDebateDetail(id: string) {
   const session = await requireSessionUser();
   const { debate, isOwner } = await getDebateForView(id, session.userId);
+  const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debate.id);
   const agentRows = await query<Record<string, unknown>>(
     `
       select da.id as debate_agent_id,
@@ -693,6 +692,7 @@ export async function getDebateDetail(id: string) {
     id: String(item.ai_agent_id),
     debateAgentId: String(item.debate_agent_id),
     displayName: item.display_name ? String(item.display_name) : `Seat-${Number(item.turn_order)}`,
+    baseRoleName: getDebateParticipantRoleType(roleAssignments, String(item.debate_agent_id)),
     name: item.agent_name ? String(item.agent_name) : "Unknown",
     provider: item.agent_provider ? String(item.agent_provider) : "openai",
     contextLength: item.context_length === null ? null : Number(item.context_length),
@@ -940,6 +940,7 @@ export async function listDebateTurns(
 ) {
   const session = await requireSessionUser();
   const { debate } = await getDebateForView(id, session.userId);
+  const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debate.id);
   const afterRaw = options?.afterTurnNumber ?? null;
   const afterTurnNumber = typeof afterRaw === "number" && Number.isFinite(afterRaw) && afterRaw >= 0 ? Math.floor(afterRaw) : null;
   const beforeRaw = options?.beforeTurnNumber ?? null;
@@ -1031,6 +1032,9 @@ export async function listDebateTurns(
       seatNumber: turn.seat_number === null || turn.seat_number === undefined ? null : Number(turn.seat_number),
       agent: {
         name: turn.agent_name ? String(turn.agent_name) : "Unknown",
+        baseRoleName: turn.debate_agent_id
+          ? getDebateParticipantRoleType(roleAssignments, String(turn.debate_agent_id))
+          : "Participant",
         provider: turn.agent_provider ? String(turn.agent_provider) : "openai"
       }
     };
@@ -1051,6 +1055,7 @@ export async function listDebateTurns(
 export async function getDebateTurnDetail(id: string, turnNumber: number) {
   const session = await requireSessionUser();
   const { debate } = await getDebateForView(id, session.userId);
+  const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debate.id);
   if (!Number.isFinite(turnNumber) || turnNumber <= 0) {
     throw new AppError("VALIDATION_ERROR", 400, "Invalid turn number");
   }
@@ -1121,6 +1126,9 @@ export async function getDebateTurnDetail(id: string, turnNumber: number) {
     seatNumber: row.seat_number === null || row.seat_number === undefined ? null : Number(row.seat_number),
     agent: {
       name: row.agent_name ? String(row.agent_name) : "Unknown",
+      baseRoleName: row.debate_agent_id
+        ? getDebateParticipantRoleType(roleAssignments, String(row.debate_agent_id))
+        : "Participant",
       provider: row.agent_provider ? String(row.agent_provider) : "openai"
     }
   };

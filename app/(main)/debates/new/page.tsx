@@ -76,6 +76,7 @@ type BindingRow = {
   roleId: string;
   enabled: boolean;
   agentId: string;
+  displayName: string;
 };
 
 type PromptPreviewDialogState =
@@ -133,7 +134,6 @@ export default function NewDebatePage() {
   const [strategies, setStrategies] = useState<StrategyListItem[]>([]);
   const [strategyId, setStrategyId] = useState<string>("");
   const [strategyDetail, setStrategyDetail] = useState<StrategyDetail | null>(null);
-  const [workflowOpeningPrompt, setWorkflowOpeningPrompt] = useState("");
   const [workflowIdeaBank, setWorkflowIdeaBank] = useState<WorkflowIdeaBank | null>(null);
   const [workflowSummarizer, setWorkflowSummarizer] = useState<WorkflowSummarizer | null>(null);
   const [workflowPhasePrompts, setWorkflowPhasePrompts] = useState<WorkflowPhasePrompt[]>([]);
@@ -171,7 +171,6 @@ export default function NewDebatePage() {
   async function loadStrategyDetail(id: string) {
     if (!id) {
       setStrategyDetail(null);
-      setWorkflowOpeningPrompt("");
       setWorkflowIdeaBank(null);
       setWorkflowSummarizer(null);
       setWorkflowPhasePrompts([]);
@@ -199,12 +198,10 @@ export default function NewDebatePage() {
       }
       if (!workflowResponse.ok) {
         showToast("error", workflowPayload.error?.message ?? "加载阶段注入提示词失败");
-        setWorkflowOpeningPrompt("");
         setWorkflowIdeaBank(null);
         setWorkflowSummarizer(null);
         setWorkflowPhasePrompts([]);
       } else {
-        setWorkflowOpeningPrompt(typeof workflowPayload.data?.openingPrompt === "string" ? workflowPayload.data.openingPrompt : "");
         const ideaBank = workflowPayload.data?.ideaBank;
         setWorkflowIdeaBank(
           ideaBank && typeof ideaBank === "object"
@@ -281,7 +278,7 @@ export default function NewDebatePage() {
         const next: BindingRow[] = [...kept];
         for (const role of detail.roles ?? []) {
           if ((existingCounts.get(role.id) ?? 0) > 0) continue;
-          next.push({ rowId: role.id, roleId: role.id, enabled: true, agentId: "" });
+          next.push({ rowId: role.id, roleId: role.id, enabled: true, agentId: "", displayName: "" });
         }
         return next;
       });
@@ -399,7 +396,8 @@ export default function NewDebatePage() {
                     strategyId,
                     bindings: enabledRows.map((row) => ({
                       roleId: row.roleId,
-                      agentId: row.agentId
+                      agentId: row.agentId,
+                      displayName: row.displayName.trim() || undefined
                     })),
                     summaryAgentId: workflowSummarizer?.enabled ? summaryAgentId || null : null
                   }
@@ -725,22 +723,6 @@ export default function NewDebatePage() {
                         </div>
                       </div>
                     ) : null}
-                    <div className="softBox stack">
-                      <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-                        <strong>开局注入提示词</strong>
-                        <span className="muted">opening</span>
-                      </div>
-                      <div
-                        className="strategyPrompt"
-                        style={{
-                          whiteSpace: "pre-wrap",
-                          minHeight: workflowOpeningPrompt ? undefined : 0,
-                          color: workflowOpeningPrompt ? undefined : "var(--muted)"
-                        }}
-                      >
-                        {workflowOpeningPrompt || "当前策略还没有配置开局自动注入提示词。"}
-                      </div>
-                    </div>
                     {workflowSummarizer?.enabled ? (
                       <div className="softBox stack">
                         <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
@@ -916,7 +898,8 @@ export default function NewDebatePage() {
                               rowId: newRowId(),
                               roleId: row.roleId,
                               enabled: true,
-                              agentId: row.agentId
+                              agentId: row.agentId,
+                              displayName: ""
                             };
                             if (index < 0) return [...current, copy];
                             return [...current.slice(0, index + 1), copy, ...current.slice(index + 1)];
@@ -936,6 +919,22 @@ export default function NewDebatePage() {
                       </button>
                       <span className="muted">#{role.roleOrder}</span>
                     </div>
+                  </div>
+
+                  <div className="row">
+                    <input
+                      value={row.displayName}
+                      disabled={!row.enabled}
+                      onChange={(event) =>
+                        setBindingRows((current) =>
+                          current.map((item) =>
+                            item.rowId === row.rowId ? { ...item, displayName: event.target.value.slice(0, 80) } : item
+                          )
+                        )
+                      }
+                      placeholder={`留空则自动命名为 AI-${bindingRows.findIndex((item) => item.rowId === row.rowId) + 1}`}
+                      style={{ flex: 1 }}
+                    />
                   </div>
 
                   <div className="row">
@@ -959,6 +958,7 @@ export default function NewDebatePage() {
                       ))}
                     </select>
                   </div>
+                  <div className="muted">可选：给这个席位单独起名；留空会自动生成 `AI-序号`。</div>
                 </div>
               );
             })}

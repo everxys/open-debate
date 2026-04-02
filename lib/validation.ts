@@ -89,7 +89,15 @@ export const createDebateSchema = z.union([
   debateCommonSchema.extend({
     strategy: z.object({
       strategyId: z.string().min(1),
-      bindings: z.array(z.object({ roleId: z.string().min(1), agentId: z.string().min(1) })).min(2),
+      bindings: z
+        .array(
+          z.object({
+            roleId: z.string().min(1),
+            agentId: z.string().min(1),
+            displayName: z.string().max(80).optional()
+          })
+        )
+        .min(2),
       summaryAgentId: z.string().min(1).nullable().optional()
     })
   })
@@ -120,7 +128,6 @@ export const createStrategySchema = z.object({
 export const updateStrategySchema = createStrategySchema;
 
 export const updateStrategyWorkflowPhasePromptsSchema = z.object({
-  openingPrompt: z.string().max(20_000).nullable().optional(),
   phases: z.array(z.object({ id: z.string().min(1).max(80), injectedPrompt: z.string().max(20_000).nullable().optional() })).min(1).max(16)
 });
 

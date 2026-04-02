@@ -1081,7 +1081,6 @@ function buildStrategyWorkflowPhasePromptResponse(
     ownerRoleId,
     canEdit,
     hasExistingWorkflow,
-    openingPrompt: normalized.promptPolicies.openingPrompt ?? "",
     ideaBank: normalized.ideaBank,
     phases: normalized.phaseMachine.phases.map((phase) => ({
       id: phase.id,
@@ -1223,10 +1222,6 @@ export async function updateStrategyWorkflowPhasePrompts(strategyId: string, inp
   }
 
   const nextWorkflow = JSON.parse(JSON.stringify(state.workflowConfig)) as DebateWorkflowConfig;
-  nextWorkflow.promptPolicies = {
-    ...(nextWorkflow.promptPolicies ?? {}),
-    openingPrompt: typeof data.openingPrompt === "string" ? data.openingPrompt.trim() || null : nextWorkflow.promptPolicies?.openingPrompt ?? null
-  };
   const phasePromptById = new Map(
     data.phases.map((phase) => [phase.id, typeof phase.injectedPrompt === "string" ? phase.injectedPrompt.trim() : ""] as const)
   );

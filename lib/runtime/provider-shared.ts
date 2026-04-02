@@ -5,7 +5,6 @@ import { appendServerLog } from "@/lib/server-log";
 import type { AgentRecord, DebateRecord } from "@/lib/types";
 import {
   formatRequiredDeliverableSummary,
-  type DebateWorkflowRoleMeta,
   type NormalizedWorkflowRequiredFile
 } from "@/lib/workflow";
 
@@ -168,7 +167,6 @@ export function buildFileToolInstructions(input: {
   allowedOutputPaths: string[];
   requiredFiles: NormalizedWorkflowRequiredFile[];
   currentRoleType: DebateParticipantRoleType;
-  currentRoleMeta?: DebateWorkflowRoleMeta | null;
   pendingRequiredFiles: NormalizedWorkflowRequiredFile[];
   contextAccessLines?: string[];
 }) {
@@ -205,47 +203,21 @@ export function buildFileToolInstructions(input: {
     lines.push("  - When this workflow requires outputs, completion is gated on these deliverables being written.");
   }
 
-  const normalizedRoleName = input.currentRoleType.trim() || "Contributor";
-  const roleLabel = input.currentRoleMeta?.label?.trim() || normalizedRoleName;
-  const roleCategory = input.currentRoleMeta?.category ?? null;
-  const roleSummary = input.currentRoleMeta?.summary?.trim() || null;
-  const writingPolicy = input.currentRoleMeta?.writingPolicy ?? null;
-  const coordinatorLike = roleCategory === "coordinator" || writingPolicy === "coordinate";
-  const reviewerLike = roleCategory === "reviewer" || writingPolicy === "review";
-  const contributorLike = roleCategory === "contributor" || writingPolicy === "contribute";
-
   lines.push("");
-  lines.push(`Current delivery role: ${roleLabel}`);
-  if (roleSummary) {
-    lines.push(`- Role summary: ${roleSummary}`);
-  }
-  if (coordinatorLike) {
-    lines.push("- Coordination responsibility: decide, unify, merge versions, and produce the canonical shared draft when the workflow calls for consolidation.");
-    lines.push("- Do not package every missing first draft yourself. Push contributor seats to write and expand missing deliverables first.");
-    lines.push('- Use mode="replace" on final/* mainly for true final unification, not as the default way to start a file from scratch.');
-  } else if (reviewerLike) {
-    lines.push("- Review responsibility: spot gaps, demand rework, and verify structure, logic, and quality.");
-    lines.push("- Do not default to primary drafting. Prefer review-oriented fixes, comments, and section-level corrections.");
-    lines.push('- When you do write, prefer mode="section_merge" to correct weak sections instead of rewriting the whole deliverable.');
-  } else if (contributorLike || writingPolicy === "contribute") {
-    lines.push("- Contribution responsibility: actively write or expand deliverable files. Do not stop at verbal suggestions.");
-    lines.push("- If required deliverables are empty, thin, or structurally incomplete, you should prioritize debate_files_write.");
-    lines.push('- For existing final/* drafts, read first and then use mode="section_merge" or mode="append" to expand them safely.');
+  lines.push(`Current fixed role: ${input.currentRoleType.trim() || "Participant"}`);
+  if (input.currentRoleType === "Host") {
+    lines.push("- Your primary responsibility is flow control, not content creation. Keep writes minimal and procedural unless a shared file must be updated to unblock the debate.");
   } else {
-    lines.push("- No special drafting role is implied by default. Use the workflow instructions and current discussion state to decide whether to draft, review, or consolidate.");
-    lines.push("- If the workflow does not force a writing policy, prefer the smallest useful write that moves the shared work forward.");
+    lines.push("- Shared deliverables are not hard-assigned by workflow. Follow your role prompt, current phase prompt, and protocol files to decide whether to draft, review, or consolidate.");
+    lines.push("- If required deliverables are empty, thin, or structurally incomplete, content seats should move the files forward instead of stopping at verbal suggestions.");
   }
 
   if (input.pendingRequiredFiles.length > 0) {
     lines.push("");
     lines.push(
-      coordinatorLike
-        ? "Current deliverable gaps for you to coordinate and later unify:"
-        : reviewerLike
-          ? "Current deliverable gaps you should audit and push others to fix:"
-          : contributorLike || writingPolicy === "contribute"
-            ? "Current contributor backlog: these deliverables still need real writing or expansion:"
-            : "Current shared output gaps:"
+      input.currentRoleType === "Host"
+        ? "Current shared output gaps for you to track and push forward:"
+        : "Current shared output gaps:"
     );
     for (const file of input.pendingRequiredFiles.slice(0, 12)) {
       lines.push(`- ${formatRequiredDeliverableSummary(file, "plain")}`);
@@ -263,18 +235,11 @@ export function buildFileToolInstructions(input: {
   return lines.join("\n");
 }
 
-export function buildResponseFormatInstructions(input?: {
-  requireMarkdown?: boolean;
-  forbidRawJson?: boolean;
-}) {
+export function buildResponseFormatInstructions() {
   const lines: string[] = [];
-  if (input?.requireMarkdown !== false) {
-    lines.push("Output must be readable Markdown for humans.");
-  }
-  if (input?.forbidRawJson !== false) {
-    lines.push("Do not output raw JSON objects.");
-    lines.push("If you were about to output JSON, rewrite it into headings and bullet points instead.");
-  }
+  lines.push("Output must be readable Markdown for humans.");
+  lines.push("Do not output raw JSON objects.");
+  lines.push("If you were about to output JSON, rewrite it into headings and bullet points instead.");
   return lines.join("\n");
 }
 

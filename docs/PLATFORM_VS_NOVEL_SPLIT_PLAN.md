@@ -58,27 +58,13 @@
 - `consensus_plus_outputs`
 - `workflow_gate`
 
-### `rolesMeta`
+### 固定角色职责
 
-```json
-{
-  "rolesMeta": {
-    "Coordinator": {
-      "label": "Coordinator",
-      "category": "coordinator",
-      "summary": "负责整合分歧并收束共享输出",
-      "writingPolicy": "coordinate"
-    }
-  }
-}
-```
+当前平台不再把角色职责写进 workflow。推荐做法是：
 
-字段说明：
-
-- `label`: UI/提示词显示名
-- `category`: `coordinator | reviewer | contributor | custom`
-- `summary`: 给模型看的简短职责说明
-- `writingPolicy`: `contribute | review | coordinate`
+- 用固定角色名定义席位类型
+- 用对应 `system prompt` 写清角色边界
+- 用 `protocol/*` 写清阶段推进、文件分工和质量审判规则
 
 ### `deliverables.requiredFiles[].qualityChecks`
 
