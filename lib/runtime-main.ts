@@ -2126,7 +2126,7 @@ export async function loadContextAccessAutoReadInline(input: {
         targetDebateAgentId: null
       });
     }
-    blocks.push(`- [${rule.scope}] ${rule.pathPrefix}${rule.label ? ` · ${rule.label}` : ""}`);
+    blocks.push(`- [${rule.scope}] ${rule.pathPrefix}`);
     for (const row of limitedRows) {
       const path = normalizeContextPath(String(row.path ?? ""));
       const content = clipPromptInlineContent(String(row.content ?? ""), Math.max(400, rule.maxCharsPerFile));
@@ -2432,17 +2432,6 @@ export function buildWorkflowPhaseInline(input: {
     lines.push("- Completion gate: this workflow requires the listed deliverables before the debate can finish.");
   }
   return lines.join("\n");
-}
-
-export function buildWorkflowOpeningInline(input: {
-  workflow: NormalizedDebateWorkflow | null;
-  roundNumber: number;
-}) {
-  if (!input.workflow?.enabled) return null;
-  if (input.roundNumber !== 1) return null;
-  const openingPrompt = input.workflow.promptPolicies.openingPrompt;
-  if (!openingPrompt) return null;
-  return ["Workflow opening prompt (IMPORTANT):", openingPrompt].join("\n");
 }
 
 export async function loadWorkflowIdeaBankInline(input: {
@@ -3936,23 +3925,8 @@ export async function maybeGenerateVoteAnnouncementWithSeat1(input: {
   const decisionJson = decisionJsonRaw ? (safeJsonParse<Record<string, unknown>>(decisionJsonRaw) ?? null) : null;
 
   let announcerSeatNumber = 1;
-  let announcerRoleLabel: string | null = null;
-  let fallbackAnnouncerSeatNumber = 1;
-  if (workflow?.enabled) {
-    const announcer = workflow.voting.announcement.announcer;
-    const fallback = workflow.voting.announcement.fallback;
-    if (fallback.type === "seat") {
-      fallbackAnnouncerSeatNumber = Math.max(1, Math.floor(Number(fallback.seat) || 1));
-    }
-    if (announcer.type === "seat") {
-      announcerSeatNumber = Math.max(1, Math.floor(Number(announcer.seat) || 1));
-    } else if (announcer.type === "role") {
-      const role = String(announcer.role ?? "").trim();
-      if (role) {
-        announcerRoleLabel = role;
-      }
-    }
-  }
+  const announcerRoleLabel = "Host";
+  const fallbackAnnouncerSeatNumber = 1;
 
   const announcer = await query<Record<string, unknown>>(
     `

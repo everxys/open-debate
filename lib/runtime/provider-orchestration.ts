@@ -58,9 +58,7 @@ import {
   withOptionalMaxTokens
 } from "@/lib/runtime/workflow-phase";
 import type { AgentRecord, DebateRecord } from "@/lib/types";
-import type { DebateWorkflowRoleMeta } from "@/lib/workflow";
 import {
-  buildWorkflowOpeningInline,
   buildWorkflowPhaseInline,
   formatRecentTurnsInline,
   loadContextAccessAutoReadInline,
@@ -127,7 +125,6 @@ type ProviderPromptContext = ProviderCallInput & {
   latestVote: Awaited<ReturnType<typeof loadLatestVote>>;
   currentPhase: ReturnType<typeof resolveCurrentWorkflowPhase>;
   currentRoleType: DebateParticipantRoleType;
-  currentRoleMeta: DebateWorkflowRoleMeta | null;
   requestedMaxTokens: number;
   currentOutputMaxTokens: number | null;
   enableVotingTools: boolean;
@@ -135,10 +132,6 @@ type ProviderPromptContext = ProviderCallInput & {
   requiredDeliverables: NonNullable<Awaited<ReturnType<typeof loadDebateWorkflow>>>["deliverables"]["requiredFiles"] | [];
   pendingDeliverables: Awaited<ReturnType<typeof listMissingRequiredDeliverables>>;
   contextAccessLines: string[];
-  responseFormatPolicy: {
-    requireMarkdown: boolean;
-    forbidRawJson: boolean;
-  };
   prompt: string;
   implicitReadAudit: DebateFileActivityAudit;
 };
@@ -234,11 +227,6 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
   });
   const roleAssignments = await loadDebateParticipantRoleTypes(input.userId, input.debate.id);
   const currentRoleType = getDebateParticipantRoleType(roleAssignments, input.debateAgentId);
-  const currentRoleMeta = workflow?.rolesMeta[currentRoleType] ?? null;
-  const responseFormatPolicy = workflow?.promptPolicies.responseFormat ?? {
-    requireMarkdown: true,
-    forbidRawJson: true
-  };
 
   updateLiveStage("calling_model", `读取规则与记忆：${input.eventAgentName}`);
   const openVote = await loadOpenVote(input.userId, input.debate.id);
@@ -263,7 +251,6 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
     openVote,
     latestVote
   });
-  const workflowOpeningInline = buildWorkflowOpeningInline({ workflow, roundNumber: input.roundNumber });
   const workflowIdeaBankInline = await loadWorkflowIdeaBankInline({
     workflow,
     phaseKind: currentPhase?.kind ?? null,
@@ -391,7 +378,6 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
           "- IMPORTANT: Do NOT treat global message # as a seat index."
         ].join("\n")
       },
-      { key: "workflowOpening", priority: 0, category: "core", preferredMaxChars: 12_000, content: workflowOpeningInline },
       { key: "workflowPhase", priority: 0, category: "core", preferredMaxChars: 14_000, content: workflowPhaseInline },
       {
         key: "contextAccess",
@@ -403,12 +389,12 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
       { key: "workflowIdeaBank", priority: 2, category: "optional", preferredMaxChars: 8_000, content: workflowIdeaBankInline },
       { key: "votingRule", priority: 0, category: "core", preferredMaxChars: 1_500, content: votingRuleInline },
       {
-        key: "round1Fairness",
+        key: "round1GroundRule",
         priority: 0,
         category: "core",
         preferredMaxChars: 1_200,
         content:
-          input.messageNumber <= input.participantCount && (workflow?.promptPolicies.round1Fairness ?? true)
+          input.messageNumber <= input.participantCount
             ? "Fairness (Round 1): You do not yet have full information about other seats. Do not pre-judge or claim you know other seats' views/roles before they speak."
             : null
       },
@@ -443,7 +429,6 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
     latestVote,
     currentPhase,
     currentRoleType,
-    currentRoleMeta,
     requestedMaxTokens,
     currentOutputMaxTokens,
     enableVotingTools,
@@ -451,7 +436,6 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
     requiredDeliverables,
     pendingDeliverables,
     contextAccessLines,
-    responseFormatPolicy,
     prompt,
     implicitReadAudit
   };
@@ -465,7 +449,6 @@ async function buildSharedSystemParts(context: ProviderPromptContext, overrideSy
       allowedOutputPaths: context.allowedOutputPaths,
       requiredFiles: context.requiredDeliverables,
       currentRoleType: context.currentRoleType,
-      currentRoleMeta: context.currentRoleMeta,
       pendingRequiredFiles: context.pendingDeliverables,
       contextAccessLines: context.contextAccessLines
     })
@@ -498,7 +481,7 @@ async function buildSharedSystemParts(context: ProviderPromptContext, overrideSy
       if (sharedInline) systemParts.push(sharedInline);
     }
   }
-  systemParts.push(buildResponseFormatInstructions(context.responseFormatPolicy));
+  systemParts.push(buildResponseFormatInstructions());
   return systemParts;
 }
 

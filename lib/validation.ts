@@ -120,7 +120,6 @@ export const createStrategySchema = z.object({
 export const updateStrategySchema = createStrategySchema;
 
 export const updateStrategyWorkflowPhasePromptsSchema = z.object({
-  openingPrompt: z.string().max(20_000).nullable().optional(),
   phases: z.array(z.object({ id: z.string().min(1).max(80), injectedPrompt: z.string().max(20_000).nullable().optional() })).min(1).max(16)
 });
 

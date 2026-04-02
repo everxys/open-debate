@@ -133,7 +133,6 @@ export default function NewDebatePage() {
   const [strategies, setStrategies] = useState<StrategyListItem[]>([]);
   const [strategyId, setStrategyId] = useState<string>("");
   const [strategyDetail, setStrategyDetail] = useState<StrategyDetail | null>(null);
-  const [workflowOpeningPrompt, setWorkflowOpeningPrompt] = useState("");
   const [workflowIdeaBank, setWorkflowIdeaBank] = useState<WorkflowIdeaBank | null>(null);
   const [workflowSummarizer, setWorkflowSummarizer] = useState<WorkflowSummarizer | null>(null);
   const [workflowPhasePrompts, setWorkflowPhasePrompts] = useState<WorkflowPhasePrompt[]>([]);
@@ -171,7 +170,6 @@ export default function NewDebatePage() {
   async function loadStrategyDetail(id: string) {
     if (!id) {
       setStrategyDetail(null);
-      setWorkflowOpeningPrompt("");
       setWorkflowIdeaBank(null);
       setWorkflowSummarizer(null);
       setWorkflowPhasePrompts([]);
@@ -199,12 +197,10 @@ export default function NewDebatePage() {
       }
       if (!workflowResponse.ok) {
         showToast("error", workflowPayload.error?.message ?? "加载阶段注入提示词失败");
-        setWorkflowOpeningPrompt("");
         setWorkflowIdeaBank(null);
         setWorkflowSummarizer(null);
         setWorkflowPhasePrompts([]);
       } else {
-        setWorkflowOpeningPrompt(typeof workflowPayload.data?.openingPrompt === "string" ? workflowPayload.data.openingPrompt : "");
         const ideaBank = workflowPayload.data?.ideaBank;
         setWorkflowIdeaBank(
           ideaBank && typeof ideaBank === "object"
@@ -725,22 +721,6 @@ export default function NewDebatePage() {
                         </div>
                       </div>
                     ) : null}
-                    <div className="softBox stack">
-                      <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-                        <strong>开局注入提示词</strong>
-                        <span className="muted">opening</span>
-                      </div>
-                      <div
-                        className="strategyPrompt"
-                        style={{
-                          whiteSpace: "pre-wrap",
-                          minHeight: workflowOpeningPrompt ? undefined : 0,
-                          color: workflowOpeningPrompt ? undefined : "var(--muted)"
-                        }}
-                      >
-                        {workflowOpeningPrompt || "当前策略还没有配置开局自动注入提示词。"}
-                      </div>
-                    </div>
                     {workflowSummarizer?.enabled ? (
                       <div className="softBox stack">
                         <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>

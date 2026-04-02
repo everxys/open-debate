@@ -45,3 +45,5 @@
 - 2026-04-02: 新增辩论页的总结器绑定区增加“随机 AI”按钮，可从当前已加载的 AI 配置中随机选择一台作为独立总结器，保留原有手动选择方式。
 - 2026-04-02: 新增辩论页的问题输入框增加本地历史候选。聚焦问题框时会显示最近填写过的问题，可一键回填或清空历史，效果类似浏览器的表单历史提示，但支持当前使用的多行 textarea。
 - 2026-04-02: 继续清理固定 Host 重构后的残留：删除 `workflow-phase.ts` 中已失效的 election helper；将官方投票结论文件从 `votes/directive.*` 更名为更中性的 `votes/decision.*`；并把策略文档 `30_election_and_veto.md` 重命名为 `30_host_and_quality_control.md`，同步更新知识库与教程中的相关说明。
+- 2026-04-02: 调整当前神级小说策略的早期阶段节奏与命名：`Phase 1` 显式设置 `analysis.minRounds = 1`，确保新辩论第 1 轮稳定停在开题阶段；同时把 `Phase 2` 标题改为“子任务推进与方案成形”，并在阶段说明中补充“Phase 1 的成功标准是明确核心命题、底层约束、失败风险和下一阶段先推进的块”，避免一开局就呈现“内容锻造”的过重心智。 
+- 2026-04-02: 删掉 workflow 中所有当前不属于硬约束的策略语义字段及其消费链，`workflow` 现在只保留真正被代码执行的 phase / completion / consensus / deliverables / contextAccess / summarizer / outputBudget 等硬规则；移除了 `rolesMeta`、`promptPolicies.openingPrompt`、`round1Fairness`、`responseFormat`、`voting.announcement`、`voting.governance.fallbackMode`、`deliverables` 中的角色分工与描述字段、以及 `contextAccess.label`。相关语义已回收到固定角色的 system prompt、`protocol/00_ground_rules.md`、`protocol/20_output_templates.md` 和 phase `injectedPrompt` 中，并同步写回当前数据库策略 `民主集中制共识算法（先赛马，再相马）`。

@@ -56,34 +56,7 @@
   - 固定主持席位
   - 负责限定当前轮唯一问题、提醒阶段目标、开关官方投票、推动讨论继续
 - 其他角色
-  - 通过 `rolesMeta` 和 system prompt 定义自己的稳定职责
-
-示例：
-
-```json
-{
-  "rolesMeta": {
-    "Host": {
-      "label": "Host",
-      "category": "coordinator",
-      "summary": "固定主持席位，只负责流程主持与收束推进。",
-      "writingPolicy": "coordinate"
-    },
-    "反驳者": {
-      "label": "反驳者",
-      "category": "reviewer",
-      "summary": "负责抓逻辑漏洞、伪高智商与伪推进。",
-      "writingPolicy": "review"
-    },
-    "事件诡计工程师": {
-      "label": "事件诡计工程师",
-      "category": "contributor",
-      "summary": "负责把事件结构、信息差、误导和反制链做实。",
-      "writingPolicy": "contribute"
-    }
-  }
-}
-```
+  - 通过固定角色名、对应 system prompt 和 `protocol/*` 定义稳定职责
 
 ## 3. 阶段
 
@@ -151,7 +124,7 @@ workflow 继续负责：
 角色职责直接绑定到：
 - 固定角色名
 - 对应 system prompt
-- `rolesMeta`
+- `protocol/*`
 
 ## 6. Host 的边界
 

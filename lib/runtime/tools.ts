@@ -330,8 +330,7 @@ export async function toolVoteClose(input: { userId: string; debateId: string; p
   }
   const voteGovernance = workflow?.voting.governance ?? {
     tieBreaker: "revote" as const,
-    maxTieRounds: 2,
-    fallbackMode: "逻辑审核员" as string | null
+    maxTieRounds: 2
   };
   const currentTieRound = Math.max(0, Math.floor(Number(currentOpenVote.meta?.tieRound) || 0));
 
@@ -473,7 +472,7 @@ export async function toolVoteClose(input: { userId: string; debateId: string; p
     if (currentTieRound >= voteGovernance.maxTieRounds) {
       return {
         ok: false,
-        error: `Custom vote tied after ${currentTieRound} revote(s). Suggested fallback mode: ${voteGovernance.fallbackMode ?? "manual review"}.`,
+        error: `Custom vote tied after ${currentTieRound} revote(s). Manual review required.`,
         tied: true,
         options: tiedOptions
       };
@@ -495,7 +494,7 @@ export async function toolVoteClose(input: { userId: string; debateId: string; p
       "",
       `出现平票：${tiedOptions.join(" / ")}`,
       "",
-      `要求：所有席位先补充新的观点/证据/取舍，再重新投票。${voteGovernance.fallbackMode ? `建议先切换到“${voteGovernance.fallbackMode}”模式补信息。` : ""}`
+      "要求：所有席位先补充新的观点/证据/取舍，再重新投票。"
     ].join("\n");
     await upsertDebateFile(input.debateId, VOTE_DECISION_PATH, decision, now);
     await upsertDebateFile(input.debateId, VOTE_OPEN_PATH, JSON.stringify(reopenedVote, null, 2), now);

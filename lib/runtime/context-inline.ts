@@ -10,7 +10,6 @@ export type ResolvedContextAccessRule = {
   category: "alwaysRead" | "readWhenNeeded" | "unlockAfterPhase";
   scope: WorkflowContextAccessScope;
   pathPrefix: string;
-  label: string | null;
   maxFiles: number;
   maxCharsPerFile: number;
   recursive: boolean;
@@ -132,21 +131,21 @@ export function buildContextAccessSummaryLines(input: {
   if (resolvedRules.autoRead.length > 0) {
     lines.push("- Auto-read now:");
     for (const rule of resolvedRules.autoRead) {
-      lines.push(`  - [${rule.scope}] ${rule.pathPrefix}${rule.label ? ` · ${rule.label}` : ""}`);
+      lines.push(`  - [${rule.scope}] ${rule.pathPrefix}`);
     }
   }
 
   if (resolvedRules.readable.length > 0) {
     lines.push("- Readable on demand:");
     for (const rule of resolvedRules.readable) {
-      lines.push(`  - [${rule.scope}] ${rule.pathPrefix}${rule.label ? ` · ${rule.label}` : ""}`);
+      lines.push(`  - [${rule.scope}] ${rule.pathPrefix}`);
     }
   }
 
   if (resolvedRules.locked.length > 0) {
     lines.push("- Locked until phase:");
     for (const rule of resolvedRules.locked) {
-      lines.push(`  - [${rule.scope}] ${rule.pathPrefix} · unlock=${rule.phaseKind}${rule.label ? ` · ${rule.label}` : ""}`);
+      lines.push(`  - [${rule.scope}] ${rule.pathPrefix} · unlock=${rule.phaseKind}`);
     }
     lines.push("- IMPORTANT: Locked paths are unavailable in the current phase. Do not try to read them now; wait until they are unlocked.");
   }

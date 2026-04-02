@@ -113,12 +113,6 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<Retur
   lines.push(`- completion mode: ${workflow.completion.mode}`);
   lines.push(`- vote tieBreaker: ${workflow.voting.governance.tieBreaker}`);
   lines.push(`- vote maxTieRounds: ${workflow.voting.governance.maxTieRounds}`);
-  lines.push(`- vote fallbackMode: ${workflow.voting.governance.fallbackMode ?? "(none)"}`);
-  lines.push(`- round1 fairness: ${workflow.promptPolicies.round1Fairness ? "enabled" : "disabled"}`);
-  lines.push(`- opening prompt: ${workflow.promptPolicies.openingPrompt ? "configured" : "none"}`);
-  lines.push(
-    `- response format: markdown=${workflow.promptPolicies.responseFormat.requireMarkdown ? "yes" : "no"}; rawJson=${workflow.promptPolicies.responseFormat.forbidRawJson ? "forbidden" : "allowed"}`
-  );
   lines.push(
     `- output budget: discussion=${workflow.promptPolicies.outputBudget.discussionMaxTokens}; writing=${workflow.promptPolicies.outputBudget.writingMaxTokens}`
   );

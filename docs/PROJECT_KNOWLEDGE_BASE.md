@@ -146,7 +146,7 @@ while debate.status == running:
   - `votes/round-<n>.json`
   - `votes/round-<n>.md`
   - `votes/decision.md/json`
-- 平台不再使用任命后角色；每个席位只保留固定基础角色，具体职责以策略里的 system prompt 和 `workflow.rolesMeta` 为准
+- 平台不再使用任命后角色；每个席位只保留固定基础角色，具体职责以策略里的 system prompt 和 `protocol/*` 为准
 
 魔法数字/硬编码：
 - Session 7 天
