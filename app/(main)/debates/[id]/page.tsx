@@ -1764,7 +1764,7 @@ function DebateViewerPanel(props: {
                 {(() => {
                   const turnInRound = ((viewerTurn.turnNumber - 1) % props.agentCount) + 1;
                   const seat = viewerTurn.seatNumber ? `Seat-${viewerTurn.seatNumber}` : "";
-                  return `#${viewerTurn.turnNumber} · 第 ${viewerTurn.roundNumber} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${viewerTurn.agent.name}`;
+                  return `#${viewerTurn.turnNumber} · 第 ${viewerTurn.roundNumber} 轮 第 ${turnInRound} 回${seat ? ` · ${seat}` : ""} · ${viewerTurn.agent.baseRoleName} · ${viewerTurn.agent.name}`;
                 })()}
               </strong>
               <span className="muted">{viewerTurn.contentLength} chars</span>
