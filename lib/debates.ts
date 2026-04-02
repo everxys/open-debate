@@ -314,22 +314,23 @@ async function insertPendingDebate(input: {
   question: string;
   maxTurns: number;
   enableSharedFacts: boolean;
+  sourceWorkspaceId?: string | null;
   now: string;
 }) {
   const insertedDebate = await query<Record<string, unknown>>(
     `insert into debates (
-      user_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
+      user_id, source_workspace_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
       consensus_reached, consensus_summary, workflow_phase_kind, workflow_phase_title, workflow_phase_round, last_error_code, last_error_message,
       runtime_notice_kind, runtime_notice_message, runtime_notice_at,
       started_at, finished_at, stopped_reason, created_at, updated_at
     ) values (
-      $1,$2,'pending',$3,0,null,0,$4,
+      $1,$2,$3,'pending',$4,0,null,0,$5,
       false,null,null,null,null,null,null,
       null,null,null,
-      null,null,null,$5,$5
+      null,null,null,$6,$6
     )
     returning *`,
-    [input.userId, input.question, input.maxTurns, input.enableSharedFacts, input.now]
+    [input.userId, input.sourceWorkspaceId ?? null, input.question, input.maxTurns, input.enableSharedFacts, input.now]
   );
   return normalizeDebateRow(insertedDebate.rows[0]);
 }
@@ -583,25 +584,71 @@ async function createDebateWithStrategy(
     };
   }
 ) {
-  const bindings = data.strategy.bindings;
+  return createDebateFromStrategyBindings(userId, {
+    question: data.question,
+    maxTurns: data.maxTurns,
+    enableSharedFacts: data.enableSharedFacts,
+    strategyId: data.strategy.strategyId,
+    bindings: data.strategy.bindings,
+    summaryAgentId: data.strategy.summaryAgentId ?? null,
+    sourceWorkspaceId: null,
+    workspaceFiles: []
+  });
+}
+
+async function copyWorkspaceFilesToDebate(input: {
+  debateId: string;
+  files: Array<{ path: string; content: string }>;
+  now: string;
+}) {
+  for (const file of input.files) {
+    const normalizedPath = String(file.path ?? "").replace(/\\/g, "/").replace(/^\/+/, "").trim();
+    const debatePath = normalizedPath.replace(/^debate\//i, "");
+    if (!debatePath) continue;
+    await query(
+      `
+        insert into debate_files (debate_id, path, content, created_at, updated_at)
+        values ($1, $2, $3, $4, $4)
+        on conflict (debate_id, path)
+        do update set content = excluded.content, updated_at = excluded.updated_at
+      `,
+      [input.debateId, debatePath, String(file.content ?? ""), input.now]
+    );
+  }
+}
+
+export async function createDebateFromStrategyBindings(
+  userId: string,
+  data: {
+    question: string;
+    maxTurns: number;
+    enableSharedFacts: boolean;
+    strategyId: string;
+    bindings: Array<{ roleId: string; agentId: string; displayName?: string | null }>;
+    summaryAgentId?: string | null;
+    sourceWorkspaceId?: string | null;
+    workspaceFiles?: Array<{ path: string; content: string }>;
+  }
+) {
+  const bindings = data.bindings;
   const roleIds = bindings.map((binding) => binding.roleId);
   const uniqueRoleIds = Array.from(new Set(roleIds));
   const uniqueAgentIds = Array.from(
     new Set([
       ...bindings.map((binding) => binding.agentId),
-      ...(typeof data.strategy.summaryAgentId === "string" && data.strategy.summaryAgentId.trim()
-        ? [data.strategy.summaryAgentId.trim()]
+      ...(typeof data.summaryAgentId === "string" && data.summaryAgentId.trim()
+        ? [data.summaryAgentId.trim()]
         : [])
     ])
   );
 
-  const strategyVisible = await loadVisibleStrategy(data.strategy.strategyId, userId);
+  const strategyVisible = await loadVisibleStrategy(data.strategyId, userId);
   if (!strategyVisible) {
     throw new AppError("NOT_FOUND", 404, "Strategy not found");
   }
 
   await validateOwnedAgents(userId, uniqueAgentIds);
-  const rolesById = await loadStrategyRolesMap(data.strategy.strategyId, roleIds);
+  const rolesById = await loadStrategyRolesMap(data.strategyId, roleIds);
   if (rolesById.size !== uniqueRoleIds.length) {
     throw new AppError("VALIDATION_ERROR", 400, "Selected strategy roles are invalid");
   }
@@ -612,14 +659,22 @@ async function createDebateWithStrategy(
     question: data.question,
     maxTurns: data.maxTurns,
     enableSharedFacts: data.enableSharedFacts,
+    sourceWorkspaceId: data.sourceWorkspaceId ?? null,
     now
   });
 
   try {
     const usedDisplayNames = new Set<string>();
     await copyStrategyDebateFiles(debate.id, uniqueRoleIds, now, {
-      summaryAgentId: data.strategy.summaryAgentId ?? null
+      summaryAgentId: data.summaryAgentId ?? null
     });
+    if (Array.isArray(data.workspaceFiles) && data.workspaceFiles.length > 0) {
+      await copyWorkspaceFilesToDebate({
+        debateId: debate.id,
+        files: data.workspaceFiles,
+        now
+      });
+    }
 
     for (let index = 0; index < bindings.length; index += 1) {
       const binding = bindings[index];

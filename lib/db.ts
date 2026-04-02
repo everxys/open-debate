@@ -115,6 +115,8 @@ async function ensureSchema(pool: Pool) {
   await pool.query("alter table debates add column if not exists runtime_notice_kind text null");
   await pool.query("alter table debates add column if not exists runtime_notice_message text null");
   await pool.query("alter table debates add column if not exists runtime_notice_at timestamptz null");
+  await pool.query("alter table debates add column if not exists source_workspace_id uuid null");
+  await pool.query("create index if not exists idx_debates_source_workspace_id on debates(source_workspace_id)");
   await pool.query(`
     do $$
     begin
@@ -163,6 +165,52 @@ async function ensureSchema(pool: Pool) {
       created_at timestamptz not null
     )
   `);
+  await pool.query(`
+    create table if not exists workspaces (
+      id uuid primary key,
+      owner_user_id uuid not null,
+      strategy_id uuid not null,
+      name text not null,
+      description text null,
+      question text not null default '',
+      summary_ai_agent_id uuid null,
+      default_max_turns int not null default 10,
+      default_enable_shared_facts boolean not null default true,
+      created_at timestamptz not null,
+      updated_at timestamptz not null
+    )
+  `);
+  await pool.query("alter table workspaces add column if not exists default_max_turns int not null default 10");
+  await pool.query("alter table workspaces add column if not exists default_enable_shared_facts boolean not null default true");
+  await pool.query(`
+    create table if not exists workspace_role_bindings (
+      id uuid primary key,
+      workspace_id uuid not null,
+      source_strategy_role_id uuid null,
+      role_name text not null,
+      role_order int not null,
+      ai_agent_id uuid null,
+      display_name text null,
+      created_at timestamptz not null,
+      updated_at timestamptz not null,
+      unique (workspace_id, role_order)
+    )
+  `);
+  await pool.query(`
+    create table if not exists workspace_files (
+      id uuid primary key,
+      workspace_id uuid not null,
+      path text not null,
+      content text not null default '',
+      created_at timestamptz not null,
+      updated_at timestamptz not null,
+      unique (workspace_id, path)
+    )
+  `);
+  await pool.query("create index if not exists idx_workspaces_owner_user_id_updated_at on workspaces (owner_user_id, updated_at desc)");
+  await pool.query("create index if not exists idx_workspaces_strategy_id_updated_at on workspaces (strategy_id, updated_at desc)");
+  await pool.query("create index if not exists idx_workspace_role_bindings_workspace_id_role_order on workspace_role_bindings (workspace_id, role_order asc)");
+  await pool.query("create index if not exists idx_workspace_files_workspace_id_updated_at on workspace_files (workspace_id, updated_at desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_created_at on debate_file_activity_logs (debate_id, created_at desc, id desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_action_created_at on debate_file_activity_logs (debate_id, action, created_at desc, id desc)");
   await pool.query(`
@@ -262,6 +310,62 @@ async function ensureSchema(pool: Pool) {
         alter table debate_file_activity_logs
           add constraint debate_file_activity_logs_scope_check
           check (scope in ('debate', 'agent'));
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'debates_source_workspace_id_fkey'
+      ) then
+        alter table debates
+          add constraint debates_source_workspace_id_fkey
+          foreign key (source_workspace_id) references workspaces(id) on delete set null;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'workspaces_owner_user_id_fkey'
+      ) then
+        alter table workspaces
+          add constraint workspaces_owner_user_id_fkey
+          foreign key (owner_user_id) references users(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'workspaces_strategy_id_fkey'
+      ) then
+        alter table workspaces
+          add constraint workspaces_strategy_id_fkey
+          foreign key (strategy_id) references strategies(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'workspaces_summary_ai_agent_id_fkey'
+      ) then
+        alter table workspaces
+          add constraint workspaces_summary_ai_agent_id_fkey
+          foreign key (summary_ai_agent_id) references ai_agents(id) on delete set null;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'workspace_role_bindings_workspace_id_fkey'
+      ) then
+        alter table workspace_role_bindings
+          add constraint workspace_role_bindings_workspace_id_fkey
+          foreign key (workspace_id) references workspaces(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'workspace_role_bindings_source_strategy_role_id_fkey'
+      ) then
+        alter table workspace_role_bindings
+          add constraint workspace_role_bindings_source_strategy_role_id_fkey
+          foreign key (source_strategy_role_id) references strategy_roles(id) on delete set null;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'workspace_role_bindings_ai_agent_id_fkey'
+      ) then
+        alter table workspace_role_bindings
+          add constraint workspace_role_bindings_ai_agent_id_fkey
+          foreign key (ai_agent_id) references ai_agents(id) on delete set null;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'workspace_files_workspace_id_fkey'
+      ) then
+        alter table workspace_files
+          add constraint workspace_files_workspace_id_fkey
+          foreign key (workspace_id) references workspaces(id) on delete cascade;
       end if;
     exception when undefined_table then
       null;

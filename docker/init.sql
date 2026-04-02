@@ -77,6 +77,7 @@ alter table ai_agents add column if not exists max_output_tokens integer null;
 create table if not exists debates (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references users(id) on delete cascade,
+  source_workspace_id uuid null,
   question text not null,
   status text not null check (status in ('pending', 'running', 'paused', 'completed', 'stopped', 'failed')),
   max_turns integer not null default 10,
@@ -108,6 +109,7 @@ alter table debates add column if not exists workflow_phase_round integer null;
 alter table debates add column if not exists runtime_notice_kind text null;
 alter table debates add column if not exists runtime_notice_message text null;
 alter table debates add column if not exists runtime_notice_at timestamptz null;
+alter table debates add column if not exists source_workspace_id uuid null;
 
 create table if not exists debate_agents (
   id uuid primary key default gen_random_uuid(),
@@ -139,6 +141,7 @@ create table if not exists debate_turns (
 
 create index if not exists idx_ai_agents_user_id on ai_agents(user_id);
 create index if not exists idx_debates_user_id on debates(user_id);
+create index if not exists idx_debates_source_workspace_id on debates(source_workspace_id);
 create index if not exists idx_debates_is_shared_updated_at on debates(is_shared, updated_at desc);
 create index if not exists idx_debate_agents_debate_id on debate_agents(debate_id);
 create index if not exists idx_debate_turns_debate_id on debate_turns(debate_id);
@@ -223,6 +226,57 @@ create table if not exists strategy_role_files (
 
 create index if not exists idx_strategy_role_files_role_id_updated_at
   on strategy_role_files (strategy_role_id, updated_at desc);
+
+create table if not exists workspaces (
+  id uuid primary key default gen_random_uuid(),
+  owner_user_id uuid not null references users(id) on delete cascade,
+  strategy_id uuid not null references strategies(id) on delete cascade,
+  name text not null,
+  description text null,
+  question text not null default '',
+  summary_ai_agent_id uuid null references ai_agents(id) on delete set null,
+  default_max_turns integer not null default 10,
+  default_enable_shared_facts boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table workspaces add column if not exists default_max_turns integer not null default 10;
+alter table workspaces add column if not exists default_enable_shared_facts boolean not null default true;
+
+create index if not exists idx_workspaces_owner_user_id_updated_at
+  on workspaces (owner_user_id, updated_at desc);
+create index if not exists idx_workspaces_strategy_id_updated_at
+  on workspaces (strategy_id, updated_at desc);
+
+create table if not exists workspace_role_bindings (
+  id uuid primary key default gen_random_uuid(),
+  workspace_id uuid not null references workspaces(id) on delete cascade,
+  source_strategy_role_id uuid null references strategy_roles(id) on delete set null,
+  role_name text not null,
+  role_order integer not null,
+  ai_agent_id uuid null references ai_agents(id) on delete set null,
+  display_name text null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (workspace_id, role_order)
+);
+
+create index if not exists idx_workspace_role_bindings_workspace_id_role_order
+  on workspace_role_bindings (workspace_id, role_order asc);
+
+create table if not exists workspace_files (
+  id uuid primary key default gen_random_uuid(),
+  workspace_id uuid not null references workspaces(id) on delete cascade,
+  path text not null,
+  content text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (workspace_id, path)
+);
+
+create index if not exists idx_workspace_files_workspace_id_updated_at
+  on workspace_files (workspace_id, updated_at desc);
 
 create table if not exists debate_agent_overrides (
   debate_agent_id uuid primary key references debate_agents(id) on delete cascade,

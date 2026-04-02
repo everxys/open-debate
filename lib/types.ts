@@ -119,3 +119,38 @@ export type RetrievalConfigRecord = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type WorkspaceRecord = {
+  id: string;
+  ownerUserId: string;
+  strategyId: string;
+  name: string;
+  description: string | null;
+  question: string;
+  summaryAiAgentId: string | null;
+  defaultMaxTurns: number;
+  defaultEnableSharedFacts: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkspaceRoleBindingRecord = {
+  id: string;
+  workspaceId: string;
+  sourceStrategyRoleId: string | null;
+  roleName: string;
+  roleOrder: number;
+  aiAgentId: string | null;
+  displayName: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkspaceFileRecord = {
+  id: string;
+  workspaceId: string;
+  path: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+};

@@ -198,7 +198,7 @@ export default function StrategiesPage() {
         <div className="row" style={{ justifyContent: "space-between" }}>
           <div>
             <h2 style={{ margin: 0 }}>策略</h2>
-            <div className="muted">保存提示词+文件，创建辩论时一键带入（不影响全局 AI 配置）。</div>
+            <div className="muted">保存共享方法论与角色文件，再基于策略创建工作台并注入自己的私有项目内容。</div>
           </div>
           <div className="row">
             <button className={`btn ${scope === "mine" ? "btn-primary" : ""}`} onClick={() => setScope("mine")}>
@@ -236,8 +236,8 @@ export default function StrategiesPage() {
                 {item.description ? <div className="muted">{item.description}</div> : null}
                 <div className="muted">更新于 {formatTime(item.updatedAt)}</div>
                 <div className="row">
-                  <Link className="btn btn-primary" href={`/debates/new?strategyId=${item.id}`}>
-                    使用策略
+                  <Link className="btn btn-primary" href={`/workspaces/new?strategyId=${item.id}`}>
+                    创建工作台
                   </Link>
                   <Link className="btn" href={`/strategies/${item.id}`}>
                     {scope === "mine" ? "查看/编辑" : "查看"}

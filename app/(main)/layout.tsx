@@ -23,6 +23,7 @@ export default async function MainLayout({ children }: { children: ReactNode }) 
           <MainNav
             items={[
               { href: "/debates", label: "辩论" },
+              { href: "/workspaces", label: "工作台" },
               { href: "/strategies", label: "策略" },
               { href: "/agents", label: "AI 配置" },
               { href: "/docs", label: "Docs" }

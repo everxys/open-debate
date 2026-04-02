@@ -1,5 +1,11 @@
 ## 2026-04-02
 
+- 新增“工作台”项目层：现在可以先基于共享策略创建私有工作台，再在工作台里保存题目、原始点子库、私有说明和默认 AI 绑定，最后从工作台创建辩论。工作台对应新增 `workspaces / workspace_role_bindings / workspace_files` 表、相关 API 与页面入口，策略页主按钮也已从“直接创建辩论”改成“创建工作台”。
+- 工作台默认私有文件结构补齐为完整的 `debate/ideas/*` 工作目录，加上 `debate/notes/project-brief.md` 和 `debate/reference/private-materials.md`。这样原始点子池和筛选工作文件归工作台所有，不再跟着共享策略一起传播。
+- 当前数据库里的“民主集中制共识算法（先赛马，再相马）”已完成一轮去私货化：共享策略中的 `debate/ideas/*` 文件全部删除，`templates/debate_question.md` 改成由工作台注入项目题目和素材的通用版，`protocol/40_idea_ledger_and_outline.md` 改成更通用的 `protocol/40_material_and_outline_ledger.md`。
+- 继续把当前策略往“神级小说通用策略”收口：`workflow.json` 中明显项目专属的交付文件名已经改成更通用的版本，例如 `core-cast / pressure-cast-and-rivals / major-events / relationship-arcs-and-tensions / novel_bible`；`终局闭环官` 与 `人物关系审判官` 的 prompt 里也去掉了 `终局布局者 / 宿敌 / 纯爱 / 背叛` 这类过于项目特定的用词。
+- 文档入口同步更新：`docs/FEATURES_CURRENT.md` 和 `docs/API_DESIGN.md` 已改成“策略 -> 工作台 -> 辩论”的新心智，不再继续描述“直接使用策略创建辩论”的旧主路径。
+- 旧的 `debates/new` 页面已收口成“纯手动创建辩论”入口：如果带着 `strategyId` 访问，会自动跳转到对应的工作台创建页；页面本身不再承载“直接从策略创建辩论”的旧 UI 和旧流程。
 - 辩论列表页的已结束区域改成统一的 `清空...` 弹窗：现在只保留“按已完成轮数阈值批量清空 stopped 辩论”，不再暴露“一键清空全部已停止辩论”，避免误删。
 - `/api/debates/purge-stopped` 后端接口已同步收口，只接受“按轮数阈值清空 stopped 辩论”的请求，不再保留任何“清空全部已停止辩论”的分支。
 - AI 总结系统重构为数据库任务队列：新增 `debate_summary_jobs` 表承载 `turn_summary / round_summary / facts_board` 三类总结任务，支持 `queued / running / retry_wait / blocked / failed / completed / dead_letter` 状态、依赖、重试、锁与恢复，不再使用 `context/summarizer_backlog.json` 作为真源。
@@ -68,3 +74,11 @@
 - 辩论实时状态与当前生成中的发言目录现在也会显示基础角色名（修复 live progress / chunk 事件未携带角色的问题）
 
 - 统一辩论页角色显示顺序为 Seat-x · 角色名 · AI 名字，修复实时状态曾显示为 角色名 · Seat-x · AI 名字的问题
+- 工作台详情页已从固定“原始点子库 / 项目说明 / 私有参考材料”文本框升级为真正的私有文件树编辑器；新增 `/api/workspaces/[id]/files` 文件级增删改查与移动接口，支持右键新建文件/文件夹、拖拽移动、分标签编辑和单文件保存。工作台基础信息保存与私有文件保存也已拆开，避免保存项目信息时覆盖掉最新私有文件内容。
+- 工作台私有文件区已改成和策略页一致的左右双栏布局：左侧文件树，右侧文件编辑器；同时把顶部导航顺序调整为“辩论 / 工作台 / 策略 / AI 配置 / Docs”。
+- 工作台“从工作台创建辩论”区域现在显式支持无限轮数：勾选“无限轮数”或将最大轮数设为 `0` 都表示不设轮数上限，不再需要靠隐含语义去猜。
+- 工作台新增持久化的默认辩论配置：默认最大轮数与共享事实板会保存到工作台本身，列表页也可直接按默认配置一键从工作台创建辩论；工作台详情页底部创建按钮改为居中显示。
+- 修复工作台默认辩论配置的真实数据库 schema 缺失问题，直接补齐 `workspaces.default_max_turns / default_enable_shared_facts`；同时工作台详情页新增底部“保存工作台”按钮，并在创建辩论或离开页面时对未保存更新给出确认提醒。
+- 当前真实神级小说策略的 Phase 2 现在会在进入子任务推进阶段后自动读取 `debate/ideas/` 下的工作台私有素材，并在阶段注入提示中明确要求先消化 `raw-idea-bank / selected-s-tier / selected-a-tier / event-mappings` 等文件，再据此做筛选、重组和方案推进，避免“Phase 2 有流程提示但没有 ideas 输入”的问题。
+- 当前真实神级小说策略的 `deliverables.requiredFiles[*].qualityChecks` 已全部移除，避免文件质量门槛过死；现在只保留 `minChars / minMarkdownHeadings / requiredSnippets` 这类更宽的约束。
+- 当前真实神级小说策略的 `deliverables.requiredFiles[*].requiredSnippets` 也已全部移除，进一步放宽交付文件的硬性片段要求，改为主要依赖 AI 自主思考与更宽的长度/结构约束。

@@ -1124,14 +1124,16 @@ export default function StrategyDetailPage() {
           {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
         />
         <div className="row" style={{ justifyContent: "space-between" }}>
-          <div>
-            <h2 style={{ margin: 0 }}>策略</h2>
-            <div className="muted">{detail.canEdit ? "可编辑" : "只读（来自社区分享）"}</div>
+          <div className="row" style={{ gap: 10, alignItems: "center" }}>
+            <Link className="btn btn-primary" href={`/workspaces/new?strategyId=${detail.id}`}>
+              创建工作台
+            </Link>
+            <div>
+              <h2 style={{ margin: 0 }}>策略</h2>
+              <div className="muted">{detail.canEdit ? "可编辑" : "只读（来自社区分享）"}</div>
+            </div>
           </div>
           <div className="row">
-            <Link className="btn btn-primary" href={`/debates/new?strategyId=${detail.id}`}>
-              使用策略
-            </Link>
             <button className="btn" disabled={isExportingFolder} onClick={() => void downloadStrategyFolder()}>
               {isExportingFolder ? "导出中..." : "下载文件夹"}
             </button>
@@ -1207,7 +1209,7 @@ export default function StrategyDetailPage() {
         <div className="row" style={{ justifyContent: "space-between" }}>
           <div>
             <strong>独立总结器（可选）</strong>
-            <div className="muted">策略可以声明一台独立总结器，用于每回摘要、每轮摘要和结构化事实板。真正绑定哪台 AI，会在“使用策略”创建辩论时再选择。</div>
+            <div className="muted">策略可以声明一台独立总结器，用于每回摘要、每轮摘要和结构化事实板。真正绑定哪台 AI，会在基于策略创建的工作台里再选择。</div>
           </div>
         </div>
 

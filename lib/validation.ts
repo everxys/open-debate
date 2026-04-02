@@ -51,6 +51,10 @@ export const agentFileDeleteSchema = z.object({ path: relativeFilePathSchema });
 
 export const agentFileMoveSchema = z.object({ fromPath: relativeFilePathSchema, toPath: relativeFilePathSchema });
 
+export const upsertFileSchema = agentFileUpsertSchema;
+export const filePathSchema = agentFileDeleteSchema;
+export const moveFileSchema = agentFileMoveSchema;
+
 // === Agent export/import schemas ===
 
 export const agentPortableSchema = z.object({
@@ -106,6 +110,44 @@ export const createDebateSchema = z.union([
 export const updateDebateQuestionSchema = z.object({ question: debateCommonSchema.shape.question });
 
 export const updateDebateSharingSchema = z.object({ isShared: z.boolean() });
+
+// === Workspace schemas ===
+
+export const workspaceFileSchema = z.object({
+  path: relativeFilePathSchema,
+  content: z.string().max(200_000)
+});
+
+export const workspaceBindingSchema = z.object({
+  id: z.string().min(1).optional(),
+  sourceStrategyRoleId: z.string().min(1).nullable().optional(),
+  roleName: z.string().min(1).max(80),
+  roleOrder: z.number().int().min(1).max(200),
+  agentId: z.string().min(1).nullable().optional(),
+  displayName: z.string().max(80).nullable().optional()
+});
+
+export const createWorkspaceSchema = z.object({
+  strategyId: z.string().min(1),
+  name: z.string().min(1).max(120),
+  description: z.string().max(4000).nullable().optional()
+});
+
+export const updateWorkspaceSchema = z.object({
+  name: z.string().min(1).max(120),
+  description: z.string().max(4000).nullable().optional(),
+  question: z.string().max(50_000),
+  summaryAgentId: z.string().min(1).nullable().optional(),
+  defaultMaxTurns: z.number().int().min(0).max(200),
+  defaultEnableSharedFacts: z.boolean().optional().default(true),
+  bindings: z.array(workspaceBindingSchema).min(2).max(200),
+  files: z.array(workspaceFileSchema).max(200).optional()
+});
+
+export const createWorkspaceDebateSchema = z.object({
+  maxTurns: z.number().int().min(0).max(200).optional(),
+  enableSharedFacts: z.boolean().optional()
+});
 
 // === Strategy schemas ===
 
