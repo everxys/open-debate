@@ -1,6 +1,8 @@
 import { randomInt } from "node:crypto";
 
-import { query } from "@/lib/db";
+import { sql } from "kysely";
+
+import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { hashVerificationCode, verifyVerificationCode } from "@/lib/password";
 
@@ -31,24 +33,25 @@ export async function createSignupVerificationCode(input: {
   const expiresInMinutes = input.expiresInMinutes ?? 10;
   const code = generateSixDigitCode();
   const hashed = hashVerificationCode(code, input.email);
+  const email = input.email.trim().toLowerCase();
 
   try {
-    await query(
-      `
-        insert into email_verification_codes
-          (email, purpose, code_salt, code_hash, sent_to, ip, user_agent, expires_at)
-        values
-          ($1, 'signup', $2, $3, $1, $4, $5, now() + ($6 || ' minutes')::interval)
-      `,
-      [
-        input.email.trim().toLowerCase(),
-        hashed.salt,
-        hashed.hash,
-        input.ip,
-        input.userAgent,
-        String(expiresInMinutes)
-      ]
-    );
+    const db = await ensureDb();
+    await db
+      .insertInto("email_verification_codes")
+      .values({
+        email,
+        purpose: "signup",
+        code_salt: hashed.salt,
+        code_hash: hashed.hash,
+        sent_to: email,
+        ip: input.ip,
+        user_agent: input.userAgent,
+        expires_at: sql`now() + (${String(expiresInMinutes)} || ' minutes')::interval`,
+        created_at: sql`now()`,
+        consumed_at: null
+      })
+      .execute();
   } catch (error) {
     if (isPgUndefinedTable(error)) {
       console.error("DB schema missing: email_verification_codes", error);
@@ -69,38 +72,30 @@ export async function consumeSignupVerificationCode(input: { email: string; code
   const code = input.code.trim();
   if (!isSixDigitCode(code)) return false;
 
-  const candidates = await query<{
-    id: string;
-    code_salt: string;
-    code_hash: string;
-  }>(
-    `
-      select id, code_salt, code_hash
-      from email_verification_codes
-      where email = $1
-        and purpose = 'signup'
-        and consumed_at is null
-        and expires_at > now()
-      order by created_at desc
-      limit 5
-    `,
-    [email]
-  );
+  const db = await ensureDb();
+  const candidates = await db
+    .selectFrom("email_verification_codes")
+    .select(["id", "code_salt", "code_hash"])
+    .where("email", "=", email)
+    .where("purpose", "=", "signup")
+    .where("consumed_at", "is", null)
+    .where(sql<boolean>`expires_at > now()`)
+    .orderBy("created_at", "desc")
+    .limit(5)
+    .execute();
 
-  for (const row of candidates.rows) {
+  for (const row of candidates) {
     const ok = verifyVerificationCode(code, email, { salt: row.code_salt, hash: row.code_hash });
     if (!ok) continue;
 
-    const consumed = await query(
-      `
-        update email_verification_codes
-        set consumed_at = now()
-        where id = $1 and consumed_at is null
-      `,
-      [row.id]
-    );
+    const consumed = await db
+      .updateTable("email_verification_codes")
+      .set({ consumed_at: sql`now()` })
+      .where("id", "=", row.id)
+      .where("consumed_at", "is", null)
+      .executeTakeFirst();
 
-    return (consumed.rowCount ?? 0) === 1;
+    return Number(consumed.numUpdatedRows ?? 0) === 1;
   }
 
   return false;
@@ -111,24 +106,19 @@ export async function checkSignupVerificationCode(input: { email: string; code: 
   const code = input.code.trim();
   if (!isSixDigitCode(code)) return false;
 
-  const candidates = await query<{
-    code_salt: string;
-    code_hash: string;
-  }>(
-    `
-      select code_salt, code_hash
-      from email_verification_codes
-      where email = $1
-        and purpose = 'signup'
-        and consumed_at is null
-        and expires_at > now()
-      order by created_at desc
-      limit 5
-    `,
-    [email]
-  );
+  const db = await ensureDb();
+  const candidates = await db
+    .selectFrom("email_verification_codes")
+    .select(["code_salt", "code_hash"])
+    .where("email", "=", email)
+    .where("purpose", "=", "signup")
+    .where("consumed_at", "is", null)
+    .where(sql<boolean>`expires_at > now()`)
+    .orderBy("created_at", "desc")
+    .limit(5)
+    .execute();
 
-  return candidates.rows.some((row) =>
+  return candidates.some((row) =>
     verifyVerificationCode(code, email, { salt: row.code_salt, hash: row.code_hash })
   );
 }
@@ -136,48 +126,40 @@ export async function checkSignupVerificationCode(input: { email: string; code: 
 export async function getSignupVerificationSendStatus(input: { email: string; ip: string | null }) {
   const email = input.email.trim().toLowerCase();
 
-  const recentByEmail = await query<{ count: string }>(
-    `
-      select count(*)::text as count
-      from email_verification_codes
-      where email = $1
-        and purpose = 'signup'
-        and created_at > now() - interval '60 seconds'
-    `,
-    [email]
-  );
+  const db = await ensureDb();
+  const recentByEmail = await db
+    .selectFrom("email_verification_codes")
+    .select(sql<number>`count(*)::int`.as("count"))
+    .where("email", "=", email)
+    .where("purpose", "=", "signup")
+    .where(sql<boolean>`created_at > now() - interval '60 seconds'`)
+    .executeTakeFirstOrThrow();
 
-  if (Number(recentByEmail.rows[0]?.count ?? "0") >= 1) {
+  if (Number(recentByEmail.count ?? 0) >= 1) {
     return { ok: false, retryAfterSeconds: 60 };
   }
 
   if (input.ip) {
-    const recentByIp = await query<{ count: string }>(
-      `
-        select count(*)::text as count
-        from email_verification_codes
-        where ip = $1
-          and purpose = 'signup'
-          and created_at > now() - interval '60 seconds'
-      `,
-      [input.ip]
-    );
-    if (Number(recentByIp.rows[0]?.count ?? "0") >= 3) {
+    const recentByIp = await db
+      .selectFrom("email_verification_codes")
+      .select(sql<number>`count(*)::int`.as("count"))
+      .where("ip", "=", input.ip)
+      .where("purpose", "=", "signup")
+      .where(sql<boolean>`created_at > now() - interval '60 seconds'`)
+      .executeTakeFirstOrThrow();
+    if (Number(recentByIp.count ?? 0) >= 3) {
       return { ok: false, retryAfterSeconds: 60 };
     }
   }
 
-  const hourly = await query<{ count: string }>(
-    `
-      select count(*)::text as count
-      from email_verification_codes
-      where email = $1
-        and purpose = 'signup'
-        and created_at > now() - interval '1 hour'
-    `,
-    [email]
-  );
-  if (Number(hourly.rows[0]?.count ?? "0") >= 10) {
+  const hourly = await db
+    .selectFrom("email_verification_codes")
+    .select(sql<number>`count(*)::int`.as("count"))
+    .where("email", "=", email)
+    .where("purpose", "=", "signup")
+    .where(sql<boolean>`created_at > now() - interval '1 hour'`)
+    .executeTakeFirstOrThrow();
+  if (Number(hourly.count ?? 0) >= 10) {
     return { ok: false, retryAfterSeconds: 3600 };
   }
 

@@ -1,4 +1,4 @@
-import { query } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 
 export type DebateParticipantRoleType = string;
 
@@ -28,23 +28,20 @@ export async function loadDebateParticipantRoleTypes(
   userId: string,
   debateId: string
 ): Promise<DebateParticipantRoleAssignments> {
-  const result = await query<{ debate_agent_id: string; content: string | null }>(
-    `
-      select da.id as debate_agent_id,
-             f.content as content
-        from debate_agents da
-        join debates d on d.id = da.debate_id
-        left join debate_agent_files f
-          on f.debate_agent_id = da.id
-         and f.path = $3
-       where da.debate_id = $1
-         and d.user_id = $2
-    `,
-    [debateId, userId, BASE_ROLE_PATH]
-  );
+  const db = await ensureDb();
+  const result = await db
+    .selectFrom("debate_agents as da")
+    .innerJoin("debates as d", "d.id", "da.debate_id")
+    .leftJoin("debate_agent_files as f", (join) =>
+      join.onRef("f.debate_agent_id", "=", "da.id").on("f.path", "=", BASE_ROLE_PATH)
+    )
+    .select(["da.id as debate_agent_id", "f.content as content"])
+    .where("da.debate_id", "=", debateId)
+    .where("d.user_id", "=", userId)
+    .execute();
 
   const byDebateAgentId = new Map<string, DebateParticipantRoleType>();
-  for (const row of result.rows) {
+  for (const row of result) {
     const baseRole = parseBaseRole(String(row.content ?? ""));
     byDebateAgentId.set(String(row.debate_agent_id), baseRole ?? "Participant");
   }

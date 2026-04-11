@@ -1,5 +1,7 @@
+import { sql } from "kysely";
+
 import { decryptSecret, encryptSecret, maskSecret } from "@/lib/crypto";
-import { getPool, query } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { requireSessionUser } from "@/lib/auth";
 import type { AgentRecord, Provider } from "@/lib/types";
@@ -274,34 +276,45 @@ async function callProviderDebug(input: {
 
 export async function listAgents() {
   const session = await requireSessionUser();
-  const result = await query<Record<string, unknown>>(
-    "select * from ai_agents where user_id = $1 and deleted_at is null order by created_at desc",
-    [session.userId]
-  );
-  return result.rows.map((row: Record<string, unknown>) => toAgentView(normalizeAgentRow(row)));
+  const db = await ensureDb();
+  const rows = await db
+    .selectFrom("ai_agents")
+    .selectAll()
+    .where("user_id", "=", session.userId)
+    .where("deleted_at", "is", null)
+    .orderBy("created_at", "desc")
+    .execute();
+  return rows.map((row) => toAgentView(normalizeAgentRow(row as Record<string, unknown>)));
 }
 
 export async function exportAgentsPack(input: unknown) {
   const data = exportAgentsRequestSchema.parse(input);
   const session = await requireSessionUser();
 
-  const agentsResult = await query<Record<string, unknown>>(
-    "select * from ai_agents where user_id = $1 and id = any($2::uuid[]) order by created_at asc",
-    [session.userId, data.agentIds]
-  );
-  if ((agentsResult.rowCount ?? 0) !== data.agentIds.length) {
+  const db = await ensureDb();
+  const agentRows = await db
+    .selectFrom("ai_agents")
+    .selectAll()
+    .where("user_id", "=", session.userId)
+    .where("id", "in", data.agentIds)
+    .orderBy("created_at", "asc")
+    .execute();
+  if (agentRows.length !== data.agentIds.length) {
     throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid");
   }
 
-  const agents = agentsResult.rows.map((row) => normalizeAgentRow(row));
+  const agents = agentRows.map((row) => normalizeAgentRow(row as Record<string, unknown>));
 
   let fileRows: Array<{ ai_agent_id: string; path: string; content: string }> = [];
   try {
-    const filesResult = await query<Record<string, unknown>>(
-      "select ai_agent_id, path, content from ai_agent_files where ai_agent_id = any($1::uuid[]) order by ai_agent_id asc, path asc",
-      [data.agentIds]
-    );
-    fileRows = filesResult.rows.map((row) => ({
+    const filesResult = await db
+      .selectFrom("ai_agent_files")
+      .select(["ai_agent_id", "path", "content"])
+      .where("ai_agent_id", "in", data.agentIds)
+      .orderBy("ai_agent_id", "asc")
+      .orderBy("path", "asc")
+      .execute();
+    fileRows = filesResult.map((row) => ({
       ai_agent_id: String(row.ai_agent_id),
       path: String(row.path),
       content: String(row.content ?? "")
@@ -343,13 +356,10 @@ export async function importAgentsPack(input: unknown) {
   const data = importAgentsPackSchema.parse(input);
   const session = await requireSessionUser();
   const now = new Date().toISOString();
-  const pool = getPool();
-  const client = await pool.connect();
+  const db = await ensureDb();
 
-  try {
-    await client.query("begin");
-
-    const createdAgents: AgentRecord[] = [];
+  const createdAgents = await db.transaction().execute(async (trx) => {
+    const items: AgentRecord[] = [];
     for (const item of data.agents) {
       const importedContextLength =
         typeof (item as { contextLength?: unknown }).contextLength === "number"
@@ -363,42 +373,49 @@ export async function importAgentsPack(input: unknown) {
         typeof (item as { maxOutputTokens?: unknown }).maxOutputTokens === "number"
           ? (item as { maxOutputTokens: number }).maxOutputTokens
           : null;
-      const inserted = await client.query<Record<string, unknown>>(
-        `insert into ai_agents (
-          user_id, name, provider, model, context_length, max_input_tokens, max_output_tokens, base_url,
-          api_key_encrypted, api_key_masked, is_active, created_at, updated_at
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
-        returning *`,
-        [
-          session.userId,
-          item.name,
-          item.provider,
-          item.model,
-          importedContextLength,
-          importedMaxInputTokens,
-          importedMaxOutputTokens,
-          item.baseUrl,
-          encryptSecret(item.apiKey),
-          maskSecret(item.apiKey),
-          item.isActive ?? true,
-          now
-        ]
-      );
 
-      const created = normalizeAgentRow(inserted.rows[0]);
-      createdAgents.push(created);
+      const inserted = await trx
+        .insertInto("ai_agents")
+        .values({
+          user_id: session.userId,
+          name: item.name,
+          provider: item.provider,
+          model: item.model,
+          context_length: importedContextLength,
+          max_input_tokens: importedMaxInputTokens,
+          max_output_tokens: importedMaxOutputTokens,
+          base_url: item.baseUrl,
+          api_key_encrypted: encryptSecret(item.apiKey),
+          api_key_masked: maskSecret(item.apiKey),
+          is_active: item.isActive ?? true,
+          created_at: now,
+          updated_at: now,
+          deleted_at: null
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow();
+
+      const created = normalizeAgentRow(inserted as Record<string, unknown>);
+      items.push(created);
 
       try {
         for (const file of item.files ?? []) {
-          await client.query(
-            `
-              insert into ai_agent_files (ai_agent_id, path, content, created_at, updated_at)
-              values ($1, $2, $3, $4, $4)
-              on conflict (ai_agent_id, path)
-              do update set content = excluded.content, updated_at = excluded.updated_at
-            `,
-            [created.id, file.path, file.content, now]
-          );
+          await trx
+            .insertInto("ai_agent_files")
+            .values({
+              ai_agent_id: created.id,
+              path: file.path,
+              content: file.content,
+              created_at: now,
+              updated_at: now
+            })
+            .onConflict((oc) =>
+              oc.columns(["ai_agent_id", "path"]).doUpdateSet({
+                content: file.content,
+                updated_at: now
+              })
+            )
+            .execute();
         }
       } catch (error) {
         if (isMissingTableError(error, "ai_agent_files")) {
@@ -407,31 +424,25 @@ export async function importAgentsPack(input: unknown) {
         throw error;
       }
     }
+    return items;
+  });
 
-    await client.query("commit");
-    return createdAgents.map((agent) => toAgentView(agent));
-  } catch (error) {
-    try {
-      await client.query("rollback");
-    } catch {
-      // ignore
-    }
-    throw error;
-  } finally {
-    client.release();
-  }
+  return createdAgents.map((agent) => toAgentView(agent));
 }
 
 export async function getAgentById(id: string) {
   const session = await requireSessionUser();
-  const result = await query<Record<string, unknown>>(
-    "select * from ai_agents where id = $1 and user_id = $2",
-    [id, session.userId]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const result = await db
+    .selectFrom("ai_agents")
+    .selectAll()
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("NOT_FOUND", 404, "Agent not found");
   }
-  return normalizeAgentRow(result.rows[0]);
+  return normalizeAgentRow(result as Record<string, unknown>);
 }
 
 export async function getAgentViewById(id: string) {
@@ -450,11 +461,14 @@ function isMissingTableError(error: unknown, table: string) {
 export async function listAgentFiles(agentId: string) {
   await getAgentById(agentId);
   try {
-    const result = await query<Record<string, unknown>>(
-      "select path, created_at, updated_at from ai_agent_files where ai_agent_id = $1 order by path asc",
-      [agentId]
-    );
-    return result.rows.map((row) => ({
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("ai_agent_files")
+      .select(["path", "created_at", "updated_at"])
+      .where("ai_agent_id", "=", agentId)
+      .orderBy("path", "asc")
+      .execute();
+    return result.map((row) => ({
       path: String(row.path),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at)
@@ -470,18 +484,22 @@ export async function listAgentFiles(agentId: string) {
 export async function getAgentFile(agentId: string, path: string) {
   await getAgentById(agentId);
   try {
-    const result = await query<Record<string, unknown>>(
-      "select path, content, created_at, updated_at from ai_agent_files where ai_agent_id = $1 and path = $2 limit 1",
-      [agentId, path]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("ai_agent_files")
+      .select(["path", "content", "created_at", "updated_at"])
+      .where("ai_agent_id", "=", agentId)
+      .where("path", "=", path)
+      .limit(1)
+      .executeTakeFirst();
+    if (!result) {
       throw new AppError("NOT_FOUND", 404, "File not found");
     }
     return {
-      path: String(result.rows[0].path),
-      content: String(result.rows[0].content ?? ""),
-      createdAt: String(result.rows[0].created_at),
-      updatedAt: String(result.rows[0].updated_at)
+      path: String(result.path),
+      content: String(result.content ?? ""),
+      createdAt: String(result.created_at),
+      updatedAt: String(result.updated_at)
     };
   } catch (error) {
     if (isMissingTableError(error, "ai_agent_files")) {
@@ -497,21 +515,29 @@ export async function upsertAgentFile(agentId: string, input: unknown) {
   const now = new Date().toISOString();
 
   try {
-    const result = await query<Record<string, unknown>>(
-      `
-        insert into ai_agent_files (ai_agent_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (ai_agent_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-        returning path, content, created_at, updated_at
-      `,
-      [agentId, data.path, data.content, now]
-    );
+    const db = await ensureDb();
+    const result = await db
+      .insertInto("ai_agent_files")
+      .values({
+        ai_agent_id: agentId,
+        path: data.path,
+        content: data.content,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["ai_agent_id", "path"]).doUpdateSet({
+          content: data.content,
+          updated_at: now
+        })
+      )
+      .returning(["path", "content", "created_at", "updated_at"])
+      .executeTakeFirstOrThrow();
     return {
-      path: String(result.rows[0].path),
-      content: String(result.rows[0].content ?? ""),
-      createdAt: String(result.rows[0].created_at),
-      updatedAt: String(result.rows[0].updated_at)
+      path: String(result.path),
+      content: String(result.content ?? ""),
+      createdAt: String(result.created_at),
+      updatedAt: String(result.updated_at)
     };
   } catch (error) {
     if (isMissingTableError(error, "ai_agent_files")) {
@@ -525,11 +551,13 @@ export async function deleteAgentFile(agentId: string, input: unknown) {
   const data = agentFileDeleteSchema.parse(input);
   await getAgentById(agentId);
   try {
-    const result = await query(
-      "delete from ai_agent_files where ai_agent_id = $1 and path = $2",
-      [agentId, data.path]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const result = await db
+      .deleteFrom("ai_agent_files")
+      .where("ai_agent_id", "=", agentId)
+      .where("path", "=", data.path)
+      .executeTakeFirst();
+    if (Number(result.numDeletedRows ?? 0) !== 1) {
       throw new AppError("NOT_FOUND", 404, "File not found");
     }
   } catch (error) {
@@ -545,11 +573,13 @@ export async function deleteAgentFilesByPrefix(agentId: string, prefix: string) 
   const normalized = String(prefix ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
   const like = normalized ? `${normalized.replace(/\/+$/, "")}/%` : "%";
   try {
-    const result = await query(
-      "delete from ai_agent_files where ai_agent_id = $1 and path like $2",
-      [agentId, like]
-    );
-    return { deleted: Number(result.rowCount ?? 0) };
+    const db = await ensureDb();
+    const result = await db
+      .deleteFrom("ai_agent_files")
+      .where("ai_agent_id", "=", agentId)
+      .where("path", "like", like)
+      .executeTakeFirst();
+    return { deleted: Number(result.numDeletedRows ?? 0) };
   } catch (error) {
     if (isMissingTableError(error, "ai_agent_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing ai_agent_files table");
@@ -567,32 +597,36 @@ export async function moveAgentFile(agentId: string, input: unknown) {
   const now = new Date().toISOString();
 
   try {
-    const exists = await query<{ path: string }>(
-      "select path from ai_agent_files where ai_agent_id = $1 and path = $2",
-      [agentId, data.toPath]
-    );
-    if ((exists.rowCount ?? 0) > 0) {
+    const db = await ensureDb();
+    const exists = await db
+      .selectFrom("ai_agent_files")
+      .select("path")
+      .where("ai_agent_id", "=", agentId)
+      .where("path", "=", data.toPath)
+      .limit(1)
+      .executeTakeFirst();
+    if (exists) {
       throw new AppError("CONFLICT", 409, "Target path already exists");
     }
 
-    const updated = await query<Record<string, unknown>>(
-      `
-        update ai_agent_files
-        set path = $3,
-            updated_at = $4
-        where ai_agent_id = $1 and path = $2
-        returning path, content, created_at, updated_at
-      `,
-      [agentId, data.fromPath, data.toPath, now]
-    );
-    if ((updated.rowCount ?? 0) !== 1) {
+    const updated = await db
+      .updateTable("ai_agent_files")
+      .set({
+        path: data.toPath,
+        updated_at: now
+      })
+      .where("ai_agent_id", "=", agentId)
+      .where("path", "=", data.fromPath)
+      .returning(["path", "content", "created_at", "updated_at"])
+      .executeTakeFirst();
+    if (!updated) {
       throw new AppError("NOT_FOUND", 404, "File not found");
     }
     return {
-      path: String(updated.rows[0].path),
-      content: String(updated.rows[0].content ?? ""),
-      createdAt: String(updated.rows[0].created_at),
-      updatedAt: String(updated.rows[0].updated_at)
+      path: String(updated.path),
+      content: String(updated.content ?? ""),
+      createdAt: String(updated.created_at),
+      updatedAt: String(updated.updated_at)
     };
   } catch (error) {
     if (isMissingTableError(error, "ai_agent_files")) {
@@ -607,92 +641,74 @@ export async function duplicateAgent(id: string) {
   const source = await getAgentById(id);
   const now = new Date().toISOString();
 
-  const pool = getPool();
-  const client = await pool.connect();
-  try {
-    await client.query("begin");
+  const db = await ensureDb();
+  return await db.transaction().execute(async (trx) => {
+    const inserted = await trx
+      .insertInto("ai_agents")
+      .values({
+        user_id: session.userId,
+        name: `${source.name} (copy)`,
+        provider: source.provider,
+        model: source.model,
+        context_length: source.contextLength,
+        max_input_tokens: source.maxInputTokens,
+        max_output_tokens: source.maxOutputTokens,
+        base_url: source.baseUrl,
+        api_key_encrypted: source.apiKeyEncrypted,
+        api_key_masked: source.apiKeyMasked,
+        is_active: source.isActive,
+        created_at: now,
+        updated_at: now,
+        deleted_at: null
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
 
-    const inserted = await client.query<Record<string, unknown>>(
-      `
-        insert into ai_agents (
-          user_id, name, provider, model, context_length, max_input_tokens, max_output_tokens, base_url,
-          api_key_encrypted, api_key_masked, is_active, created_at, updated_at
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
-        returning *
-      `,
-      [
-        session.userId,
-        `${source.name} (copy)`,
-        source.provider,
-        source.model,
-        source.contextLength,
-        source.maxInputTokens,
-        source.maxOutputTokens,
-        source.baseUrl,
-        source.apiKeyEncrypted,
-        source.apiKeyMasked,
-        source.isActive,
-        now
-      ]
-    );
-
-    const created = normalizeAgentRow(inserted.rows[0]);
+    const created = normalizeAgentRow(inserted as Record<string, unknown>);
 
     try {
-      await client.query(
-        `
-          insert into ai_agent_files (ai_agent_id, path, content, created_at, updated_at)
-          select $2, path, content, $3, $3
-          from ai_agent_files
-          where ai_agent_id = $1
-        `,
-        [source.id, created.id, now]
-      );
+      await trx.executeQuery(sql`
+        insert into ai_agent_files (ai_agent_id, path, content, created_at, updated_at)
+        select ${created.id}, path, content, ${now}, ${now}
+        from ai_agent_files
+        where ai_agent_id = ${source.id}
+      `.compile(trx));
     } catch (error) {
       if (!isMissingTableError(error, "ai_agent_files")) {
         throw error;
       }
     }
 
-    await client.query("commit");
     return toAgentView(created);
-  } catch (error) {
-    try {
-      await client.query("rollback");
-    } catch {
-      // ignore
-    }
-    throw error;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function createAgent(input: unknown) {
   const data = createAgentSchema.parse(input);
   const session = await requireSessionUser();
   const now = new Date().toISOString();
-  const result = await query<Record<string, unknown>>(
-    `insert into ai_agents (
-      user_id, name, provider, model, context_length, max_input_tokens, max_output_tokens, base_url,
-      api_key_encrypted, api_key_masked, is_active, created_at, updated_at
-    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true,$11,$11)
-    returning *`,
-    [
-      session.userId,
-      data.name,
-      data.provider,
-      data.model,
-      data.contextLength ?? null,
-      data.maxInputTokens ?? null,
-      data.maxOutputTokens ?? null,
-      data.baseUrl,
-      encryptSecret(data.apiKey),
-      maskSecret(data.apiKey),
-      now
-    ]
-  );
-  return toAgentView(normalizeAgentRow(result.rows[0]));
+  const db = await ensureDb();
+  const result = await db
+    .insertInto("ai_agents")
+    .values({
+      user_id: session.userId,
+      name: data.name,
+      provider: data.provider,
+      model: data.model,
+      context_length: data.contextLength ?? null,
+      max_input_tokens: data.maxInputTokens ?? null,
+      max_output_tokens: data.maxOutputTokens ?? null,
+      base_url: data.baseUrl,
+      api_key_encrypted: encryptSecret(data.apiKey),
+      api_key_masked: maskSecret(data.apiKey),
+      is_active: true,
+      created_at: now,
+      updated_at: now,
+      deleted_at: null
+    })
+    .returningAll()
+    .executeTakeFirstOrThrow();
+  return toAgentView(normalizeAgentRow(result as Record<string, unknown>));
 }
 
 export async function updateAgent(id: string, input: unknown) {
@@ -734,74 +750,64 @@ export async function updateAgent(id: string, input: unknown) {
           : current.maxOutputTokens
       : current.maxOutputTokens;
 
-  const result = await query<Record<string, unknown>>(
-    `update ai_agents
-      set name = $3,
-          provider = $4,
-          model = $5,
-          context_length = $6,
-          max_input_tokens = $7,
-          max_output_tokens = $8,
-          base_url = $9,
-          api_key_encrypted = $10,
-          api_key_masked = $11,
-          is_active = $12,
-          updated_at = $13
-     where id = $1 and user_id = $2
-     returning *`,
-    [
-      id,
-      session.userId,
-      data.name ?? current.name,
-      data.provider ?? current.provider,
-      data.model ?? current.model,
-      nextContextLength,
-      nextMaxInputTokens,
-      nextMaxOutputTokens,
-      data.baseUrl ?? current.baseUrl,
-      data.apiKey ? encryptSecret(data.apiKey) : current.apiKeyEncrypted,
-      data.apiKey ? maskSecret(data.apiKey) : current.apiKeyMasked,
-      nextIsActive,
-      new Date().toISOString()
-    ]
-  );
+  const db = await ensureDb();
+  const result = await db
+    .updateTable("ai_agents")
+    .set({
+      name: data.name ?? current.name,
+      provider: data.provider ?? current.provider,
+      model: data.model ?? current.model,
+      context_length: nextContextLength,
+      max_input_tokens: nextMaxInputTokens,
+      max_output_tokens: nextMaxOutputTokens,
+      base_url: data.baseUrl ?? current.baseUrl,
+      api_key_encrypted: data.apiKey ? encryptSecret(data.apiKey) : current.apiKeyEncrypted,
+      api_key_masked: data.apiKey ? maskSecret(data.apiKey) : current.apiKeyMasked,
+      is_active: nextIsActive,
+      updated_at: new Date().toISOString()
+    })
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .returningAll()
+    .executeTakeFirst();
 
-  if ((result.rowCount ?? 0) !== 1) {
+  if (!result) {
     throw new AppError("NOT_FOUND", 404, "Agent not found");
   }
 
-  return toAgentView(normalizeAgentRow(result.rows[0]));
+  return toAgentView(normalizeAgentRow(result as Record<string, unknown>));
 }
 
 export async function deleteAgent(id: string) {
   const session = await requireSessionUser();
-  const relation = await query(
-    `
-      select da.id
-        from debate_agents da
-        join debates d on d.id = da.debate_id
-       where da.ai_agent_id = $1
-         and d.user_id = $2
-         and d.status in ('pending','running','paused')
-       limit 1
-    `,
-    [id, session.userId]
-  );
-  if ((relation.rowCount ?? 0) > 0) {
+  const db = await ensureDb();
+  const relation = await db
+    .selectFrom("debate_agents as da")
+    .innerJoin("debates as d", "d.id", "da.debate_id")
+    .select("da.id")
+    .where("da.ai_agent_id", "=", id)
+    .where("d.user_id", "=", session.userId)
+    .where("d.status", "in", ["pending", "running", "paused"])
+    .limit(1)
+    .executeTakeFirst();
+  if (relation) {
     throw new AppError("CONFLICT", 409, "Agent is already used by an active debate");
   }
 
   const now = new Date().toISOString();
-  const result = await query(
-    `update ai_agents
-        set deleted_at = $3,
-            is_active = false,
-            updated_at = $3
-      where id = $1 and user_id = $2 and deleted_at is null
-      returning id`,
-    [id, session.userId, now]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const result = await db
+    .updateTable("ai_agents")
+    .set({
+      deleted_at: now,
+      is_active: false,
+      updated_at: now
+    })
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .where("deleted_at", "is", null)
+    .returning("id")
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("NOT_FOUND", 404, "Agent not found");
   }
 }

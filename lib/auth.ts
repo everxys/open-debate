@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
 import { AppError } from "@/lib/http";
-import { query } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 import { readSession } from "@/lib/session";
 import { isAdminEmail, normalizeRole, type UserRole } from "@/lib/roles";
 
@@ -17,15 +17,15 @@ function resolveUserRole(dbRole: string, email: string): UserRole {
 async function fetchUserBySession(session: { userId: string } | null): Promise<AppUser | null> {
   if (!session) return null;
 
-  const result = await query<{ id: string; email: string; role: string }>(
-    "select id, email, role from users where id = $1",
-    [session.userId]
-  );
-
-  const row = result.rows[0];
+  const db = await ensureDb();
+  const row = await db
+    .selectFrom("users")
+    .select(["id", "email", "role"])
+    .where("id", "=", session.userId)
+    .executeTakeFirst();
   if (!row) return null;
 
-  return { ...row, role: resolveUserRole(row.role, row.email) };
+  return { ...row, role: resolveUserRole(String(row.role), String(row.email)) };
 }
 
 /** Require authenticated user, redirect to login if missing */

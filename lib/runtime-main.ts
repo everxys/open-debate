@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import type { PoolClient } from "pg";
+import { sql, type Kysely, type Transaction } from "kysely";
 
 import { decryptSecret } from "@/lib/crypto";
 import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type DebateParticipantRoleType } from "@/lib/debate-role-types";
-import { ensureDbReady, query } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
+import type { OpenDebateDb } from "@/lib/db-schema";
 import {
   clearDebateLiveProgress,
   clearDebateSummaryJob,
@@ -192,6 +193,8 @@ export type DebateFileActivityAudit = {
   roundNumber: number;
   now: string;
 };
+
+type DbLike = Kysely<OpenDebateDb> | Transaction<OpenDebateDb>;
 
 export function getPgErrorCode(error: unknown) {
   if (typeof error !== "object" || error === null) return null;
@@ -744,14 +747,19 @@ export function getFactsBoardPath(workflow: NormalizedDebateWorkflow | null) {
 async function loadWorkflowSummarizerAgent(userId: string, workflow: NormalizedDebateWorkflow | null) {
   const summarizer = getWorkflowSummarizerConfig(workflow);
   if (!summarizer) return null;
-  const result = await query<Record<string, unknown>>(
-    "select * from ai_agents where id = $1 and user_id = $2 and deleted_at is null limit 1",
-    [summarizer.aiAgentId, userId]
-  );
-  if ((result.rowCount ?? 0) !== 1) return null;
+  const db = await ensureDb();
+  const result = await db
+    .selectFrom("ai_agents")
+    .selectAll()
+    .where("id", "=", summarizer.aiAgentId)
+    .where("user_id", "=", userId)
+    .where("deleted_at", "is", null)
+    .limit(1)
+    .executeTakeFirst();
+  if (!result) return null;
   return {
     summarizer,
-    agent: normalizeAgentRow(result.rows[0])
+    agent: normalizeAgentRow(result as Record<string, unknown>)
   };
 }
 
@@ -1151,21 +1159,22 @@ async function listRoundTurnSummaries(input: {
 }) {
   const startTurn = (input.roundNumber - 1) * input.participantCount + 1;
   const endTurn = input.roundNumber * input.participantCount;
-  const turnRows = await query<{ turn_number: number; speaker_name: string | null }>(
-    `
-      select t.turn_number,
-             coalesce(da.display_name, a.name) as speaker_name
-        from debate_turns t
-        join ai_agents a on a.id = t.ai_agent_id
-        left join debate_agents da on da.id = t.debate_agent_id
-       where t.debate_id = $1
-         and t.turn_number between $2 and $3
-       order by t.turn_number asc
-    `,
-    [input.debateId, startTurn, endTurn]
-  );
+  const db = await ensureDb();
+  const turnRows = await db
+    .selectFrom("debate_turns as t")
+    .innerJoin("ai_agents as a", "a.id", "t.ai_agent_id")
+    .leftJoin("debate_agents as da", "da.id", "t.debate_agent_id")
+    .select([
+      "t.turn_number",
+      sql<string>`coalesce(da.display_name, a.name)`.as("speaker_name")
+    ])
+    .where("t.debate_id", "=", input.debateId)
+    .where("t.turn_number", ">=", startTurn)
+    .where("t.turn_number", "<=", endTurn)
+    .orderBy("t.turn_number", "asc")
+    .execute();
   const items: Array<{ turnNumber: number; agentName: string; content: string }> = [];
-  for (const row of turnRows.rows) {
+  for (const row of turnRows) {
     const turnNumber = Number(row.turn_number);
     const content = await readDebateFile(
       input.userId,
@@ -1528,20 +1537,19 @@ export async function loadAgentFilesInline(
   audit: DebateFileActivityAudit | null = null
 ) {
   try {
-    const result = await query<{ path: string; content: string }>(
-      `
-        select f.path, f.content
-        from ai_agent_files f
-        join ai_agents a on a.id = f.ai_agent_id
-        where f.ai_agent_id = $1 and a.user_id = $2
-        order by f.path asc
-      `,
-      [agentId, userId]
-    );
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("ai_agent_files as f")
+      .innerJoin("ai_agents as a", "a.id", "f.ai_agent_id")
+      .select(["f.path", "f.content"])
+      .where("f.ai_agent_id", "=", agentId)
+      .where("a.user_id", "=", userId)
+      .orderBy("f.path", "asc")
+      .execute();
 
     const parts: string[] = [];
     const auditedPaths: string[] = [];
-    for (const row of result.rows) {
+    for (const row of result) {
       const path = String(row.path);
       if (isMemoryPath(path)) continue;
       const content = String(row.content ?? "");
@@ -1577,18 +1585,18 @@ function normalizeSeatFilePath(path: string) {
 async function listRawDebateSeatFiles(userId: string, debateAgentId: string, prefix = "") {
   try {
     const prefixLike = `${prefix}%`;
-    const result = await query<{ path: string; content: string }>(
-      `
-        select f.path, f.content
-          from debate_agent_files f
-          join debate_agents da on da.id = f.debate_agent_id
-          join debates d on d.id = da.debate_id
-         where f.debate_agent_id = $1 and d.user_id = $2 and f.path like $3
-         order by f.path asc
-      `,
-      [debateAgentId, userId, prefixLike]
-    );
-    return result.rows.map((row) => ({
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_agent_files as f")
+      .innerJoin("debate_agents as da", "da.id", "f.debate_agent_id")
+      .innerJoin("debates as d", "d.id", "da.debate_id")
+      .select(["f.path", "f.content"])
+      .where("f.debate_agent_id", "=", debateAgentId)
+      .where("d.user_id", "=", userId)
+      .where("f.path", "like", prefixLike)
+      .orderBy("f.path", "asc")
+      .execute();
+    return result.map((row) => ({
       path: String(row.path ?? ""),
       content: String(row.content ?? ""),
       source: "debate" as const
@@ -1602,17 +1610,17 @@ async function listRawDebateSeatFiles(userId: string, debateAgentId: string, pre
 async function listRawAgentFiles(userId: string, agentId: string, prefix = "") {
   try {
     const prefixLike = `${prefix}%`;
-    const result = await query<{ path: string; content: string }>(
-      `
-        select f.path, f.content
-        from ai_agent_files f
-        join ai_agents a on a.id = f.ai_agent_id
-        where f.ai_agent_id = $1 and a.user_id = $2 and f.path like $3
-        order by f.path asc
-      `,
-      [agentId, userId, prefixLike]
-    );
-    return result.rows.map((row) => ({
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("ai_agent_files as f")
+      .innerJoin("ai_agents as a", "a.id", "f.ai_agent_id")
+      .select(["f.path", "f.content"])
+      .where("f.ai_agent_id", "=", agentId)
+      .where("a.user_id", "=", userId)
+      .where("f.path", "like", prefixLike)
+      .orderBy("f.path", "asc")
+      .execute();
+    return result.map((row) => ({
       path: String(row.path ?? ""),
       content: String(row.content ?? ""),
       source: "agent" as const
@@ -1648,18 +1656,17 @@ export function isMissingTableError(error: unknown, table: string) {
 
 export async function loadDebateAgentSystemPrompt(userId: string, debateAgentId: string) {
   try {
-    const result = await query<{ system_prompt: string | null }>(
-      `
-        select o.system_prompt
-          from debate_agent_overrides o
-          join debate_agents da on da.id = o.debate_agent_id
-          join debates d on d.id = da.debate_id
-         where o.debate_agent_id = $1 and d.user_id = $2
-         limit 1
-      `,
-      [debateAgentId, userId]
-    );
-    return (result.rows[0]?.system_prompt as string | null | undefined) ?? null;
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_agent_overrides as o")
+      .innerJoin("debate_agents as da", "da.id", "o.debate_agent_id")
+      .innerJoin("debates as d", "d.id", "da.debate_id")
+      .select("o.system_prompt")
+      .where("o.debate_agent_id", "=", debateAgentId)
+      .where("d.user_id", "=", userId)
+      .limit(1)
+      .executeTakeFirst();
+    return (result?.system_prompt as string | null | undefined) ?? null;
   } catch (error) {
     if (isMissingTableError(error, "debate_agent_overrides")) return null;
     return null;
@@ -1718,17 +1725,17 @@ export async function listSeatContextFilesForRule(
 export async function listSharedContextFilesForRule(userId: string, debateId: string, rule: ResolvedContextAccessRule) {
   const prefixLike = `${rule.pathPrefix}%`;
   try {
-    const result = await query<{ path: string; content: string }>(
-      `
-        select f.path, f.content
-          from debate_files f
-          join debates d on d.id = f.debate_id
-         where f.debate_id = $1 and d.user_id = $2 and f.path like $3
-         order by f.path asc
-      `,
-      [debateId, userId, prefixLike]
-    );
-    return result.rows.filter((row) => (rule.recursive ? true : isDirectChildPath(rule.pathPrefix, String(row.path ?? ""))));
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_files as f")
+      .innerJoin("debates as d", "d.id", "f.debate_id")
+      .select(["f.path", "f.content"])
+      .where("f.debate_id", "=", debateId)
+      .where("d.user_id", "=", userId)
+      .where("f.path", "like", prefixLike)
+      .orderBy("f.path", "asc")
+      .execute();
+    return result.filter((row) => (rule.recursive ? true : isDirectChildPath(rule.pathPrefix, String(row.path ?? ""))));
   } catch (error) {
     if (isMissingTableError(error, "debate_files")) return [];
     throw error;
@@ -1917,35 +1924,32 @@ export async function loadRecentTurnRows(
 ) {
   try {
     const min = typeof minTurnNumber === "number" && Number.isFinite(minTurnNumber) ? Math.floor(minTurnNumber) : null;
-    const result = await query<{
-      turn_number: number;
-      content: string;
-      created_at: string;
-      speaker_name: string | null;
-      seat_number: number | null;
-    }>(
-      `
-        select t.turn_number,
-               t.content,
-               t.created_at,
-               coalesce(da.display_name, a.name) as speaker_name,
-               t.seat_number as seat_number
-          from debate_turns t
-          join ai_agents a on a.id = t.ai_agent_id
-          left join debate_agents da on da.id = t.debate_agent_id
-          join debates d on d.id = t.debate_id
-         where t.debate_id = $1
-           and d.user_id = $2
-           and ($4::int is null or t.turn_number >= $4::int)
-         order by t.turn_number desc
-         limit $3
-      `,
-      [debateId, userId, Math.max(0, Math.floor(limit)), min]
-    );
+    const db = await ensureDb();
+    let queryBuilder = db
+      .selectFrom("debate_turns as t")
+      .innerJoin("ai_agents as a", "a.id", "t.ai_agent_id")
+      .leftJoin("debate_agents as da", "da.id", "t.debate_agent_id")
+      .innerJoin("debates as d", "d.id", "t.debate_id")
+      .select([
+        "t.turn_number",
+        "t.content",
+        "t.created_at",
+        sql<string>`coalesce(da.display_name, a.name)`.as("speaker_name"),
+        "t.seat_number as seat_number"
+      ])
+      .where("t.debate_id", "=", debateId)
+      .where("d.user_id", "=", userId);
+    if (min !== null) {
+      queryBuilder = queryBuilder.where("t.turn_number", ">=", min);
+    }
+    const result = await queryBuilder
+      .orderBy("t.turn_number", "desc")
+      .limit(Math.max(0, Math.floor(limit)))
+      .execute();
 
-    if ((result.rowCount ?? 0) === 0) return [];
+    if (result.length === 0) return [];
 
-    return [...result.rows].reverse().map((row) => ({
+    return [...result].reverse().map((row) => ({
       turnNumber: Number(row.turn_number),
       content: String(row.content ?? ""),
       createdAt: String(row.created_at ?? ""),
@@ -1959,22 +1963,19 @@ export async function loadRecentTurnRows(
 
 export async function loadDebateSeatInline(userId: string, debateId: string, debateAgentId: string) {
   try {
-    const result = await query<{ turn_order: number; display_name: string | null }>(
-      `
-        select da.turn_order,
-               da.display_name
-          from debate_agents da
-          join debates d on d.id = da.debate_id
-         where da.debate_id = $1
-           and da.id = $2
-           and d.user_id = $3
-         limit 1
-      `,
-      [debateId, debateAgentId, userId]
-    );
-    if ((result.rowCount ?? 0) !== 1) return null;
-    const seatNumber = Number(result.rows[0]?.turn_order ?? 0);
-    const displayName = String(result.rows[0]?.display_name ?? "");
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_agents as da")
+      .innerJoin("debates as d", "d.id", "da.debate_id")
+      .select(["da.turn_order", "da.display_name"])
+      .where("da.debate_id", "=", debateId)
+      .where("da.id", "=", debateAgentId)
+      .where("d.user_id", "=", userId)
+      .limit(1)
+      .executeTakeFirst();
+    if (!result) return null;
+    const seatNumber = Number(result.turn_order ?? 0);
+    const displayName = String(result.display_name ?? "");
     if (!Number.isFinite(seatNumber) || seatNumber <= 0) return null;
     const namePart = displayName ? ` (${displayName})` : "";
     return `Identity (read-only):\n- You are Seat-${seatNumber}${namePart}.`;
@@ -1985,20 +1986,17 @@ export async function loadDebateSeatInline(userId: string, debateId: string, deb
 
 export async function loadDebateParticipantsInline(userId: string, debateId: string) {
   try {
-    const result = await query<Record<string, unknown>>(
-      `
-        select da.turn_order,
-               da.display_name as display_name
-          from debate_agents da
-          join debates d on d.id = da.debate_id
-         where da.debate_id = $1
-           and d.user_id = $2
-         order by da.turn_order asc
-      `,
-      [debateId, userId]
-    );
-    if ((result.rowCount ?? 0) <= 0) return null;
-    const lines = result.rows.map(
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_agents as da")
+      .innerJoin("debates as d", "d.id", "da.debate_id")
+      .select(["da.turn_order", "da.display_name as display_name"])
+      .where("da.debate_id", "=", debateId)
+      .where("d.user_id", "=", userId)
+      .orderBy("da.turn_order", "asc")
+      .execute();
+    if (result.length <= 0) return null;
+    const lines = result.map(
       (row) => `- Seat-${Number(row.turn_order)}: ${String(row.display_name ?? `Seat-${Number(row.turn_order)}`)}`
     );
     return [
@@ -2242,18 +2240,18 @@ export async function toolListFilesFromAgent(
 ) {
   try {
     const prefixLike = `${(prefix ?? "").trim()}%`;
-    const result = await query<{ path: string }>(
-      `
-        select f.path
-        from ai_agent_files f
-        join ai_agents a on a.id = f.ai_agent_id
-        where f.ai_agent_id = $1 and a.user_id = $2 and f.path like $3
-        order by f.path asc
-        limit 200
-      `,
-      [agentId, userId, prefixLike]
-    );
-    const paths = result.rows
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("ai_agent_files as f")
+      .innerJoin("ai_agents as a", "a.id", "f.ai_agent_id")
+      .select("f.path")
+      .where("f.ai_agent_id", "=", agentId)
+      .where("a.user_id", "=", userId)
+      .where("f.path", "like", prefixLike)
+      .orderBy("f.path", "asc")
+      .limit(200)
+      .execute();
+    const paths = result
       .map((row) => String(row.path))
       .filter((path) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", path) : true));
     if (audit) {
@@ -2373,20 +2371,20 @@ export async function toolReadFileFromAgent(
     | null
 ) {
   try {
-    const result = await query<{ content: string }>(
-      `
-        select f.content
-        from ai_agent_files f
-        join ai_agents a on a.id = f.ai_agent_id
-        where f.ai_agent_id = $1 and a.user_id = $2 and f.path = $3
-        limit 1
-      `,
-      [agentId, userId, path]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("ai_agent_files as f")
+      .innerJoin("ai_agents as a", "a.id", "f.ai_agent_id")
+      .select("f.content")
+      .where("f.ai_agent_id", "=", agentId)
+      .where("a.user_id", "=", userId)
+      .where("f.path", "=", path)
+      .limit(1)
+      .executeTakeFirst();
+    if (!result) {
       return `NOT_FOUND: ${path}`;
     }
-    const content = String(result.rows[0].content ?? "");
+    const content = String(result.content ?? "");
     if (audit) {
       await recordDebateFileActivity({
         debateId: audit.debateId,
@@ -2491,19 +2489,19 @@ export async function toolSearchFilesFromAgent(
   const searchQuery = queryText.trim();
   if (!searchQuery) return [];
   try {
-    const result = await query<{ path: string; content: string }>(
-      `
-        select f.path, f.content
-        from ai_agent_files f
-        join ai_agents a on a.id = f.ai_agent_id
-        where f.ai_agent_id = $1 and a.user_id = $2 and f.content ilike ('%' || $3 || '%')
-        order by f.path asc
-        limit 5
-      `,
-      [agentId, userId, searchQuery]
-    );
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("ai_agent_files as f")
+      .innerJoin("ai_agents as a", "a.id", "f.ai_agent_id")
+      .select(["f.path", "f.content"])
+      .where("f.ai_agent_id", "=", agentId)
+      .where("a.user_id", "=", userId)
+      .where("f.content", "ilike", `%${searchQuery}%`)
+      .orderBy("f.path", "asc")
+      .limit(5)
+      .execute();
 
-    const rows = result.rows
+    const rows = result
       .filter((row) => (policy ? isContextPathReadable(policy.workflow, policy.currentPhaseKind, "seat", String(row.path ?? "")) : true))
       .map((row) => {
         const content = String(row.content ?? "");
@@ -2537,23 +2535,16 @@ export async function toolSearchFilesFromAgent(
   }
 }
 
-export async function getDebateFileMeta(
-  client: PoolClient,
-  debateId: string,
-  path: string
-) {
-  const result = await client.query<{ content: string; updated_at: string; version: number }>(
-    `
-      select content, updated_at, version
-        from debate_files
-       where debate_id = $1
-         and path = $2
-       limit 1
-       for update
-    `,
-    [debateId, path]
-  );
-  if ((result.rowCount ?? 0) !== 1) return null;
+export async function getDebateFileMeta(db: DbLike, debateId: string, path: string) {
+  const result = await db.executeQuery<{ content: string; updated_at: string; version: number }>(sql`
+    select content, updated_at, version
+      from debate_files
+     where debate_id = ${debateId}
+       and path = ${path}
+     limit 1
+     for update
+  `.compile(db));
+  if ((result.rows.length ?? 0) !== 1) return null;
   return {
     content: String(result.rows[0].content ?? ""),
     updatedAt: String(result.rows[0].updated_at ?? ""),
@@ -2562,7 +2553,7 @@ export async function getDebateFileMeta(
 }
 
 export async function recordDebateFileActivity(input: {
-  client?: PoolClient;
+  db?: DbLike;
   debateId: string;
   debateAgentId: string;
   turnNumber: number;
@@ -2580,7 +2571,8 @@ export async function recordDebateFileActivity(input: {
   reason?: string | null;
   now: string;
 }) {
-  const sql = `
+  const db = input.db ?? (await ensureDb());
+  await db.executeQuery(sql`
     insert into debate_file_activity_logs (
       id,
       debate_id,
@@ -2600,32 +2592,26 @@ export async function recordDebateFileActivity(input: {
       reason,
       created_at
     )
-    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-  `;
-  const params = [
-    randomUUID(),
-    input.debateId,
-    input.debateAgentId,
-    input.turnNumber,
-    input.roundNumber,
-    input.action,
-    input.scope,
-    input.path,
-    input.targetDebateAgentId ?? null,
-    input.writeMode ?? null,
-    input.beforeVersion ?? null,
-    input.afterVersion ?? null,
-    input.beforeContent ?? null,
-    input.afterContent ?? null,
-    input.targetHeading ?? null,
-    input.reason ?? null,
-    input.now
-  ];
-  if (input.client) {
-    await input.client.query(sql, params);
-    return;
-  }
-  await query(sql, params);
+    values (
+      ${randomUUID()},
+      ${input.debateId},
+      ${input.debateAgentId},
+      ${input.turnNumber},
+      ${input.roundNumber},
+      ${input.action},
+      ${input.scope},
+      ${input.path},
+      ${input.targetDebateAgentId ?? null},
+      ${input.writeMode ?? null},
+      ${input.beforeVersion ?? null},
+      ${input.afterVersion ?? null},
+      ${input.beforeContent ?? null},
+      ${input.afterContent ?? null},
+      ${input.targetHeading ?? null},
+      ${input.reason ?? null},
+      ${input.now}
+    )
+  `.compile(db));
 }
 
 export async function recordImplicitFileReads(input: {
@@ -2653,7 +2639,7 @@ export async function recordImplicitFileReads(input: {
 }
 
 export async function insertDebateFileVersionRecord(input: {
-  client: PoolClient;
+  db: DbLike;
   debateId: string;
   path: string;
   version: number;
@@ -2664,36 +2650,33 @@ export async function insertDebateFileVersionRecord(input: {
   debateAgentId?: string | null;
   now: string;
 }) {
-  await input.client.query(
-    `
-      insert into debate_file_versions (
-        id,
-        debate_id,
-        path,
-        version,
-        content,
-        mode,
-        reason,
-        base_version,
-        created_by_debate_agent_id,
-        created_at
-      )
-      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      on conflict (debate_id, path, version) do nothing
-    `,
-    [
-      randomUUID(),
-      input.debateId,
-      input.path,
-      input.version,
-      input.content,
-      input.mode,
-      input.reason,
-      input.baseVersion,
-      input.debateAgentId ?? null,
-      input.now
-    ]
-  );
+  await input.db.executeQuery(sql`
+    insert into debate_file_versions (
+      id,
+      debate_id,
+      path,
+      version,
+      content,
+      mode,
+      reason,
+      base_version,
+      created_by_debate_agent_id,
+      created_at
+    )
+    values (
+      ${randomUUID()},
+      ${input.debateId},
+      ${input.path},
+      ${input.version},
+      ${input.content},
+      ${input.mode},
+      ${input.reason},
+      ${input.baseVersion},
+      ${input.debateAgentId ?? null},
+      ${input.now}
+    )
+    on conflict (debate_id, path, version) do nothing
+  `.compile(input.db));
 }
 
 export async function writeDebateFileWithMode(input: {
@@ -2712,11 +2695,9 @@ export async function writeDebateFileWithMode(input: {
   allowShrink?: boolean;
   now: string;
 }) {
-  const pool = await ensureDbReady();
-  const client = await pool.connect();
-  try {
-    await client.query("begin");
-    const current = await getDebateFileMeta(client, input.debateId, input.path);
+  const db = await ensureDb();
+  return db.transaction().execute(async (trx) => {
+    const current = await getDebateFileMeta(trx, input.debateId, input.path);
     const isDeliverable = isFinalDebateOutputPath(input.path);
     const baseVersion = Number.isFinite(input.baseVersion) ? Math.floor(Number(input.baseVersion)) : null;
     const baseUpdatedAt = typeof input.baseUpdatedAt === "string" && input.baseUpdatedAt.trim() ? input.baseUpdatedAt.trim() : null;
@@ -2724,19 +2705,16 @@ export async function writeDebateFileWithMode(input: {
     const expectedCurrentUpdatedAt = current?.updatedAt ?? null;
 
     if (isDeliverable && baseVersion === null && baseUpdatedAt === null && current) {
-      await client.query("rollback");
       return {
         error: `final/* writes require baseVersion or baseUpdatedAt for ${input.path}. Call debate_files_stat or debate_files_read first.`
       };
     }
     if (baseVersion !== null && baseVersion !== expectedCurrentVersion) {
-      await client.query("rollback");
       return {
         error: `WRITE_CONFLICT: ${input.path} is at version ${expectedCurrentVersion}, not ${baseVersion}. Call debate_files_stat/debate_files_read and retry.`
       };
     }
     if (baseUpdatedAt !== null && baseUpdatedAt !== expectedCurrentUpdatedAt) {
-      await client.query("rollback");
       return {
         error: `WRITE_CONFLICT: ${input.path} was updated at ${expectedCurrentUpdatedAt ?? "(missing)"}, not ${baseUpdatedAt}. Call debate_files_stat/debate_files_read and retry.`
       };
@@ -2745,7 +2723,6 @@ export async function writeDebateFileWithMode(input: {
     let nextContent = String(input.content ?? "");
     if (input.mode === "replace") {
       if (isDeliverable && current && shouldRejectDeliverableShrink(current.content, nextContent, Boolean(input.allowShrink))) {
-        await client.query("rollback");
         return {
           error: `replace rejected for ${input.path}: content shrank from ${current.content.length} to ${nextContent.length} chars. Use allowShrink=true only when intentional.`
         };
@@ -2763,38 +2740,32 @@ export async function writeDebateFileWithMode(input: {
     } else {
       const targetHeading = typeof input.targetHeading === "string" && input.targetHeading.trim() ? input.targetHeading.trim() : "";
       if (!targetHeading) {
-        await client.query("rollback");
         return { error: `section_merge requires targetHeading for ${input.path}.` };
       }
       if (!current) {
-        await client.query("rollback");
         return { error: `TARGET_FILE_NOT_FOUND: ${input.path}. Create the file with mode="replace" first.` };
       }
       const merged = mergeMarkdownSectionByHeading(current.content, targetHeading, nextContent);
       if ("error" in merged) {
-        await client.query("rollback");
         return { error: merged.error };
       }
       nextContent = merged.content;
     }
 
     const nextVersion = current ? current.version + 1 : 1;
-    await client.query(
-      `
-        insert into debate_files (debate_id, path, content, version, created_at, updated_at)
-        values ($1, $2, $3, $4, $5, $5)
-        on conflict (debate_id, path)
-        do update
-          set content = excluded.content,
-              version = excluded.version,
-              updated_at = excluded.updated_at
-      `,
-      [input.debateId, input.path, nextContent, nextVersion, input.now]
-    );
+    await trx.executeQuery(sql`
+      insert into debate_files (debate_id, path, content, version, created_at, updated_at)
+      values (${input.debateId}, ${input.path}, ${nextContent}, ${nextVersion}, ${input.now}, ${input.now})
+      on conflict (debate_id, path)
+      do update
+        set content = excluded.content,
+            version = excluded.version,
+            updated_at = excluded.updated_at
+    `.compile(trx));
 
     if (isDeliverable) {
       await insertDebateFileVersionRecord({
-        client,
+        db: trx,
         debateId: input.debateId,
         path: input.path,
         version: nextVersion,
@@ -2808,7 +2779,7 @@ export async function writeDebateFileWithMode(input: {
     }
     if (input.debateAgentId) {
       await recordDebateFileActivity({
-        client,
+        db: trx,
         debateId: input.debateId,
         debateAgentId: input.debateAgentId,
         turnNumber: input.turnNumber,
@@ -2827,7 +2798,6 @@ export async function writeDebateFileWithMode(input: {
       });
     }
 
-    await client.query("commit");
     return {
       ok: true,
       path: input.path,
@@ -2837,16 +2807,7 @@ export async function writeDebateFileWithMode(input: {
       updatedAt: input.now,
       mode: input.mode
     };
-  } catch (error) {
-    try {
-      await client.query("rollback");
-    } catch {
-      // noop
-    }
-    throw error;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function toolDebateFilesStat(input: {
@@ -2865,17 +2826,19 @@ export async function toolDebateFilesStat(input: {
     };
   }
   try {
-    const result = await query<{ updated_at: string; version: number; content_length: number }>(
-      `
-        select updated_at, version, char_length(content) as content_length
-          from debate_files
-         where debate_id = $1
-           and path = $2
-         limit 1
-      `,
-      [input.debateId, safePath]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_files")
+      .select([
+        "updated_at",
+        "version",
+        sql<number>`char_length(content)`.as("content_length")
+      ])
+      .where("debate_id", "=", input.debateId)
+      .where("path", "=", safePath)
+      .limit(1)
+      .executeTakeFirst();
+    if (!result) {
       return { ok: true, path: safePath, exists: false, size: 0, updatedAt: null, version: 0 };
     }
     if (input.debateAgentId && typeof input.turnNumber === "number" && typeof input.roundNumber === "number" && input.now) {
@@ -2894,9 +2857,9 @@ export async function toolDebateFilesStat(input: {
       ok: true,
       path: safePath,
       exists: true,
-      size: Number(result.rows[0].content_length ?? 0) || 0,
-      updatedAt: String(result.rows[0].updated_at ?? ""),
-      version: Number(result.rows[0].version ?? 1) || 1
+      size: Number(result.content_length ?? 0) || 0,
+      updatedAt: String(result.updated_at ?? ""),
+      version: Number(result.version ?? 1) || 1
     };
   } catch (error) {
     if (getPgErrorCode(error) === "42P01") {
@@ -3078,47 +3041,38 @@ export async function finishDebate(
     lastErrorMessage?: string | null;
   }
 ) {
-  await query(
-    `update debates
-        set status = $2,
-            finished_at = $3,
-            stopped_reason = $4,
-            workflow_phase_kind = $5,
-            workflow_phase_title = $6,
-            workflow_phase_round = $7,
+  const db = await ensureDb();
+  const now = new Date().toISOString();
+  await db.executeQuery(sql`
+    update debates
+        set status = ${status},
+            finished_at = ${now},
+            stopped_reason = ${reason ?? null},
+            workflow_phase_kind = ${options?.phase?.workflowPhaseKind ?? null},
+            workflow_phase_title = ${options?.phase?.workflowPhaseTitle ?? null},
+            workflow_phase_round = ${options?.phase?.workflowPhaseRound ?? null},
             runtime_notice_kind = null,
             runtime_notice_message = null,
             runtime_notice_at = null,
-            last_error_code = coalesce($8, last_error_code),
-            last_error_message = coalesce($9, last_error_message),
-            updated_at = $3
-      where id = $1`,
-    [
-      id,
-      status,
-      new Date().toISOString(),
-      reason ?? null,
-      options?.phase?.workflowPhaseKind ?? null,
-      options?.phase?.workflowPhaseTitle ?? null,
-      options?.phase?.workflowPhaseRound ?? null,
-      options?.lastErrorCode ?? null,
-      options?.lastErrorMessage ?? null
-    ]
-  );
+            last_error_code = coalesce(${options?.lastErrorCode ?? null}, last_error_code),
+            last_error_message = coalesce(${options?.lastErrorMessage ?? null}, last_error_message),
+            updated_at = ${now}
+      where id = ${id}
+  `.compile(db));
 }
 
 export async function setDebateRuntimeNotice(
   id: string,
   notice: Pick<DebateRecord, "runtimeNoticeKind" | "runtimeNoticeMessage" | "runtimeNoticeAt"> | null
 ) {
-  await query(
-    `update debates
-        set runtime_notice_kind = $2,
-            runtime_notice_message = $3,
-            runtime_notice_at = $4
-      where id = $1`,
-    [id, notice?.runtimeNoticeKind ?? null, notice?.runtimeNoticeMessage ?? null, notice?.runtimeNoticeAt ?? null]
-  );
+  const db = await ensureDb();
+  await db.executeQuery(sql`
+    update debates
+        set runtime_notice_kind = ${notice?.runtimeNoticeKind ?? null},
+            runtime_notice_message = ${notice?.runtimeNoticeMessage ?? null},
+            runtime_notice_at = ${notice?.runtimeNoticeAt ?? null}
+      where id = ${id}
+  `.compile(db));
 }
 
 export function isRecoverableRuntimeInterruption(details: { code?: string | null; message?: string | null }) {
@@ -3155,50 +3109,39 @@ export async function pauseDebateAfterRuntimeInterruption(
   }
 ) {
   const now = new Date().toISOString();
-  await query(
-    `update debates
+  const db = await ensureDb();
+  await db.executeQuery(sql`
+    update debates
         set status = case
               when status = 'running' then 'paused'
               else status
             end,
-            stopped_reason = $2,
-            workflow_phase_kind = $3,
-            workflow_phase_title = $4,
-            workflow_phase_round = $5,
-            runtime_notice_kind = $6,
-            runtime_notice_message = $7,
-            runtime_notice_at = $8,
-            last_error_code = coalesce($9, last_error_code),
-            last_error_message = coalesce($10, last_error_message),
-            updated_at = $8
-      where id = $1`,
-    [
-      id,
-      reason,
-      options?.phase?.workflowPhaseKind ?? null,
-      options?.phase?.workflowPhaseTitle ?? null,
-      options?.phase?.workflowPhaseRound ?? null,
-      "interrupted",
-      "检测到运行时中断或网络断开，系统已自动暂停这场辩论；恢复设备或网络后可继续运行",
-      now,
-      options?.lastErrorCode ?? null,
-      options?.lastErrorMessage ?? null
-    ]
-  );
+            stopped_reason = ${reason},
+            workflow_phase_kind = ${options?.phase?.workflowPhaseKind ?? null},
+            workflow_phase_title = ${options?.phase?.workflowPhaseTitle ?? null},
+            workflow_phase_round = ${options?.phase?.workflowPhaseRound ?? null},
+            runtime_notice_kind = ${"interrupted"},
+            runtime_notice_message = ${"检测到运行时中断或网络断开，系统已自动暂停这场辩论；恢复设备或网络后可继续运行"},
+            runtime_notice_at = ${now},
+            last_error_code = coalesce(${options?.lastErrorCode ?? null}, last_error_code),
+            last_error_message = coalesce(${options?.lastErrorMessage ?? null}, last_error_message),
+            updated_at = ${now}
+      where id = ${id}
+  `.compile(db));
 }
 
 export async function persistDebatePhaseSnapshot(
   id: string,
   phase: Pick<DebateRecord, "workflowPhaseKind" | "workflowPhaseTitle" | "workflowPhaseRound"> | null
 ) {
-  await query(
-    `update debates
-        set workflow_phase_kind = $2,
-            workflow_phase_title = $3,
-            workflow_phase_round = $4
-      where id = $1`,
-    [id, phase?.workflowPhaseKind ?? null, phase?.workflowPhaseTitle ?? null, phase?.workflowPhaseRound ?? null]
-  );
+  const db = await ensureDb();
+  await db.executeQuery(sql`
+    update debates
+        set workflow_phase_kind = ${phase?.workflowPhaseKind ?? null},
+            workflow_phase_title = ${phase?.workflowPhaseTitle ?? null},
+            workflow_phase_round = ${phase?.workflowPhaseRound ?? null}
+      where id = ${id}
+  `.compile(db));
 }
 
 export async function startAutoSegmentAtBoundary(input: {
@@ -3213,32 +3156,26 @@ export async function startAutoSegmentAtBoundary(input: {
   const checkpointPrefix = "context/checkpoints/seg-";
   const pad = (n: number) => String(n).padStart(4, "0");
 
-  const participants = await query<{ turn_order: number; agent_name: string }>(
-    `
-      select da.turn_order,
-             a.name as agent_name
-        from debate_agents da
-        join ai_agents a on a.id = da.ai_agent_id
-        join debates d on d.id = da.debate_id
-       where da.debate_id = $1
-         and d.user_id = $2
-       order by da.turn_order asc
-    `,
-    [input.debateId, input.userId]
-  );
+  const db = await ensureDb();
+  const participants = await db
+    .selectFrom("debate_agents as da")
+    .innerJoin("ai_agents as a", "a.id", "da.ai_agent_id")
+    .innerJoin("debates as d", "d.id", "da.debate_id")
+    .select(["da.turn_order", "a.name as agent_name"])
+    .where("da.debate_id", "=", input.debateId)
+    .where("d.user_id", "=", input.userId)
+    .orderBy("da.turn_order", "asc")
+    .execute();
 
-  const existing = await query<{ path: string }>(
-    `
-      select path
-        from debate_files
-       where debate_id = $1
-         and path like $2
-       order by path asc
-       limit 200
-    `,
-    [input.debateId, `${checkpointPrefix}%`]
-  );
-  const nextIndex = (existing.rowCount ?? 0) + 1;
+  const existing = await db
+    .selectFrom("debate_files")
+    .select("path")
+    .where("debate_id", "=", input.debateId)
+    .where("path", "like", `${checkpointPrefix}%`)
+    .orderBy("path", "asc")
+    .limit(200)
+    .execute();
+  const nextIndex = existing.length + 1;
   const seg = `seg-${pad(nextIndex)}`;
   const checkpointPath = `${checkpointPrefix}${pad(nextIndex)}.md`;
 
@@ -3262,7 +3199,7 @@ export async function startAutoSegmentAtBoundary(input: {
   lines.push(input.question ? input.question : "(empty)");
   lines.push("");
   lines.push("## Seats (current order)");
-  for (const row of participants.rows) {
+  for (const row of participants) {
     lines.push(`- Seat-${Number(row.turn_order)}: ${String(row.agent_name ?? "Unknown")}`);
   }
 
@@ -3319,34 +3256,28 @@ export async function startAutoSegmentForDebateAgentAtBoundary(input: {
   const checkpointPrefix = "context/checkpoints/seg-";
   const pad = (n: number) => String(n).padStart(4, "0");
 
-  const participants = await query<{ turn_order: number; agent_name: string }>(
-    `
-      select da.turn_order,
-             a.name as agent_name
-        from debate_agents da
-        join ai_agents a on a.id = da.ai_agent_id
-        join debates d on d.id = da.debate_id
-       where da.debate_id = $1
-         and d.user_id = $2
-       order by da.turn_order asc
-    `,
-    [input.debateId, input.userId]
-  );
+  const db = await ensureDb();
+  const participants = await db
+    .selectFrom("debate_agents as da")
+    .innerJoin("ai_agents as a", "a.id", "da.ai_agent_id")
+    .innerJoin("debates as d", "d.id", "da.debate_id")
+    .select(["da.turn_order", "a.name as agent_name"])
+    .where("da.debate_id", "=", input.debateId)
+    .where("d.user_id", "=", input.userId)
+    .orderBy("da.turn_order", "asc")
+    .execute();
 
   let existingCount = 0;
   try {
-    const existing = await query<{ path: string }>(
-      `
-        select f.path
-          from debate_agent_files f
-         where f.debate_agent_id = $1
-           and f.path like $2
-         order by f.path asc
-         limit 200
-      `,
-      [input.debateAgentId, `${checkpointPrefix}%`]
-    );
-    existingCount = existing.rowCount ?? 0;
+    const existing = await db
+      .selectFrom("debate_agent_files as f")
+      .select("f.path")
+      .where("f.debate_agent_id", "=", input.debateAgentId)
+      .where("f.path", "like", `${checkpointPrefix}%`)
+      .orderBy("f.path", "asc")
+      .limit(200)
+      .execute();
+    existingCount = existing.length;
   } catch (error) {
     if (getPgErrorCode(error) !== "42P01") throw error;
     existingCount = 0;
@@ -3376,7 +3307,7 @@ export async function startAutoSegmentForDebateAgentAtBoundary(input: {
   lines.push(input.question ? input.question : "(empty)");
   lines.push("");
   lines.push("## Seats (current order)");
-  for (const row of participants.rows) {
+  for (const row of participants) {
     lines.push(`- Seat-${Number(row.turn_order)}: ${String(row.agent_name ?? "Unknown")}`);
   }
 
@@ -3582,42 +3513,37 @@ export async function maybeGenerateVoteAnnouncementWithSeat1(input: {
   const announcerRoleLabel = "Host";
   const fallbackAnnouncerSeatNumber = 1;
 
-  const announcer = await query<Record<string, unknown>>(
-    `
-      select da.id as debate_agent_id,
-             a.*
-        from debate_agents da
-        join ai_agents a on a.id = da.ai_agent_id
-        join debates d on d.id = da.debate_id
-       where da.debate_id = $1
-         and d.user_id = $2
-         and da.turn_order = $3
-       limit 1
-    `,
-    [input.debate.id, input.userId, announcerSeatNumber]
-  );
+  const db = await ensureDb();
+  const announcer = await db
+    .selectFrom("debate_agents as da")
+    .innerJoin("ai_agents as a", "a.id", "da.ai_agent_id")
+    .innerJoin("debates as d", "d.id", "da.debate_id")
+    .selectAll("a")
+    .select("da.id as debate_agent_id")
+    .where("da.debate_id", "=", input.debate.id)
+    .where("d.user_id", "=", input.userId)
+    .where("da.turn_order", "=", announcerSeatNumber)
+    .limit(1)
+    .executeTakeFirst();
 
-  let announcerRow: Record<string, unknown> | null = (announcer.rowCount ?? 0) === 1 ? announcer.rows[0] : null;
+  let announcerRow: Record<string, unknown> | null = announcer ? (announcer as Record<string, unknown>) : null;
   if (!announcerRow) {
-    const fallbackSeat = await query<Record<string, unknown>>(
-      `
-        select da.id as debate_agent_id,
-               a.*
-          from debate_agents da
-          join ai_agents a on a.id = da.ai_agent_id
-          join debates d on d.id = da.debate_id
-         where da.debate_id = $1
-           and d.user_id = $2
-           and da.turn_order = $3
-         limit 1
-      `,
-      [input.debate.id, input.userId, fallbackAnnouncerSeatNumber]
-    );
-    if ((fallbackSeat.rowCount ?? 0) !== 1) {
+    const fallbackSeat = await db
+      .selectFrom("debate_agents as da")
+      .innerJoin("ai_agents as a", "a.id", "da.ai_agent_id")
+      .innerJoin("debates as d", "d.id", "da.debate_id")
+      .selectAll("a")
+      .select("da.id as debate_agent_id")
+      .where("da.debate_id", "=", input.debate.id)
+      .where("d.user_id", "=", input.userId)
+      .where("da.turn_order", "=", fallbackAnnouncerSeatNumber)
+      .limit(1)
+      .executeTakeFirst();
+    if (!fallbackSeat) {
       return { ok: false, generated: false, error: `Seat-${fallbackAnnouncerSeatNumber} agent not found.` };
     }
     announcerSeatNumber = fallbackAnnouncerSeatNumber;
-    announcerRow = fallbackSeat.rows[0];
+    announcerRow = fallbackSeat as Record<string, unknown>;
   }
 
   const announcerDebateAgentId = String(announcerRow.debate_agent_id);
@@ -3629,29 +3555,29 @@ export async function maybeGenerateVoteAnnouncementWithSeat1(input: {
   const proposalRound = Math.max(1, Math.floor(roundNumber) - 1);
   const proposalStart = 1;
   const proposalEnd = proposalRound * input.participantCount;
-  const proposalTurns = await query<{ turn_number: number; seat_number: number | null; content: string; speaker_name: string | null }>(
-    `
-      select t.turn_number,
-             t.seat_number,
-             t.content,
-             coalesce(da.display_name, a.name) as speaker_name
-        from debate_turns t
-        join ai_agents a on a.id = t.ai_agent_id
-        left join debate_agents da on da.id = t.debate_agent_id
-        join debates d on d.id = t.debate_id
-       where t.debate_id = $1
-         and d.user_id = $2
-         and t.turn_number between $3 and $4
-       order by t.turn_number asc
-       limit 200
-    `,
-    [input.debate.id, input.userId, proposalStart, proposalEnd]
-  );
+  const proposalTurns = await db
+    .selectFrom("debate_turns as t")
+    .innerJoin("ai_agents as a", "a.id", "t.ai_agent_id")
+    .leftJoin("debate_agents as da", "da.id", "t.debate_agent_id")
+    .innerJoin("debates as d", "d.id", "t.debate_id")
+    .select([
+      "t.turn_number",
+      "t.seat_number",
+      "t.content",
+      sql<string>`coalesce(da.display_name, a.name)`.as("speaker_name")
+    ])
+    .where("t.debate_id", "=", input.debate.id)
+    .where("d.user_id", "=", input.userId)
+    .where("t.turn_number", ">=", proposalStart)
+    .where("t.turn_number", "<=", proposalEnd)
+    .orderBy("t.turn_number", "asc")
+    .limit(200)
+    .execute();
   const proposalInline =
-    (proposalTurns.rowCount ?? 0) > 0
+    proposalTurns.length > 0
       ? [
           `Rounds 1-${proposalRound} (read-only; for vote context):`,
-          ...proposalTurns.rows.map((r) => {
+          ...proposalTurns.map((r) => {
             const tn = Number(r.turn_number);
             const seatNumber =
               r.seat_number === null ? ((tn - 1) % input.participantCount) + 1 : Number(r.seat_number);
@@ -4137,15 +4063,18 @@ export async function runDebate(id: string, userId: string) {
     const pendingAutoSegmentByDebateAgentId = new Map<string, { reason: string }>();
     while (true) {
       touchDebateRun(id, runToken);
-      const debateResult = await query<Record<string, unknown>>(
-        "select * from debates where id = $1 and user_id = $2",
-        [id, userId]
-      );
-      if ((debateResult.rowCount ?? 0) !== 1) {
+      const db = await ensureDb();
+      const debateResult = await db
+        .selectFrom("debates")
+        .selectAll()
+        .where("id", "=", id)
+        .where("user_id", "=", userId)
+        .executeTakeFirst();
+      if (!debateResult) {
         break;
       }
 
-      const debate = normalizeDebateRow(debateResult.rows[0]);
+      const debate = normalizeDebateRow(debateResult as Record<string, unknown>);
       if (debate.status !== "running") {
         break;
       }
@@ -4163,11 +4092,13 @@ export async function runDebate(id: string, userId: string) {
           at: recoveredAt
         });
       }
-      let participantRows = await query<Record<string, unknown>>(
-        "select * from debate_agents where debate_id = $1 order by turn_order asc",
-        [id]
-      );
-      const participantCount = participantRows.rows.length;
+      let participantRows = await db
+        .selectFrom("debate_agents")
+        .selectAll()
+        .where("debate_id", "=", id)
+        .orderBy("turn_order", "asc")
+        .execute();
+      const participantCount = participantRows.length;
       const roleAssignments = await loadDebateParticipantRoleTypes(userId, id);
       if (participantCount < 2) {
         throw new AppError("VALIDATION_ERROR", 400, "Debate requires at least 2 agents");
@@ -4240,16 +4171,18 @@ export async function runDebate(id: string, userId: string) {
       }
 
       const currentIndex = debate.currentTurn % participantCount;
-      const currentParticipant = participantRows.rows[currentIndex];
-      const agentResult = await query<Record<string, unknown>>(
-        "select * from ai_agents where id = $1 and user_id = $2",
-        [String(currentParticipant.ai_agent_id), userId]
-      );
-      if ((agentResult.rowCount ?? 0) !== 1) {
+      const currentParticipant = participantRows[currentIndex];
+      const agentResult = await db
+        .selectFrom("ai_agents")
+        .selectAll()
+        .where("id", "=", String((currentParticipant as { ai_agent_id?: unknown }).ai_agent_id))
+        .where("user_id", "=", userId)
+        .executeTakeFirst();
+      if (!agentResult) {
         throw new AppError("NOT_FOUND", 404, "Agent not found for debate");
       }
 
-      const agent = normalizeAgentRow(agentResult.rows[0]);
+      const agent = normalizeAgentRow(agentResult as Record<string, unknown>);
       const seatNumberForEvent =
         typeof (currentParticipant as any).turn_order === "number"
           ? Number((currentParticipant as any).turn_order)
@@ -4372,32 +4305,31 @@ export async function runDebate(id: string, userId: string) {
         stage: "saving",
         updatedAt: createdAt
       });
-      await query(
-        `insert into debate_turns (
+      await db.executeQuery(sql`
+        insert into debate_turns (
           id, debate_id, ai_agent_id, debate_agent_id, seat_number, turn_number, content, structured_output,
           parse_status, token_used, response_time_ms, retry_count, error_code, created_at
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-        [
-          randomUUID(),
-          id,
-          String(currentParticipant.ai_agent_id),
-          String(currentParticipant.id),
-          typeof (currentParticipant as any).turn_order === "number"
+        ) values (
+          ${randomUUID()},
+          ${id},
+          ${String((currentParticipant as { ai_agent_id?: unknown }).ai_agent_id)},
+          ${String((currentParticipant as { id?: unknown }).id)},
+          ${typeof (currentParticipant as any).turn_order === "number"
             ? Number((currentParticipant as any).turn_order)
             : typeof (currentParticipant as any).turnOrder === "number"
               ? Number((currentParticipant as any).turnOrder)
-              : currentIndex + 1,
-          debate.currentTurn + 1,
-          persistedResponse.content,
-          persistedResponse.structuredOutput ? JSON.stringify(persistedResponse.structuredOutput) : null,
-          persistedResponse.parseStatus,
-          tokenUsed,
-          responseTimeMs,
-          retryCount,
-          null,
-          createdAt
-        ]
-      );
+              : currentIndex + 1},
+          ${debate.currentTurn + 1},
+          ${persistedResponse.content},
+          ${persistedResponse.structuredOutput ? JSON.stringify(persistedResponse.structuredOutput) : null},
+          ${persistedResponse.parseStatus},
+          ${tokenUsed},
+          ${responseTimeMs},
+          ${retryCount},
+          ${null},
+          ${createdAt}
+        )
+      `.compile(db));
 
       try {
         const turnChunks = splitTextIntoRetrievalChunks(persistedResponse.content, 1_200, 180);
@@ -4459,9 +4391,9 @@ export async function runDebate(id: string, userId: string) {
         });
       }
 
-      await query("update debate_agents set turn_count = turn_count + 1 where id = $1", [
-        String(currentParticipant.id)
-      ]);
+      await db.executeQuery(sql`
+        update debate_agents set turn_count = turn_count + 1 where id = ${String(currentParticipant.id)}
+      `.compile(db));
 
       try {
         const apiPromptTokens =
@@ -4587,11 +4519,13 @@ export async function runDebate(id: string, userId: string) {
         });
       }
 
-      const turnRows = await query<Record<string, unknown>>(
-        "select * from debate_turns where debate_id = $1 order by turn_number asc",
-        [id]
-      );
-      const turns: DebateTurnRecord[] = turnRows.rows.map((row) => ({
+      const turnRows = await db
+        .selectFrom("debate_turns")
+        .selectAll()
+        .where("debate_id", "=", id)
+        .orderBy("turn_number", "asc")
+        .execute();
+      const turns: DebateTurnRecord[] = turnRows.map((row) => ({
         id: String(row.id),
         debateId: String(row.debate_id),
         aiAgentId: String(row.ai_agent_id),
@@ -4651,43 +4585,31 @@ export async function runDebate(id: string, userId: string) {
           : "running";
       const phaseSnapshotAfterTurn = getPhaseSnapshot(finalizationPhase, currentRoundNumberAfterTurn);
       lastKnownPhase = phaseSnapshotAfterTurn;
-      await query(
-        `update debates
-            set current_turn = $2,
-                token_used = $3,
-                consensus_summary = $4,
-                consensus_reached = $5,
-                workflow_phase_kind = $6,
-                workflow_phase_title = $7,
-                workflow_phase_round = $8,
+      await db.executeQuery(sql`
+        update debates
+            set current_turn = ${nextTurn},
+                token_used = ${debate.tokenUsed + tokenUsed},
+                consensus_summary = ${consensus.leadingSolution
+                  ? JSON.stringify({
+                      leadingSolution: consensus.leadingSolution,
+                      score: consensus.score
+                    })
+                  : null},
+                consensus_reached = ${consensusReachedForDb},
+                workflow_phase_kind = ${phaseSnapshotAfterTurn.workflowPhaseKind},
+                workflow_phase_title = ${phaseSnapshotAfterTurn.workflowPhaseTitle},
+                workflow_phase_round = ${phaseSnapshotAfterTurn.workflowPhaseRound},
                 status = case
                   when status in ('paused', 'stopped') then status
-                  else $9
+                  else ${nextStatusForDb}
                 end,
                 finished_at = case
-                  when $9 = 'completed' then $10
+                  when ${nextStatusForDb} = 'completed' then ${createdAt}
                   else finished_at
                 end,
-                updated_at = $10
-          where id = $1`,
-        [
-          id,
-          nextTurn,
-          debate.tokenUsed + tokenUsed,
-          consensus.leadingSolution
-            ? JSON.stringify({
-                leadingSolution: consensus.leadingSolution,
-                score: consensus.score
-              })
-            : null,
-          consensusReachedForDb,
-          phaseSnapshotAfterTurn.workflowPhaseKind,
-          phaseSnapshotAfterTurn.workflowPhaseTitle,
-          phaseSnapshotAfterTurn.workflowPhaseRound,
-          nextStatusForDb,
-          createdAt
-        ]
-      );
+                updated_at = ${createdAt}
+          where id = ${id}
+      `.compile(db));
 
       if (isBoundary && pendingAutoSegmentByDebateAgentId.size > 0 && !consensus.reached) {
         try {

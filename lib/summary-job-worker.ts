@@ -1,6 +1,8 @@
 import { randomUUID } from "crypto";
 
-import { query } from "@/lib/db";
+import { sql } from "kysely";
+
+import { ensureDb } from "@/lib/db";
 import { logRuntimeEvent, runSummaryJobByRecord } from "@/lib/runtime-main";
 import { claimRunnableDebateSummaryJobs, recoverStaleDebateSummaryJobs } from "@/lib/summary-jobs";
 
@@ -45,7 +47,8 @@ export function ensureSummaryJobWorkerStarted(reason = "server_boot") {
   }
 
   workerGlobal.openDebateSummaryWorkerPromise = (async () => {
-    await query("select 1");
+    const db = await ensureDb();
+    await db.executeQuery(sql`select 1`.compile(db));
     void tickSummaryJobWorker(reason);
   })().catch((error) => {
     workerGlobal.openDebateSummaryWorkerPromise = undefined;

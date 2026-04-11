@@ -1,7 +1,8 @@
 import { randomUUID, createHash } from "node:crypto";
+import { sql } from "kysely";
 
 import { decryptSecret, encryptSecret, maskSecret } from "@/lib/crypto";
-import { getPool, query } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { readSession } from "@/lib/session";
 import type { RetrievalConfigRecord, RetrievalProvider } from "@/lib/types";
@@ -164,12 +165,15 @@ async function callEmbeddingApi(input: {
 export async function getRetrievalConfig() {
   const session = await requireSessionUser();
   try {
-    const result = await query<Record<string, unknown>>(
-      "select * from retrieval_configs where user_id = $1 limit 1",
-      [session.userId]
-    );
-    if ((result.rowCount ?? 0) !== 1) return null;
-    return toRetrievalConfigView(normalizeRetrievalConfigRow(result.rows[0]));
+    const db = await ensureDb();
+    const row = await db
+      .selectFrom("retrieval_configs")
+      .selectAll()
+      .where("user_id", "=", session.userId)
+      .limit(1)
+      .executeTakeFirst();
+    if (!row) return null;
+    return toRetrievalConfigView(normalizeRetrievalConfigRow(row));
   } catch (error) {
     if (isMissingTableError(error, "retrieval_configs")) return null;
     throw error;
@@ -178,12 +182,16 @@ export async function getRetrievalConfig() {
 
 async function getRetrievalConfigRecordForUser(userId: string) {
   try {
-    const result = await query<Record<string, unknown>>(
-      "select * from retrieval_configs where user_id = $1 and is_active = true limit 1",
-      [userId]
-    );
-    if ((result.rowCount ?? 0) !== 1) return null;
-    return normalizeRetrievalConfigRow(result.rows[0]);
+    const db = await ensureDb();
+    const row = await db
+      .selectFrom("retrieval_configs")
+      .selectAll()
+      .where("user_id", "=", userId)
+      .where("is_active", "=", true)
+      .limit(1)
+      .executeTakeFirst();
+    if (!row) return null;
+    return normalizeRetrievalConfigRow(row);
   } catch (error) {
     if (isMissingTableError(error, "retrieval_configs")) return null;
     throw error;
@@ -201,55 +209,50 @@ export async function upsertRetrievalConfig(input: unknown) {
     throw new AppError("VALIDATION_ERROR", 400, "apiKey is required");
   }
 
-  const pool = getPool();
-  const client = await pool.connect();
   try {
-    await client.query("begin");
     const nextId = currentRecord?.id ?? randomUUID();
-    const result = await client.query<Record<string, unknown>>(
-      `
-        insert into retrieval_configs (
-          id, user_id, provider, name, model, dimensions, base_url,
-          api_key_encrypted, api_key_masked, is_active, created_at, updated_at
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
-        on conflict (user_id)
-        do update set
-          provider = excluded.provider,
-          name = excluded.name,
-          model = excluded.model,
-          dimensions = excluded.dimensions,
-          base_url = excluded.base_url,
-          api_key_encrypted = excluded.api_key_encrypted,
-          api_key_masked = excluded.api_key_masked,
-          is_active = excluded.is_active,
-          updated_at = excluded.updated_at
-        returning *
-      `,
-      [
-        nextId,
-        session.userId,
-        data.provider ?? currentRecord?.provider ?? "openai",
-        data.name ?? currentRecord?.name ?? "Default Retrieval",
-        data.model ?? currentRecord?.model ?? "",
-        data.dimensions ?? currentRecord?.dimensions ?? null,
-        data.baseUrl ?? currentRecord?.baseUrl ?? "",
-        data.apiKey ? encryptSecret(data.apiKey) : currentRecord?.apiKeyEncrypted ?? "",
-        data.apiKey ? maskSecret(data.apiKey) : currentRecord?.apiKeyMasked ?? "",
-        true,
-        now
-      ]
-    );
-    await client.query("commit");
-    return toRetrievalConfigView(normalizeRetrievalConfigRow(result.rows[0]));
+    const provider = data.provider ?? currentRecord?.provider ?? "openai";
+    const name = data.name ?? currentRecord?.name ?? "Default Retrieval";
+    const model = data.model ?? currentRecord?.model ?? "";
+    const dimensions = data.dimensions ?? currentRecord?.dimensions ?? null;
+    const baseUrl = data.baseUrl ?? currentRecord?.baseUrl ?? "";
+    const apiKeyEncrypted = data.apiKey ? encryptSecret(data.apiKey) : currentRecord?.apiKeyEncrypted ?? "";
+    const apiKeyMasked = data.apiKey ? maskSecret(data.apiKey) : currentRecord?.apiKeyMasked ?? "";
+    const db = await ensureDb();
+    const nextRow = await db
+      .insertInto("retrieval_configs")
+      .values({
+        id: nextId,
+        user_id: session.userId,
+        provider,
+        name,
+        model,
+        dimensions,
+        base_url: baseUrl,
+        api_key_encrypted: apiKeyEncrypted,
+        api_key_masked: apiKeyMasked,
+        is_active: true,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.column("user_id").doUpdateSet({
+          provider,
+          name,
+          model,
+          dimensions,
+          base_url: baseUrl,
+          api_key_encrypted: apiKeyEncrypted,
+          api_key_masked: apiKeyMasked,
+          is_active: true,
+          updated_at: now
+        })
+      )
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    return toRetrievalConfigView(normalizeRetrievalConfigRow(nextRow));
   } catch (error) {
-    try {
-      await client.query("rollback");
-    } catch {
-      // ignore
-    }
     throw error;
-  } finally {
-    client.release();
   }
 }
 
@@ -326,68 +329,68 @@ export async function indexDebateContextChunk(input: {
   const contentHash = makeHash(normalizedContent);
   let chunkRecord: RetrievalChunkRecord | null = null;
 
-  const existing = await query<RetrievalChunkRecord>(
-    `
-      select *
-        from debate_context_chunks
-       where debate_id = $1
-         and chunk_key = $2
-       limit 1
-    `,
-    [input.debateId, input.chunkKey]
-  ).catch((error) => {
-    if (isMissingTableError(error, "debate_context_chunks")) return null;
-    throw error;
-  });
+  const existing = await (async () => {
+    try {
+      const db = await ensureDb();
+      return await db
+        .selectFrom("debate_context_chunks")
+        .selectAll()
+        .where("debate_id", "=", input.debateId)
+        .where("chunk_key", "=", input.chunkKey)
+        .limit(1)
+        .executeTakeFirst();
+    } catch (error) {
+      if (isMissingTableError(error, "debate_context_chunks")) return null;
+      throw error;
+    }
+  })();
 
-  if (existing && (existing.rowCount ?? 0) === 1) {
-    chunkRecord = existing.rows[0];
+  if (existing) {
+    chunkRecord = existing;
     if (String(chunkRecord.content_hash ?? "") === contentHash) return chunkRecord;
   }
 
   const chunkId = chunkRecord?.id ?? randomUUID();
-  const saved = await query<RetrievalChunkRecord>(
-    `
-      insert into debate_context_chunks (
-        id, debate_id, debate_agent_id, chunk_key, source_type, source_path,
-        turn_number_start, turn_number_end, round_number, phase_kind, segment_tag,
-        content, content_hash, created_at, updated_at
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
-      on conflict (debate_id, chunk_key)
-      do update set
-        debate_agent_id = excluded.debate_agent_id,
-        source_type = excluded.source_type,
-        source_path = excluded.source_path,
-        turn_number_start = excluded.turn_number_start,
-        turn_number_end = excluded.turn_number_end,
-        round_number = excluded.round_number,
-        phase_kind = excluded.phase_kind,
-        segment_tag = excluded.segment_tag,
-        content = excluded.content,
-        content_hash = excluded.content_hash,
-        updated_at = excluded.updated_at
-      returning *
-    `,
-    [
-      chunkId,
-      input.debateId,
-      input.debateAgentId ?? null,
-      input.chunkKey,
-      input.sourceType,
-      input.sourcePath ?? null,
-      input.turnNumberStart ?? null,
-      input.turnNumberEnd ?? null,
-      input.roundNumber ?? null,
-      input.phaseKind ?? null,
-      input.segmentTag ?? null,
-      normalizedContent,
-      contentHash,
-      input.now
-    ]
-  );
+  const db = await ensureDb();
+  const saved = await db
+    .insertInto("debate_context_chunks")
+    .values({
+      id: chunkId,
+      debate_id: input.debateId,
+      debate_agent_id: input.debateAgentId ?? null,
+      chunk_key: input.chunkKey,
+      source_type: input.sourceType,
+      source_path: input.sourcePath ?? null,
+      turn_number_start: input.turnNumberStart ?? null,
+      turn_number_end: input.turnNumberEnd ?? null,
+      round_number: input.roundNumber ?? null,
+      phase_kind: input.phaseKind ?? null,
+      segment_tag: input.segmentTag ?? null,
+      content: normalizedContent,
+      content_hash: contentHash,
+      created_at: input.now,
+      updated_at: input.now
+    })
+    .onConflict((oc) =>
+      oc.columns(["debate_id", "chunk_key"]).doUpdateSet({
+        debate_agent_id: input.debateAgentId ?? null,
+        source_type: input.sourceType,
+        source_path: input.sourcePath ?? null,
+        turn_number_start: input.turnNumberStart ?? null,
+        turn_number_end: input.turnNumberEnd ?? null,
+        round_number: input.roundNumber ?? null,
+        phase_kind: input.phaseKind ?? null,
+        segment_tag: input.segmentTag ?? null,
+        content: normalizedContent,
+        content_hash: contentHash,
+        updated_at: input.now
+      })
+    )
+    .returningAll()
+    .executeTakeFirstOrThrow();
 
   const config = await getRetrievalConfigRecordForUser(input.userId);
-  if (!config || !config.isActive) return saved.rows[0];
+  if (!config || !config.isActive) return saved;
 
   const embeddings = await callEmbeddingApi({
     provider: config.provider,
@@ -398,22 +401,29 @@ export async function indexDebateContextChunk(input: {
     texts: [normalizedContent]
   });
 
-  await query(
-    `
-      insert into debate_context_embeddings (
-        id, debate_id, chunk_id, model, dimensions, embedding_json, created_at, updated_at
-      ) values ($1,$2,$3,$4,$5,$6::jsonb,$7,$7)
-      on conflict (chunk_id)
-      do update set
-        model = excluded.model,
-        dimensions = excluded.dimensions,
-        embedding_json = excluded.embedding_json,
-        updated_at = excluded.updated_at
-    `,
-    [randomUUID(), input.debateId, chunkId, config.model, embeddings[0].length, JSON.stringify(embeddings[0]), input.now]
-  );
+  await db
+    .insertInto("debate_context_embeddings")
+    .values({
+      id: randomUUID(),
+      debate_id: input.debateId,
+      chunk_id: chunkId,
+      model: config.model,
+      dimensions: embeddings[0].length,
+      embedding_json: sql`CAST(${JSON.stringify(embeddings[0])} AS jsonb)`,
+      created_at: input.now,
+      updated_at: input.now
+    })
+    .onConflict((oc) =>
+      oc.column("chunk_id").doUpdateSet({
+        model: config.model,
+        dimensions: embeddings[0].length,
+        embedding_json: sql`CAST(${JSON.stringify(embeddings[0])} AS jsonb)`,
+        updated_at: input.now
+      })
+    )
+    .execute();
 
-  return saved.rows[0];
+  return saved;
 }
 
 function cosineSimilarity(a: number[], b: number[]) {
@@ -455,26 +465,35 @@ export async function retrieveRelevantHistory(input: {
     })
   )[0];
 
-  const rows = await query<RetrievalChunkRecord & RetrievalEmbeddingRecord>(
-    `
-      select c.*, e.chunk_id, e.model, e.dimensions, e.embedding_json
-        from debate_context_chunks c
-        join debate_context_embeddings e on e.chunk_id = c.id
-       where c.debate_id = $1
-         and ($2::int is null or c.turn_number_end is null or c.turn_number_end >= $2)
-       order by c.updated_at desc
-       limit 2000
-    `,
-    [input.debateId, input.minTurnNumber ?? null]
-  ).catch((error) => {
-    if (isMissingTableError(error, "debate_context_chunks") || isMissingTableError(error, "debate_context_embeddings")) {
-      return null;
+  const rows = await (async () => {
+    try {
+      const db = await ensureDb();
+      const minTurnNumber = input.minTurnNumber ?? null;
+      return await db
+        .selectFrom("debate_context_chunks as c")
+        .innerJoin("debate_context_embeddings as e", "e.chunk_id", "c.id")
+        .selectAll("c")
+        .select(["e.chunk_id", "e.model", "e.dimensions", "e.embedding_json"])
+        .where("c.debate_id", "=", input.debateId)
+        .where(
+          sql<boolean>`${minTurnNumber}::int is null or c.turn_number_end is null or c.turn_number_end >= ${minTurnNumber}`
+        )
+        .orderBy("c.updated_at", "desc")
+        .limit(2000)
+        .execute();
+    } catch (error) {
+      if (
+        isMissingTableError(error, "debate_context_chunks") ||
+        isMissingTableError(error, "debate_context_embeddings")
+      ) {
+        return null;
+      }
+      throw error;
     }
-    throw error;
-  });
+  })();
   if (!rows) return [];
 
-  const scored = rows.rows
+  const scored = rows
     .map((row) => {
       const embedding = Array.isArray(row.embedding_json) ? row.embedding_json : [];
       const vector = embedding

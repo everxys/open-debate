@@ -1,4 +1,6 @@
-import { query } from "@/lib/db";
+import { sql } from "kysely";
+
+import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { getClientIp } from "@/lib/request";
 
@@ -14,18 +16,24 @@ export async function enforceIpRateLimit(request: Request, config: IpRateLimitCo
   const windowId = Math.floor(nowSeconds / config.windowSeconds);
   const key = `${config.action}:ip:${ip}`;
 
-  let result: { rows: Array<{ count: number }> };
+  let count = 1;
   try {
-    result = await query<{ count: number }>(
-      `
-        insert into rate_limit_counters (key, window_id, count)
-        values ($1, $2, 1)
-        on conflict (key, window_id)
-        do update set count = rate_limit_counters.count + 1
-        returning count
-      `,
-      [key, windowId]
-    );
+    const db = await ensureDb();
+    const result = await db
+      .insertInto("rate_limit_counters")
+      .values({
+        key,
+        window_id: windowId,
+        count: 1
+      })
+      .onConflict((oc) =>
+        oc.columns(["key", "window_id"]).doUpdateSet({
+          count: sql`rate_limit_counters.count + 1`
+        })
+      )
+      .returning("count")
+      .executeTakeFirstOrThrow();
+    count = Number(result.count ?? 1);
   } catch (error) {
     const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : null;
     if (code === "42P01") {
@@ -35,7 +43,6 @@ export async function enforceIpRateLimit(request: Request, config: IpRateLimitCo
     throw error;
   }
 
-  const count = result.rows[0]?.count ?? 1;
   if (count <= config.limit) return;
 
   const resetAt = (windowId + 1) * config.windowSeconds;

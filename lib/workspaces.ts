@@ -1,8 +1,9 @@
 import { randomUUID } from "crypto";
+import { sql } from "kysely";
 
 import { requireSessionUser } from "@/lib/auth";
 import { createDebateFromStrategyBindings } from "@/lib/debates";
-import { ensureDbReady, getPool, query } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import {
   createWorkspaceDebateSchema,
@@ -109,39 +110,37 @@ function normalizeWorkspaceFileRow(row: WorkspaceFileRow) {
   };
 }
 
-async function getTransactionClient() {
-  const pool = await ensureDbReady();
-  return await pool.connect();
-}
-
-async function safeRollback(client: { query: (sql: string) => Promise<unknown> }) {
-  try {
-    await client.query("rollback");
-  } catch {
-  }
-}
-
 async function loadVisibleStrategyWithRoles(strategyId: string, userId: string) {
-  const strategyResult = await query<{ id: string; name: string; description: string | null; is_shared: boolean }>(
-    "select id, name, description, is_shared from strategies where id = $1 and (owner_user_id = $2 or is_shared = true)",
-    [strategyId, userId]
-  );
-  if ((strategyResult.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const strategy = await db
+    .selectFrom("strategies")
+    .select(["id", "name", "description", "is_shared"])
+    .where("id", "=", strategyId)
+    .where((eb) =>
+      eb.or([
+        eb("owner_user_id", "=", userId),
+        eb("is_shared", "=", true)
+      ])
+    )
+    .executeTakeFirst();
+  if (!strategy) {
     throw new AppError("NOT_FOUND", 404, "Strategy not found");
   }
-  const rolesResult = await query<{ id: string; name: string; role_order: number }>(
-    "select id, name, role_order from strategy_roles where strategy_id = $1 order by role_order asc",
-    [strategyId]
-  );
-  if ((rolesResult.rowCount ?? 0) < 2) {
+  const roles = await db
+    .selectFrom("strategy_roles")
+    .select(["id", "name", "role_order"])
+    .where("strategy_id", "=", strategyId)
+    .orderBy("role_order", "asc")
+    .execute();
+  if (roles.length < 2) {
     throw new AppError("VALIDATION_ERROR", 400, "Strategy must have at least 2 roles");
   }
   return {
-    id: String(strategyResult.rows[0].id),
-    name: String(strategyResult.rows[0].name),
-    description: strategyResult.rows[0].description ?? null,
-    isShared: Boolean(strategyResult.rows[0].is_shared),
-    roles: rolesResult.rows.map((row) => ({
+    id: String(strategy.id),
+    name: String(strategy.name),
+    description: strategy.description ?? null,
+    isShared: Boolean(strategy.is_shared),
+    roles: roles.map((row) => ({
       id: String(row.id),
       name: String(row.name),
       roleOrder: Number(row.role_order)
@@ -150,14 +149,17 @@ async function loadVisibleStrategyWithRoles(strategyId: string, userId: string) 
 }
 
 async function getOwnedWorkspaceRow(id: string, userId: string) {
-  const result = await query<WorkspaceRow>(
-    "select * from workspaces where id = $1 and owner_user_id = $2",
-    [id, userId]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const result = await db
+    .selectFrom("workspaces")
+    .selectAll()
+    .where("id", "=", id)
+    .where("owner_user_id", "=", userId)
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("NOT_FOUND", 404, "Workspace not found");
   }
-  return result.rows[0];
+  return result;
 }
 
 async function getOwnedWorkspaceForFileAccess(workspaceId: string, userId: string) {
@@ -167,28 +169,23 @@ async function getOwnedWorkspaceForFileAccess(workspaceId: string, userId: strin
 export async function listWorkspaces() {
   const session = await requireSessionUser();
   try {
-    const result = await query<
-      WorkspaceRow & {
-        strategy_name: string;
-        debate_count: number;
-      }
-    >(
-      `
-        select w.*,
-               s.name as strategy_name,
-               (
-                 select count(*)::int
-                   from debates d
-                  where d.source_workspace_id = w.id
-               ) as debate_count
-          from workspaces w
-          join strategies s on s.id = w.strategy_id
-         where w.owner_user_id = $1
-         order by w.updated_at desc
-      `,
-      [session.userId]
-    );
-    return result.rows.map((row) => ({
+    const db = await ensureDb();
+    const rows = await db
+      .selectFrom("workspaces as w")
+      .innerJoin("strategies as s", "s.id", "w.strategy_id")
+      .selectAll("w")
+      .select([
+        "s.name as strategy_name",
+        sql<number>`(
+          select count(*)::int
+            from debates d
+           where d.source_workspace_id = w.id
+        )`.as("debate_count")
+      ])
+      .where("w.owner_user_id", "=", session.userId)
+      .orderBy("w.updated_at", "desc")
+      .execute();
+    return rows.map((row) => ({
       ...normalizeWorkspaceRow(row),
       strategyName: String(row.strategy_name),
       debateCount: Number(row.debate_count ?? 0)
@@ -206,48 +203,63 @@ export async function createWorkspace(input: unknown) {
   const data = createWorkspaceSchema.parse(input);
   const strategy = await loadVisibleStrategyWithRoles(data.strategyId, session.userId);
   const now = new Date().toISOString();
-  const client = await getTransactionClient();
   const workspaceId = randomUUID();
   try {
-    await client.query("begin");
-    await client.query(
-      `
-        insert into workspaces (
-          id, owner_user_id, strategy_id, name, description, question, summary_ai_agent_id,
-          default_max_turns, default_enable_shared_facts, created_at, updated_at
-        )
-        values ($1,$2,$3,$4,$5,'',null,10,true,$6,$6)
-      `,
-      [workspaceId, session.userId, strategy.id, data.name, data.description ?? null, now]
-    );
-    for (const role of strategy.roles) {
-      await client.query(
-        `
-          insert into workspace_role_bindings (
-            id, workspace_id, source_strategy_role_id, role_name, role_order, ai_agent_id, display_name, created_at, updated_at
-          ) values ($1,$2,$3,$4,$5,null,null,$6,$6)
-        `,
-        [randomUUID(), workspaceId, role.id, role.name, role.roleOrder, now]
-      );
-    }
-    for (const file of DEFAULT_WORKSPACE_FILES) {
-      await client.query(
-        `
-          insert into workspace_files (id, workspace_id, path, content, created_at, updated_at)
-          values ($1,$2,$3,$4,$5,$5)
-        `,
-        [randomUUID(), workspaceId, file.path, file.content, now]
-      );
-    }
-    await client.query("commit");
+    const db = await ensureDb();
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto("workspaces")
+        .values({
+          id: workspaceId,
+          owner_user_id: session.userId,
+          strategy_id: strategy.id,
+          name: data.name,
+          description: data.description ?? null,
+          question: "",
+          summary_ai_agent_id: null,
+          default_max_turns: 10,
+          default_enable_shared_facts: true,
+          created_at: now,
+          updated_at: now
+        })
+        .execute();
+
+      for (const role of strategy.roles) {
+        await trx
+          .insertInto("workspace_role_bindings")
+          .values({
+            id: randomUUID(),
+            workspace_id: workspaceId,
+            source_strategy_role_id: role.id,
+            role_name: role.name,
+            role_order: role.roleOrder,
+            ai_agent_id: null,
+            display_name: null,
+            created_at: now,
+            updated_at: now
+          })
+          .execute();
+      }
+
+      for (const file of DEFAULT_WORKSPACE_FILES) {
+        await trx
+          .insertInto("workspace_files")
+          .values({
+            id: randomUUID(),
+            workspace_id: workspaceId,
+            path: file.path,
+            content: file.content,
+            created_at: now,
+            updated_at: now
+          })
+          .execute();
+      }
+    });
   } catch (error) {
-    await safeRollback(client);
     if (isMissingTableError(error, "workspaces") || isMissingTableError(error, "workspace_role_bindings") || isMissingTableError(error, "workspace_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing workspaces tables");
     }
     throw error;
-  } finally {
-    client.release();
   }
   return getWorkspaceDetail(workspaceId);
 }
@@ -256,21 +268,29 @@ export async function getWorkspaceDetail(id: string) {
   const session = await requireSessionUser();
   try {
     const workspaceRow = await getOwnedWorkspaceRow(id, session.userId);
+    const db = await ensureDb();
     const [strategyResult, bindingsResult, filesResult] = await Promise.all([
-      query<{ id: string; name: string; description: string | null }>(
-        "select id, name, description from strategies where id = $1 limit 1",
-        [workspaceRow.strategy_id]
-      ),
-      query<WorkspaceBindingRow>(
-        "select * from workspace_role_bindings where workspace_id = $1 order by role_order asc, created_at asc",
-        [id]
-      ),
-      query<WorkspaceFileRow>(
-        "select * from workspace_files where workspace_id = $1 order by path asc",
-        [id]
-      )
+      db
+        .selectFrom("strategies")
+        .select(["id", "name", "description"])
+        .where("id", "=", workspaceRow.strategy_id)
+        .limit(1)
+        .executeTakeFirst(),
+      db
+        .selectFrom("workspace_role_bindings")
+        .selectAll()
+        .where("workspace_id", "=", id)
+        .orderBy("role_order", "asc")
+        .orderBy("created_at", "asc")
+        .execute(),
+      db
+        .selectFrom("workspace_files")
+        .selectAll()
+        .where("workspace_id", "=", id)
+        .orderBy("path", "asc")
+        .execute()
     ]);
-    const usedAgentIds = bindingsResult.rows
+    const usedAgentIds = bindingsResult
       .map((row) => row.ai_agent_id)
       .filter((item): item is string => Boolean(item));
     const allAgentIds = Array.from(
@@ -281,13 +301,15 @@ export async function getWorkspaceDetail(id: string) {
     );
     const agentsResult =
       allAgentIds.length > 0
-        ? await query<{ id: string; name: string; provider: string; model: string }>(
-            "select id, name, provider, model from ai_agents where user_id = $1 and id = any($2::uuid[])",
-            [session.userId, allAgentIds]
-          )
-        : { rows: [], rowCount: 0 };
+        ? await db
+            .selectFrom("ai_agents")
+            .select(["id", "name", "provider", "model"])
+            .where("user_id", "=", session.userId)
+            .where("id", "in", allAgentIds)
+            .execute()
+        : [];
     const agentsById = new Map(
-      agentsResult.rows.map((row) => [
+      agentsResult.map((row) => [
         String(row.id),
         { id: String(row.id), name: String(row.name), provider: String(row.provider), model: String(row.model) }
       ])
@@ -296,18 +318,18 @@ export async function getWorkspaceDetail(id: string) {
     return {
       ...normalizeWorkspaceRow(workspaceRow),
       strategy:
-        (strategyResult.rowCount ?? 0) === 1
+        strategyResult
           ? {
-              id: String(strategyResult.rows[0].id),
-              name: String(strategyResult.rows[0].name),
-              description: strategyResult.rows[0].description ?? null
+              id: String(strategyResult.id),
+              name: String(strategyResult.name),
+              description: strategyResult.description ?? null
             }
           : null,
-      bindings: bindingsResult.rows.map((row) => ({
+      bindings: bindingsResult.map((row) => ({
         ...normalizeWorkspaceBindingRow(row),
         agent: row.ai_agent_id ? agentsById.get(String(row.ai_agent_id)) ?? null : null
       })),
-      files: filesResult.rows.map((row) => normalizeWorkspaceFileRow(row)),
+      files: filesResult.map((row) => normalizeWorkspaceFileRow(row)),
       summaryAgent:
         workspaceRow.summary_ai_agent_id ? agentsById.get(String(workspaceRow.summary_ai_agent_id)) ?? null : null
     };
@@ -343,11 +365,15 @@ export async function updateWorkspace(id: string, input: unknown) {
     )
   );
   if (uniqueAgentIds.length > 0) {
-    const agentsResult = await query<{ id: string }>(
-      "select id from ai_agents where user_id = $1 and deleted_at is null and id = any($2::uuid[])",
-      [session.userId, uniqueAgentIds]
-    );
-    if ((agentsResult.rowCount ?? 0) !== uniqueAgentIds.length) {
+    const db = await ensureDb();
+    const agentsResult = await db
+      .selectFrom("ai_agents")
+      .select("id")
+      .where("user_id", "=", session.userId)
+      .where("deleted_at", "is", null)
+      .where("id", "in", uniqueAgentIds)
+      .execute();
+    if (agentsResult.length !== uniqueAgentIds.length) {
       throw new AppError("VALIDATION_ERROR", 400, "Workspace contains invalid AI bindings");
     }
   }
@@ -357,73 +383,61 @@ export async function updateWorkspace(id: string, input: unknown) {
     content: String(file.content ?? "")
   }));
 
-  const client = await getTransactionClient();
   try {
-    await client.query("begin");
-    await client.query(
-      `
-        update workspaces
-           set name = $3,
-               description = $4,
-               question = $5,
-               summary_ai_agent_id = $6,
-               default_max_turns = $7,
-               default_enable_shared_facts = $8,
-               updated_at = $9
-         where id = $1 and owner_user_id = $2
-      `,
-      [
-        id,
-        session.userId,
-        data.name,
-        data.description ?? null,
-        data.question,
-        data.summaryAgentId ?? null,
-        data.defaultMaxTurns,
-        data.defaultEnableSharedFacts ?? true,
-        now
-      ]
-    );
+    const db = await ensureDb();
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .updateTable("workspaces")
+        .set({
+          name: data.name,
+          description: data.description ?? null,
+          question: data.question,
+          summary_ai_agent_id: data.summaryAgentId ?? null,
+          default_max_turns: data.defaultMaxTurns,
+          default_enable_shared_facts: data.defaultEnableSharedFacts ?? true,
+          updated_at: now
+        })
+        .where("id", "=", id)
+        .where("owner_user_id", "=", session.userId)
+        .execute();
 
-    await client.query("delete from workspace_role_bindings where workspace_id = $1", [id]);
-    for (const binding of data.bindings.slice().sort((a, b) => a.roleOrder - b.roleOrder)) {
-      await client.query(
-        `
-          insert into workspace_role_bindings (
-            id, workspace_id, source_strategy_role_id, role_name, role_order, ai_agent_id, display_name, created_at, updated_at
-          ) values ($1,$2,$3,$4,$5,$6,$7,$8,$8)
-        `,
-        [
-          binding.id ?? randomUUID(),
-          id,
-          binding.sourceStrategyRoleId ?? null,
-          binding.roleName,
-          binding.roleOrder,
-          binding.agentId ?? null,
-          binding.displayName ?? null,
-          now
-        ]
-      );
-    }
-
-    if (data.files) {
-      await client.query("delete from workspace_files where workspace_id = $1", [id]);
-      for (const file of nextFiles) {
-        await client.query(
-          `
-            insert into workspace_files (id, workspace_id, path, content, created_at, updated_at)
-            values ($1,$2,$3,$4,$5,$5)
-          `,
-          [randomUUID(), id, file.path, file.content, now]
-        );
+      await trx.deleteFrom("workspace_role_bindings").where("workspace_id", "=", id).execute();
+      for (const binding of data.bindings.slice().sort((a, b) => a.roleOrder - b.roleOrder)) {
+        await trx
+          .insertInto("workspace_role_bindings")
+          .values({
+            id: binding.id ?? randomUUID(),
+            workspace_id: id,
+            source_strategy_role_id: binding.sourceStrategyRoleId ?? null,
+            role_name: binding.roleName,
+            role_order: binding.roleOrder,
+            ai_agent_id: binding.agentId ?? null,
+            display_name: binding.displayName ?? null,
+            created_at: now,
+            updated_at: now
+          })
+          .execute();
       }
-    }
-    await client.query("commit");
+
+      if (data.files) {
+        await trx.deleteFrom("workspace_files").where("workspace_id", "=", id).execute();
+        for (const file of nextFiles) {
+          await trx
+            .insertInto("workspace_files")
+            .values({
+              id: randomUUID(),
+              workspace_id: id,
+              path: file.path,
+              content: file.content,
+              created_at: now,
+              updated_at: now
+            })
+            .execute();
+        }
+      }
+    });
   } catch (error) {
-    await safeRollback(client);
     throw error;
-  } finally {
-    client.release();
   }
   return getWorkspaceDetail(id);
 }
@@ -431,11 +445,14 @@ export async function updateWorkspace(id: string, input: unknown) {
 export async function listWorkspaceFiles(id: string) {
   const session = await requireSessionUser();
   await getOwnedWorkspaceForFileAccess(id, session.userId);
-  const result = await query<WorkspaceFileRow>(
-    "select id, workspace_id, path, content, created_at, updated_at from workspace_files where workspace_id = $1 order by path asc",
-    [id]
-  );
-  return result.rows.map((row) => {
+  const db = await ensureDb();
+  const result = await db
+    .selectFrom("workspace_files")
+    .select(["id", "workspace_id", "path", "content", "created_at", "updated_at"])
+    .where("workspace_id", "=", id)
+    .orderBy("path", "asc")
+    .execute();
+  return result.map((row) => {
     const file = normalizeWorkspaceFileRow(row);
     return {
       id: file.id,
@@ -450,14 +467,18 @@ export async function getWorkspaceFile(id: string, path: string) {
   const session = await requireSessionUser();
   await getOwnedWorkspaceForFileAccess(id, session.userId);
   const normalizedPath = relativeFilePathSchema.parse(path);
-  const result = await query<WorkspaceFileRow>(
-    "select id, workspace_id, path, content, created_at, updated_at from workspace_files where workspace_id = $1 and path = $2 limit 1",
-    [id, normalizedPath]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const result = await db
+    .selectFrom("workspace_files")
+    .select(["id", "workspace_id", "path", "content", "created_at", "updated_at"])
+    .where("workspace_id", "=", id)
+    .where("path", "=", normalizedPath)
+    .limit(1)
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("NOT_FOUND", 404, "Workspace file not found");
   }
-  return normalizeWorkspaceFileRow(result.rows[0]);
+  return normalizeWorkspaceFileRow(result);
 }
 
 export async function upsertWorkspaceFile(id: string, input: unknown) {
@@ -466,33 +487,41 @@ export async function upsertWorkspaceFile(id: string, input: unknown) {
   const data = upsertFileSchema.parse(input);
   const normalizedPath = relativeFilePathSchema.parse(data.path);
   const now = new Date().toISOString();
-  const existing = await query<WorkspaceFileRow>(
-    "select * from workspace_files where workspace_id = $1 and path = $2 limit 1",
-    [id, normalizedPath]
-  );
-  if ((existing.rowCount ?? 0) === 1) {
-    const updated = await query<WorkspaceFileRow>(
-      `
-        update workspace_files
-           set content = $3,
-               updated_at = $4
-         where workspace_id = $1 and path = $2
-        returning *
-      `,
-      [id, normalizedPath, data.content, now]
-    );
-    return normalizeWorkspaceFileRow(updated.rows[0]);
+  const db = await ensureDb();
+  const existing = await db
+    .selectFrom("workspace_files")
+    .selectAll()
+    .where("workspace_id", "=", id)
+    .where("path", "=", normalizedPath)
+    .limit(1)
+    .executeTakeFirst();
+  if (existing) {
+    const updated = await db
+      .updateTable("workspace_files")
+      .set({
+        content: data.content,
+        updated_at: now
+      })
+      .where("workspace_id", "=", id)
+      .where("path", "=", normalizedPath)
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    return normalizeWorkspaceFileRow(updated);
   }
 
-  const inserted = await query<WorkspaceFileRow>(
-    `
-      insert into workspace_files (id, workspace_id, path, content, created_at, updated_at)
-      values ($1,$2,$3,$4,$5,$5)
-      returning *
-    `,
-    [randomUUID(), id, normalizedPath, data.content, now]
-  );
-  return normalizeWorkspaceFileRow(inserted.rows[0]);
+  const inserted = await db
+    .insertInto("workspace_files")
+    .values({
+      id: randomUUID(),
+      workspace_id: id,
+      path: normalizedPath,
+      content: data.content,
+      created_at: now,
+      updated_at: now
+    })
+    .returningAll()
+    .executeTakeFirstOrThrow();
+  return normalizeWorkspaceFileRow(inserted);
 }
 
 export async function deleteWorkspaceFile(id: string, input: unknown) {
@@ -500,11 +529,13 @@ export async function deleteWorkspaceFile(id: string, input: unknown) {
   await getOwnedWorkspaceForFileAccess(id, session.userId);
   const data = filePathSchema.parse(input);
   const normalizedPath = relativeFilePathSchema.parse(data.path);
-  const result = await query(
-    "delete from workspace_files where workspace_id = $1 and path = $2",
-    [id, normalizedPath]
-  );
-  if ((result.rowCount ?? 0) === 0) {
+  const db = await ensureDb();
+  const result = await db
+    .deleteFrom("workspace_files")
+    .where("workspace_id", "=", id)
+    .where("path", "=", normalizedPath)
+    .executeTakeFirst();
+  if (Number(result.numDeletedRows ?? 0) === 0) {
     throw new AppError("NOT_FOUND", 404, "Workspace file not found");
   }
   return { deleted: 1 };
@@ -514,11 +545,13 @@ export async function deleteWorkspaceFilesByPrefix(id: string, prefix: string) {
   const session = await requireSessionUser();
   await getOwnedWorkspaceForFileAccess(id, session.userId);
   const normalizedPrefix = relativeFilePathSchema.parse(prefix).replace(/\/+$/, "");
-  const result = await query(
-    "delete from workspace_files where workspace_id = $1 and path like $2",
-    [id, `${normalizedPrefix}/%`]
-  );
-  return { deleted: Number(result.rowCount ?? 0) };
+  const db = await ensureDb();
+  const result = await db
+    .deleteFrom("workspace_files")
+    .where("workspace_id", "=", id)
+    .where("path", "like", `${normalizedPrefix}/%`)
+    .executeTakeFirst();
+  return { deleted: Number(result.numDeletedRows ?? 0) };
 }
 
 export async function moveWorkspaceFile(id: string, input: unknown) {
@@ -531,29 +564,33 @@ export async function moveWorkspaceFile(id: string, input: unknown) {
     return await getWorkspaceFile(id, fromPath);
   }
 
-  const existingTo = await query<{ id: string }>(
-    "select id from workspace_files where workspace_id = $1 and path = $2 limit 1",
-    [id, toPath]
-  );
-  if ((existingTo.rowCount ?? 0) > 0) {
+  const db = await ensureDb();
+  const existingTo = await db
+    .selectFrom("workspace_files")
+    .select("id")
+    .where("workspace_id", "=", id)
+    .where("path", "=", toPath)
+    .limit(1)
+    .executeTakeFirst();
+  if (existingTo) {
     throw new AppError("CONFLICT", 409, "Target workspace file already exists");
   }
 
   const now = new Date().toISOString();
-  const result = await query<WorkspaceFileRow>(
-    `
-      update workspace_files
-         set path = $3,
-             updated_at = $4
-       where workspace_id = $1 and path = $2
-      returning *
-    `,
-    [id, fromPath, toPath, now]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const result = await db
+    .updateTable("workspace_files")
+    .set({
+      path: toPath,
+      updated_at: now
+    })
+    .where("workspace_id", "=", id)
+    .where("path", "=", fromPath)
+    .returningAll()
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("NOT_FOUND", 404, "Workspace file not found");
   }
-  return normalizeWorkspaceFileRow(result.rows[0]);
+  return normalizeWorkspaceFileRow(result);
 }
 
 export async function createDebateFromWorkspace(id: string, input: unknown) {

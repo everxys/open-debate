@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
+import { sql } from "kysely";
 
-import { getPool, query } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { readSession } from "@/lib/session";
 import {
@@ -210,45 +211,57 @@ function toListItem(row: ReturnType<typeof normalizeStrategyRow>, roleCount: num
 
 export async function listStrategies(scope: "mine" | "shared") {
   const session = await requireSessionUser();
+  const db = await ensureDb();
 
   try {
     if (scope === "shared") {
       try {
-        const result = await query<Record<string, unknown>>(
-          `
-            select s.*,
-                   coalesce(r.role_count, 0)::int as role_count,
-                   coalesce(f.favorite_count, 0)::int as favorite_count,
-                   coalesce(k.fork_count, 0)::int as fork_count,
-                   exists(
-                     select 1
-                       from strategy_favorites sf
-                      where sf.strategy_id = s.id and sf.user_id = $1
-                   ) as is_favorited
-              from strategies s
-              left join (
-                select strategy_id, count(1)::int as role_count
-                  from strategy_roles
-                 group by strategy_id
-              ) r on r.strategy_id = s.id
-              left join (
-                select strategy_id, count(1)::int as favorite_count
-                  from strategy_favorites
-                 group by strategy_id
-              ) f on f.strategy_id = s.id
-              left join (
-                select forked_from_strategy_id as strategy_id, count(1)::int as fork_count
-                  from strategies
-                 where forked_from_strategy_id is not null
-                 group by forked_from_strategy_id
-              ) k on k.strategy_id = s.id
-             where s.is_shared = true
-             order by s.updated_at desc
-             limit 200
-          `,
-          [session.userId]
-        );
-        return result.rows.map((row) => ({
+        const rows = await db
+          .selectFrom("strategies as s")
+          .leftJoin(
+            db
+              .selectFrom("strategy_roles")
+              .select(["strategy_id", sql<number>`count(1)::int`.as("role_count")])
+              .groupBy("strategy_id")
+              .as("r"),
+            "r.strategy_id",
+            "s.id"
+          )
+          .leftJoin(
+            db
+              .selectFrom("strategy_favorites")
+              .select(["strategy_id", sql<number>`count(1)::int`.as("favorite_count")])
+              .groupBy("strategy_id")
+              .as("f"),
+            "f.strategy_id",
+            "s.id"
+          )
+          .leftJoin(
+            db
+              .selectFrom("strategies")
+              .select(["forked_from_strategy_id as strategy_id", sql<number>`count(1)::int`.as("fork_count")])
+              .where("forked_from_strategy_id", "is not", null)
+              .groupBy("forked_from_strategy_id")
+              .as("k"),
+            "k.strategy_id",
+            "s.id"
+          )
+          .selectAll("s")
+          .select([
+            sql<number>`coalesce(r.role_count, 0)::int`.as("role_count"),
+            sql<number>`coalesce(f.favorite_count, 0)::int`.as("favorite_count"),
+            sql<number>`coalesce(k.fork_count, 0)::int`.as("fork_count"),
+            sql<boolean>`exists(
+              select 1
+                from strategy_favorites sf
+               where sf.strategy_id = s.id and sf.user_id = ${session.userId}
+            )`.as("is_favorited")
+          ])
+          .where("s.is_shared", "=", true)
+          .orderBy("s.updated_at", "desc")
+          .limit(200)
+          .execute();
+        return rows.map((row) => ({
           ...toListItem(normalizeStrategyRow(row), Number(row.role_count ?? 0)),
           isFavorited: Boolean(row.is_favorited),
           favoriteCount: Number(row.favorite_count ?? 0),
@@ -259,22 +272,24 @@ export async function listStrategies(scope: "mine" | "shared") {
           isMissingTableError(error, "strategy_favorites") ||
           isMissingColumnError(error, "forked_from_strategy_id")
         ) {
-          const result = await query<Record<string, unknown>>(
-            `
-              select s.*,
-                     coalesce(r.role_count, 0)::int as role_count
-                from strategies s
-                left join (
-                  select strategy_id, count(1)::int as role_count
-                    from strategy_roles
-                   group by strategy_id
-                ) r on r.strategy_id = s.id
-               where s.is_shared = true
-               order by s.updated_at desc
-               limit 200
-            `
-          );
-          return result.rows.map((row) =>
+          const rows = await db
+            .selectFrom("strategies as s")
+            .leftJoin(
+              db
+                .selectFrom("strategy_roles")
+                .select(["strategy_id", sql<number>`count(1)::int`.as("role_count")])
+                .groupBy("strategy_id")
+                .as("r"),
+              "r.strategy_id",
+              "s.id"
+            )
+            .selectAll("s")
+            .select(sql<number>`coalesce(r.role_count, 0)::int`.as("role_count"))
+            .where("s.is_shared", "=", true)
+            .orderBy("s.updated_at", "desc")
+            .limit(200)
+            .execute();
+          return rows.map((row) =>
             toListItem(normalizeStrategyRow(row), Number(row.role_count ?? 0))
           );
         }
@@ -282,23 +297,24 @@ export async function listStrategies(scope: "mine" | "shared") {
       }
     }
 
-    const result = await query<Record<string, unknown>>(
-      `
-        select s.*,
-               coalesce(r.role_count, 0)::int as role_count
-          from strategies s
-          left join (
-            select strategy_id, count(1)::int as role_count
-              from strategy_roles
-             group by strategy_id
-          ) r on r.strategy_id = s.id
-         where s.owner_user_id = $1
-         order by s.updated_at desc
-         limit 200
-      `,
-      [session.userId]
-    );
-    return result.rows.map((row) =>
+    const rows = await db
+      .selectFrom("strategies as s")
+      .leftJoin(
+        db
+          .selectFrom("strategy_roles")
+          .select(["strategy_id", sql<number>`count(1)::int`.as("role_count")])
+          .groupBy("strategy_id")
+          .as("r"),
+        "r.strategy_id",
+        "s.id"
+      )
+      .selectAll("s")
+      .select(sql<number>`coalesce(r.role_count, 0)::int`.as("role_count"))
+      .where("s.owner_user_id", "=", session.userId)
+      .orderBy("s.updated_at", "desc")
+      .limit(200)
+      .execute();
+    return rows.map((row) =>
       toListItem(normalizeStrategyRow(row), Number(row.role_count ?? 0))
     );
   } catch (error) {
@@ -315,14 +331,17 @@ export async function listStrategies(scope: "mine" | "shared") {
 async function getStrategyRowById(id: string) {
   const session = await requireSessionUser();
   try {
-    const result = await query<Record<string, unknown>>(
-      "select * from strategies where id = $1 and (owner_user_id = $2 or is_shared = true)",
-      [id, session.userId]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const row = await db
+      .selectFrom("strategies")
+      .selectAll()
+      .where("id", "=", id)
+      .where((eb) => eb.or([eb("owner_user_id", "=", session.userId), eb("is_shared", "=", true)]))
+      .executeTakeFirst();
+    if (!row) {
       throw new AppError("NOT_FOUND", 404, "Strategy not found");
     }
-    const strategy = normalizeStrategyRow(result.rows[0]);
+    const strategy = normalizeStrategyRow(row);
     return { strategy, canEdit: strategy.ownerUserId === session.userId };
   } catch (error) {
     if (isMissingTableError(error, "strategies")) {
@@ -334,6 +353,7 @@ async function getStrategyRowById(id: string) {
 
 export async function getStrategyDetail(id: string) {
   const { strategy, canEdit } = await getStrategyRowById(id);
+  const db = await ensureDb();
 
   try {
     let favoriteCount = 0;
@@ -342,23 +362,31 @@ export async function getStrategyDetail(id: string) {
     if (strategy.isShared) {
       const session = await requireSessionUser();
       try {
-        const [favoriteCountRes, isFavRes, forkCountRes] = await Promise.all([
-          query<{ count: number }>(
-            "select count(1)::int as count from strategy_favorites where strategy_id = $1",
-            [strategy.id]
-          ),
-          query<{ ok: boolean }>(
-            "select exists(select 1 from strategy_favorites where strategy_id = $1 and user_id = $2) as ok",
-            [strategy.id, session.userId]
-          ),
-          query<{ count: number }>(
-            "select count(1)::int as count from strategies where forked_from_strategy_id = $1",
-            [strategy.id]
-          )
+        const [favoriteCountRow, isFavRow, forkCountRow] = await Promise.all([
+          db
+            .selectFrom("strategy_favorites")
+            .select(sql<number>`count(1)::int`.as("count"))
+            .where("strategy_id", "=", strategy.id)
+            .executeTakeFirst(),
+          db
+            .selectNoFrom([
+              sql<boolean>`exists(
+                select 1
+                  from strategy_favorites
+                 where strategy_id = ${strategy.id}
+                   and user_id = ${session.userId}
+              )`.as("ok")
+            ])
+            .executeTakeFirst(),
+          db
+            .selectFrom("strategies")
+            .select(sql<number>`count(1)::int`.as("count"))
+            .where("forked_from_strategy_id", "=", strategy.id)
+            .executeTakeFirst()
         ]);
-        favoriteCount = favoriteCountRes.rows[0]?.count ?? 0;
-        isFavorited = Boolean(isFavRes.rows[0]?.ok);
-        forkCount = forkCountRes.rows[0]?.count ?? 0;
+        favoriteCount = favoriteCountRow?.count ?? 0;
+        isFavorited = Boolean(isFavRow?.ok);
+        forkCount = forkCountRow?.count ?? 0;
       } catch (error) {
         if (
           isMissingTableError(error, "strategy_favorites") ||
@@ -373,11 +401,13 @@ export async function getStrategyDetail(id: string) {
       }
     }
 
-    const roleRows = await query<Record<string, unknown>>(
-      "select * from strategy_roles where strategy_id = $1 order by role_order asc",
-      [strategy.id]
-    );
-    const roles = roleRows.rows.map((row) => normalizeStrategyRoleRow(row));
+    const roleRows = await db
+      .selectFrom("strategy_roles")
+      .selectAll()
+      .where("strategy_id", "=", strategy.id)
+      .orderBy("role_order", "asc")
+      .execute();
+    const roles = roleRows.map((row) => normalizeStrategyRoleRow(row));
 
     const roleIds = roles.map((role) => role.id);
     let files: Array<{
@@ -389,16 +419,14 @@ export async function getStrategyDetail(id: string) {
     }> = [];
 
     if (roleIds.length > 0) {
-      const fileRows = await query<Record<string, unknown>>(
-        `
-          select strategy_role_id, path, content, created_at, updated_at
-            from strategy_role_files
-           where strategy_role_id = any($1::uuid[])
-           order by strategy_role_id asc, path asc
-        `,
-        [roleIds]
-      );
-      files = fileRows.rows.map((row) => ({
+      const fileRows = await db
+        .selectFrom("strategy_role_files")
+        .select(["strategy_role_id", "path", "content", "created_at", "updated_at"])
+        .where("strategy_role_id", "in", roleIds)
+        .orderBy("strategy_role_id", "asc")
+        .orderBy("path", "asc")
+        .execute();
+      files = fileRows.map((row) => ({
         roleId: String(row.strategy_role_id),
         path: String(row.path),
         content: String(row.content ?? ""),
@@ -597,55 +625,62 @@ export async function overwriteStrategyFromFolderUpload(
     });
 
   const now = new Date().toISOString();
-  const client = await getTransactionClient();
   try {
-    await client.query("begin");
+    const db = await ensureDb();
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .updateTable("strategies")
+        .set({
+          name: manifest.strategy.name,
+          description: manifest.strategy.description ?? null,
+          is_shared: manifest.strategy.isShared,
+          updated_at: now
+        })
+        .where("id", "=", strategyId)
+        .where("owner_user_id", "=", strategy.ownerUserId)
+        .execute();
 
-    await client.query(
-      `
-        update strategies
-           set name = $3,
-               description = $4,
-               is_shared = $5,
-               updated_at = $6
-         where id = $1 and owner_user_id = $2
-      `,
-      [strategyId, strategy.ownerUserId, manifest.strategy.name, manifest.strategy.description ?? null, manifest.strategy.isShared, now]
-    );
-
-    const existingRoles = await client.query<{ id: string }>(
-      "select id from strategy_roles where strategy_id = $1",
-      [strategyId]
-    );
-    const existingRoleIds = existingRoles.rows.map((row) => row.id);
-    if (existingRoleIds.length > 0) {
-      await client.query("delete from strategy_role_files where strategy_role_id = any($1::uuid[])", [existingRoleIds]);
-    }
-    await client.query("delete from strategy_roles where strategy_id = $1", [strategyId]);
-
-    for (const role of nextRoles) {
-      await client.query(
-        `
-          insert into strategy_roles (id, strategy_id, name, system_prompt, role_order, created_at, updated_at)
-          values ($1,$2,$3,$4,$5,$6,$6)
-        `,
-        [role.id, strategyId, role.name, role.systemPrompt, role.roleOrder, now]
-      );
-
-      for (const file of role.files) {
-        await client.query(
-          `
-            insert into strategy_role_files (id, strategy_role_id, path, content, created_at, updated_at)
-            values ($1,$2,$3,$4,$5,$5)
-          `,
-          [randomUUID(), role.id, file.path, file.content, now]
-        );
+      const existingRoles = await trx
+        .selectFrom("strategy_roles")
+        .select("id")
+        .where("strategy_id", "=", strategyId)
+        .execute();
+      const existingRoleIds = existingRoles.map((row) => row.id);
+      if (existingRoleIds.length > 0) {
+        await trx.deleteFrom("strategy_role_files").where("strategy_role_id", "in", existingRoleIds).execute();
       }
-    }
+      await trx.deleteFrom("strategy_roles").where("strategy_id", "=", strategyId).execute();
 
-    await client.query("commit");
+      for (const role of nextRoles) {
+        await trx
+          .insertInto("strategy_roles")
+          .values({
+            id: role.id,
+            strategy_id: strategyId,
+            name: role.name,
+            system_prompt: role.systemPrompt,
+            role_order: role.roleOrder,
+            created_at: now,
+            updated_at: now
+          })
+          .execute();
+
+        for (const file of role.files) {
+          await trx
+            .insertInto("strategy_role_files")
+            .values({
+              id: randomUUID(),
+              strategy_role_id: role.id,
+              path: file.path,
+              content: file.content,
+              created_at: now,
+              updated_at: now
+            })
+            .execute();
+        }
+      }
+    });
   } catch (error) {
-    await safeRollback(client);
     if (
       isMissingTableError(error, "strategies") ||
       isMissingTableError(error, "strategy_roles") ||
@@ -654,8 +689,6 @@ export async function overwriteStrategyFromFolderUpload(
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
     throw error;
-  } finally {
-    client.release();
   }
 
   return getStrategyDetail(strategyId);
@@ -664,19 +697,25 @@ export async function overwriteStrategyFromFolderUpload(
 export async function favoriteStrategy(id: string) {
   const session = await requireSessionUser();
   try {
-    const visible = await query<{ id: string }>(
-      "select id from strategies where id = $1 and is_shared = true",
-      [id]
-    );
-    if ((visible.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const visible = await db
+      .selectFrom("strategies")
+      .select("id")
+      .where("id", "=", id)
+      .where("is_shared", "=", true)
+      .executeTakeFirst();
+    if (!visible) {
       throw new AppError("NOT_FOUND", 404, "Strategy not found");
     }
-    await query(
-      `insert into strategy_favorites (user_id, strategy_id, created_at)
-       values ($1,$2,now())
-       on conflict (user_id, strategy_id) do nothing`,
-      [session.userId, id]
-    );
+    await db
+      .insertInto("strategy_favorites")
+      .values({
+        user_id: session.userId,
+        strategy_id: id,
+        created_at: new Date().toISOString()
+      })
+      .onConflict((oc) => oc.columns(["user_id", "strategy_id"]).doNothing())
+      .execute();
     return { id, isFavorited: true };
   } catch (error) {
     if (isMissingTableError(error, "strategy_favorites")) {
@@ -689,10 +728,12 @@ export async function favoriteStrategy(id: string) {
 export async function unfavoriteStrategy(id: string) {
   const session = await requireSessionUser();
   try {
-    await query("delete from strategy_favorites where user_id = $1 and strategy_id = $2", [
-      session.userId,
-      id
-    ]);
+    const db = await ensureDb();
+    await db
+      .deleteFrom("strategy_favorites")
+      .where("user_id", "=", session.userId)
+      .where("strategy_id", "=", id)
+      .execute();
     return { id, isFavorited: false };
   } catch (error) {
     if (isMissingTableError(error, "strategy_favorites")) {
@@ -704,69 +745,91 @@ export async function unfavoriteStrategy(id: string) {
 
 export async function forkStrategy(id: string) {
   const session = await requireSessionUser();
-  const pool = getPool();
-  const client = await pool.connect();
   try {
-    await client.query("begin");
-
-    const sourceRes = await client.query<StrategyRow>(
-      "select * from strategies where id = $1 and is_shared = true",
-      [id]
-    );
-    if ((sourceRes.rowCount ?? 0) !== 1) {
-      throw new AppError("NOT_FOUND", 404, "Strategy not found");
-    }
-    const source = normalizeStrategyRow(sourceRes.rows[0] as unknown as Record<string, unknown>);
-
+    const db = await ensureDb();
     const now = new Date().toISOString();
     const forkId = randomUUID();
-    const forkName = `${source.name}（Fork）`;
-    await client.query(
-      `insert into strategies (id, owner_user_id, name, description, is_shared, forked_from_strategy_id, created_at, updated_at)
-       values ($1,$2,$3,$4,false,$5,$6,$6)`,
-      [forkId, session.userId, forkName, source.description, source.id, now]
-    );
-
-    const rolesRes = await client.query<StrategyRoleRow>(
-      "select * from strategy_roles where strategy_id = $1 order by role_order asc",
-      [source.id]
-    );
-
-    const roleIdMap = new Map<string, string>();
-    for (const role of rolesRes.rows) {
-      const newRoleId = randomUUID();
-      roleIdMap.set(role.id, newRoleId);
-      await client.query(
-        `insert into strategy_roles (id, strategy_id, name, system_prompt, role_order, created_at, updated_at)
-         values ($1,$2,$3,$4,$5,$6,$6)`,
-        [newRoleId, forkId, role.name, role.system_prompt, role.role_order, now]
-      );
-    }
-
-    const sourceRoleIds = rolesRes.rows.map((r) => r.id);
-    if (sourceRoleIds.length > 0) {
-      const filesRes = await client.query<{ strategy_role_id: string; path: string; content: string }>(
-        "select strategy_role_id, path, content from strategy_role_files where strategy_role_id = any($1::uuid[]) order by strategy_role_id asc, path asc",
-        [sourceRoleIds]
-      );
-      for (const file of filesRes.rows) {
-        const newRoleId = roleIdMap.get(file.strategy_role_id);
-        if (!newRoleId) continue;
-        await client.query(
-          `insert into strategy_role_files (id, strategy_role_id, path, content, created_at, updated_at)
-           values ($1,$2,$3,$4,$5,$5)`,
-          [randomUUID(), newRoleId, file.path, file.content ?? "", now]
-        );
+    await db.transaction().execute(async (trx) => {
+      const sourceRow = await trx
+        .selectFrom("strategies")
+        .selectAll()
+        .where("id", "=", id)
+        .where("is_shared", "=", true)
+        .executeTakeFirst();
+      if (!sourceRow) {
+        throw new AppError("NOT_FOUND", 404, "Strategy not found");
       }
-    }
+      const source = normalizeStrategyRow(sourceRow);
+      const forkName = `${source.name}（Fork）`;
 
-    await client.query("commit");
+      await trx
+        .insertInto("strategies")
+        .values({
+          id: forkId,
+          owner_user_id: session.userId,
+          name: forkName,
+          description: source.description,
+          is_shared: false,
+          forked_from_strategy_id: source.id,
+          created_at: now,
+          updated_at: now
+        })
+        .execute();
+
+      const roles = await trx
+        .selectFrom("strategy_roles")
+        .selectAll()
+        .where("strategy_id", "=", source.id)
+        .orderBy("role_order", "asc")
+        .execute();
+
+      const roleIdMap = new Map<string, string>();
+      for (const role of roles) {
+        const newRoleId = randomUUID();
+        roleIdMap.set(role.id, newRoleId);
+        await trx
+          .insertInto("strategy_roles")
+          .values({
+            id: newRoleId,
+            strategy_id: forkId,
+            name: role.name,
+            system_prompt: role.system_prompt,
+            role_order: role.role_order,
+            created_at: now,
+            updated_at: now
+          })
+          .execute();
+      }
+
+      const sourceRoleIds = roles.map((role) => role.id);
+      if (sourceRoleIds.length > 0) {
+        const files = await trx
+          .selectFrom("strategy_role_files")
+          .select(["strategy_role_id", "path", "content"])
+          .where("strategy_role_id", "in", sourceRoleIds)
+          .orderBy("strategy_role_id", "asc")
+          .orderBy("path", "asc")
+          .execute();
+
+        for (const file of files) {
+          const newRoleId = roleIdMap.get(file.strategy_role_id);
+          if (!newRoleId) continue;
+          await trx
+            .insertInto("strategy_role_files")
+            .values({
+              id: randomUUID(),
+              strategy_role_id: newRoleId,
+              path: file.path,
+              content: file.content ?? "",
+              created_at: now,
+              updated_at: now
+            })
+            .execute();
+        }
+      }
+    });
     return { id: forkId };
   } catch (error) {
-    try {
-      await client.query("rollback");
-    } catch {
-    }
     if (
       error instanceof AppError ||
       isMissingTableError(error, "strategies") ||
@@ -783,8 +846,6 @@ export async function forkStrategy(id: string) {
       throw error;
     }
     throw error;
-  } finally {
-    client.release();
   }
 }
 
@@ -795,50 +856,54 @@ export async function createStrategy(input: unknown) {
   const now = new Date().toISOString();
   const strategyId = randomUUID();
 
-  const client = await getTransactionClient();
   try {
-    await client.query("begin");
+    const db = await ensureDb();
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto("strategies")
+        .values({
+          id: strategyId,
+          owner_user_id: session.userId,
+          name: data.name,
+          description: data.description ?? null,
+          is_shared: data.isShared,
+          created_at: now,
+          updated_at: now
+        })
+        .execute();
 
-    await client.query(
-      `
-        insert into strategies (id, owner_user_id, name, description, is_shared, created_at, updated_at)
-        values ($1,$2,$3,$4,$5,$6,$6)
-      `,
-      [strategyId, session.userId, data.name, data.description ?? null, data.isShared, now]
-    );
+      for (let index = 0; index < data.roles.length; index += 1) {
+        const role = data.roles[index];
+        const roleId = randomUUID();
+        await trx
+          .insertInto("strategy_roles")
+          .values({
+            id: roleId,
+            strategy_id: strategyId,
+            name: role.name,
+            system_prompt: role.systemPrompt ?? null,
+            role_order: index + 1,
+            created_at: now,
+            updated_at: now
+          })
+          .execute();
 
-    for (let index = 0; index < data.roles.length; index += 1) {
-      const role = data.roles[index];
-      const roleId = randomUUID();
-      await client.query(
-        `
-          insert into strategy_roles (id, strategy_id, name, system_prompt, role_order, created_at, updated_at)
-          values ($1,$2,$3,$4,$5,$6,$6)
-        `,
-        [
-          roleId,
-          strategyId,
-          role.name,
-          role.systemPrompt ?? null,
-          index + 1,
-          now
-        ]
-      );
-
-      for (const file of role.files ?? []) {
-        await client.query(
-          `
-            insert into strategy_role_files (id, strategy_role_id, path, content, created_at, updated_at)
-            values ($1,$2,$3,$4,$5,$5)
-          `,
-          [randomUUID(), roleId, file.path, file.content ?? "", now]
-        );
+        for (const file of role.files ?? []) {
+          await trx
+            .insertInto("strategy_role_files")
+            .values({
+              id: randomUUID(),
+              strategy_role_id: roleId,
+              path: file.path,
+              content: file.content ?? "",
+              created_at: now,
+              updated_at: now
+            })
+            .execute();
+        }
       }
-    }
-
-    await client.query("commit");
+    });
   } catch (error) {
-    await safeRollback(client);
     if (
       isMissingTableError(error, "strategies") ||
       isMissingTableError(error, "strategy_roles") ||
@@ -847,8 +912,6 @@ export async function createStrategy(input: unknown) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
     throw error;
-  } finally {
-    client.release();
   }
 
   return getStrategyDetail(strategyId);
@@ -860,35 +923,37 @@ export async function updateStrategy(id: string, input: unknown) {
 
   const now = new Date().toISOString();
 
-  const client = await getTransactionClient();
   try {
-    await client.query("begin");
+    const db = await ensureDb();
+    await db.transaction().execute(async (trx) => {
+      const existing = await trx
+        .selectFrom("strategies")
+        .selectAll()
+        .where("id", "=", id)
+        .where("owner_user_id", "=", session.userId)
+        .executeTakeFirst();
+      if (!existing) {
+        throw new AppError("NOT_FOUND", 404, "Strategy not found");
+      }
 
-    const existing = await client.query<StrategyRow>(
-      "select * from strategies where id = $1 and owner_user_id = $2",
-      [id, session.userId]
-    );
-    if ((existing.rowCount ?? 0) !== 1) {
-      throw new AppError("NOT_FOUND", 404, "Strategy not found");
-    }
+      await trx
+        .updateTable("strategies")
+        .set({
+          name: data.name,
+          description: data.description ?? null,
+          is_shared: data.isShared,
+          updated_at: now
+        })
+        .where("id", "=", id)
+        .where("owner_user_id", "=", session.userId)
+        .execute();
 
-    await client.query(
-      `
-        update strategies
-           set name = $3,
-               description = $4,
-               is_shared = $5,
-               updated_at = $6
-         where id = $1 and owner_user_id = $2
-      `,
-      [id, session.userId, data.name, data.description ?? null, data.isShared, now]
-    );
-
-    const existingRoles = await client.query<StrategyRoleRow>(
-      "select * from strategy_roles where strategy_id = $1",
-      [id]
-    );
-    const existingRoleIds = new Set(existingRoles.rows.map((row) => String(row.id)));
+      const existingRoles = await trx
+        .selectFrom("strategy_roles")
+        .selectAll()
+        .where("strategy_id", "=", id)
+        .execute();
+      const existingRoleIds = new Set(existingRoles.map((row) => String(row.id)));
 
     const desired: Array<{
       id: string;
@@ -908,43 +973,47 @@ export async function updateStrategy(id: string, input: unknown) {
       };
     });
 
-    const desiredIds = new Set(desired.map((item) => item.id));
-    for (const roleId of existingRoleIds) {
-      if (!desiredIds.has(roleId)) {
-        await client.query("delete from strategy_roles where id = $1 and strategy_id = $2", [
-          roleId,
-          id
-        ]);
+      const desiredIds = new Set(desired.map((item) => item.id));
+      for (const roleId of existingRoleIds) {
+        if (!desiredIds.has(roleId)) {
+          await trx
+            .deleteFrom("strategy_roles")
+            .where("id", "=", roleId)
+            .where("strategy_id", "=", id)
+            .execute();
+        }
       }
-    }
 
-    for (const role of desired) {
-      if (role.isNew) {
-        await client.query(
-          `
-            insert into strategy_roles (id, strategy_id, name, system_prompt, role_order, created_at, updated_at)
-            values ($1,$2,$3,$4,$5,$6,$6)
-          `,
-          [role.id, id, role.name, role.systemPrompt, role.roleOrder, now]
-        );
-      } else {
-        await client.query(
-          `
-            update strategy_roles
-               set name = $3,
-                   system_prompt = $4,
-                   role_order = $5,
-                   updated_at = $6
-             where id = $1 and strategy_id = $2
-          `,
-          [role.id, id, role.name, role.systemPrompt, role.roleOrder, now]
-        );
+      for (const role of desired) {
+        if (role.isNew) {
+          await trx
+            .insertInto("strategy_roles")
+            .values({
+              id: role.id,
+              strategy_id: id,
+              name: role.name,
+              system_prompt: role.systemPrompt,
+              role_order: role.roleOrder,
+              created_at: now,
+              updated_at: now
+            })
+            .execute();
+        } else {
+          await trx
+            .updateTable("strategy_roles")
+            .set({
+              name: role.name,
+              system_prompt: role.systemPrompt,
+              role_order: role.roleOrder,
+              updated_at: now
+            })
+            .where("id", "=", role.id)
+            .where("strategy_id", "=", id)
+            .execute();
+        }
       }
-    }
-
-    await client.query("commit");
+    });
   } catch (error) {
-    await safeRollback(client);
     if (
       isMissingTableError(error, "strategies") ||
       isMissingTableError(error, "strategy_roles") ||
@@ -953,8 +1022,6 @@ export async function updateStrategy(id: string, input: unknown) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
     throw error;
-  } finally {
-    client.release();
   }
 
   return getStrategyDetail(id);
@@ -963,11 +1030,13 @@ export async function updateStrategy(id: string, input: unknown) {
 export async function deleteStrategy(id: string) {
   const session = await requireSessionUser();
   try {
-    const result = await query(
-      "delete from strategies where id = $1 and owner_user_id = $2",
-      [id, session.userId]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const result = await db
+      .deleteFrom("strategies")
+      .where("id", "=", id)
+      .where("owner_user_id", "=", session.userId)
+      .executeTakeFirst();
+    if (Number(result.numDeletedRows ?? 0) !== 1) {
       throw new AppError("NOT_FOUND", 404, "Strategy not found");
     }
     return null;
@@ -981,58 +1050,76 @@ export async function deleteStrategy(id: string) {
 
 export async function duplicateStrategyRole(strategyId: string, roleId: string) {
   const session = await requireSessionUser();
-  const client = await getTransactionClient();
   const now = new Date().toISOString();
 
   try {
-    await client.query("begin");
-
-    const strategyResult = await client.query<{ id: string }>(
-      "select id from strategies where id = $1 and owner_user_id = $2",
-      [strategyId, session.userId]
-    );
-    if ((strategyResult.rowCount ?? 0) !== 1) {
-      throw new AppError("NOT_FOUND", 404, "Strategy not found");
-    }
-
-    const roleResult = await client.query<{ name: string; system_prompt: string | null }>(
-      "select name, system_prompt from strategy_roles where id = $1 and strategy_id = $2",
-      [roleId, strategyId]
-    );
-    if ((roleResult.rowCount ?? 0) !== 1) {
-      throw new AppError("NOT_FOUND", 404, "Strategy role not found");
-    }
-
-    const nextOrderResult = await client.query<{ next: number }>(
-      "select (coalesce(max(role_order), 0) + 1)::int as next from strategy_roles where strategy_id = $1",
-      [strategyId]
-    );
-    const nextOrder = nextOrderResult.rows[0]?.next ?? 1;
-
     const newRoleId = randomUUID();
-    const newName = roleResult.rows[0].name;
+    const db = await ensureDb();
+    const duplicated = await db.transaction().execute(async (trx) => {
+      const strategyResult = await trx
+        .selectFrom("strategies")
+        .select("id")
+        .where("id", "=", strategyId)
+        .where("owner_user_id", "=", session.userId)
+        .executeTakeFirst();
+      if (!strategyResult) {
+        throw new AppError("NOT_FOUND", 404, "Strategy not found");
+      }
 
-    await client.query(
-      `insert into strategy_roles (id, strategy_id, name, system_prompt, role_order, created_at, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$6)`,
-      [newRoleId, strategyId, newName, roleResult.rows[0].system_prompt ?? null, nextOrder, now]
-    );
+      const roleResult = await trx
+        .selectFrom("strategy_roles")
+        .select(["name", "system_prompt"])
+        .where("id", "=", roleId)
+        .where("strategy_id", "=", strategyId)
+        .executeTakeFirst();
+      if (!roleResult) {
+        throw new AppError("NOT_FOUND", 404, "Strategy role not found");
+      }
 
-    await client.query(
-      `
-        insert into strategy_role_files (id, strategy_role_id, path, content, created_at, updated_at)
-        select gen_random_uuid(), $2, path, content, $3, $3
-          from strategy_role_files
-         where strategy_role_id = $1
-         order by path asc
-      `,
-      [roleId, newRoleId, now]
-    );
+      const nextOrderRow = await trx
+        .selectFrom("strategy_roles")
+        .select(sql<number>`(coalesce(max(role_order), 0) + 1)::int`.as("next"))
+        .where("strategy_id", "=", strategyId)
+        .executeTakeFirst();
+      const nextOrder = nextOrderRow?.next ?? 1;
 
-    await client.query("commit");
-    return { id: newRoleId, name: newName, roleOrder: nextOrder };
+      await trx
+        .insertInto("strategy_roles")
+        .values({
+          id: newRoleId,
+          strategy_id: strategyId,
+          name: roleResult.name,
+          system_prompt: roleResult.system_prompt ?? null,
+          role_order: nextOrder,
+          created_at: now,
+          updated_at: now
+        })
+        .execute();
+
+      const sourceFiles = await trx
+        .selectFrom("strategy_role_files")
+        .select(["path", "content"])
+        .where("strategy_role_id", "=", roleId)
+        .orderBy("path", "asc")
+        .execute();
+      for (const file of sourceFiles) {
+        await trx
+          .insertInto("strategy_role_files")
+          .values({
+            id: randomUUID(),
+            strategy_role_id: newRoleId,
+            path: file.path,
+            content: file.content,
+            created_at: now,
+            updated_at: now
+          })
+          .execute();
+      }
+
+      return { newName: roleResult.name, nextOrder };
+    });
+    return { id: newRoleId, name: duplicated.newName, roleOrder: duplicated.nextOrder };
   } catch (error) {
-    await safeRollback(client);
     if (
       isMissingTableError(error, "strategies") ||
       isMissingTableError(error, "strategy_roles") ||
@@ -1041,20 +1128,6 @@ export async function duplicateStrategyRole(strategyId: string, roleId: string) 
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
     throw error;
-  } finally {
-    client.release();
-  }
-}
-
-async function getTransactionClient() {
-  const pool = getPool();
-  return await pool.connect();
-}
-
-async function safeRollback(client: { query: (sql: string) => Promise<unknown> }) {
-  try {
-    await client.query("rollback");
-  } catch {
   }
 }
 
@@ -1096,23 +1169,20 @@ function buildStrategyWorkflowPhasePromptResponse(
 async function loadStrategyWorkflowPhasePromptState(strategyId: string) {
   const { strategy, canEdit } = await getStrategyRowById(strategyId);
   try {
-    const roleRows = await query<StrategyWorkflowRoleRecord>(
-      `
-        select r.id, r.name, r.role_order, f.content as workflow_content
-          from strategy_roles r
-          left join strategy_role_files f
-            on f.strategy_role_id = r.id
-           and f.path = $2
-         where r.strategy_id = $1
-         order by r.role_order asc
-      `,
-      [strategy.id, STRATEGY_WORKFLOW_PATH]
-    );
-    if ((roleRows.rowCount ?? 0) <= 0) {
+    const db = await ensureDb();
+    const rows = await db
+      .selectFrom("strategy_roles as r")
+      .leftJoin("strategy_role_files as f", (join) =>
+        join.onRef("f.strategy_role_id", "=", "r.id").on("f.path", "=", STRATEGY_WORKFLOW_PATH)
+      )
+      .select(["r.id", "r.name", "r.role_order", "f.content as workflow_content"])
+      .where("r.strategy_id", "=", strategy.id)
+      .orderBy("r.role_order", "asc")
+      .execute();
+    if (rows.length <= 0) {
       throw new AppError("VALIDATION_ERROR", 400, "Strategy has no roles");
     }
 
-    const rows = roleRows.rows;
     const owner = rows.find((row) => String(row.workflow_content ?? "").trim()) ?? rows[0];
     const rawWorkflow = String(owner.workflow_content ?? "").trim();
     const workflowConfig = (() => {
@@ -1174,36 +1244,38 @@ export async function updateStrategyWorkflowConfig(strategyId: string, input: un
 
   const now = new Date().toISOString();
   const content = JSON.stringify(canonicalWorkflow, null, 2);
-  const client = await getTransactionClient();
   try {
-    await client.query("begin");
-    await client.query(
-      `
-        insert into strategy_role_files (strategy_role_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (strategy_role_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-      `,
-      [state.ownerRoleId, STRATEGY_WORKFLOW_PATH, content, now]
-    );
-    await client.query(
-      `
-        delete from strategy_role_files
-         where path = $2
-           and strategy_role_id = any($3::uuid[])
-           and strategy_role_id <> $1
-      `,
-      [state.ownerRoleId, STRATEGY_WORKFLOW_PATH, state.roleIds]
-    );
-    await client.query("commit");
+    const db = await ensureDb();
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto("strategy_role_files")
+        .values({
+          id: randomUUID(),
+          strategy_role_id: state.ownerRoleId,
+          path: STRATEGY_WORKFLOW_PATH,
+          content,
+          created_at: now,
+          updated_at: now
+        })
+        .onConflict((oc) =>
+          oc.columns(["strategy_role_id", "path"]).doUpdateSet({
+            content,
+            updated_at: now
+          })
+        )
+        .execute();
+      await trx
+        .deleteFrom("strategy_role_files")
+        .where("path", "=", STRATEGY_WORKFLOW_PATH)
+        .where("strategy_role_id", "in", state.roleIds)
+        .where("strategy_role_id", "!=", state.ownerRoleId)
+        .execute();
+    });
   } catch (error) {
-    await safeRollback(client);
     if (isMissingTableError(error, "strategy_role_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
     throw error;
-  } finally {
-    client.release();
   }
 
   return {
@@ -1238,36 +1310,38 @@ export async function updateStrategyWorkflowPhasePrompts(strategyId: string, inp
   const now = new Date().toISOString();
   const canonicalWorkflow = toCanonicalWorkflowConfig(nextWorkflow) ?? nextWorkflow;
   const content = JSON.stringify(canonicalWorkflow, null, 2);
-  const client = await getTransactionClient();
   try {
-    await client.query("begin");
-    await client.query(
-      `
-        insert into strategy_role_files (strategy_role_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (strategy_role_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-      `,
-      [state.ownerRoleId, STRATEGY_WORKFLOW_PATH, content, now]
-    );
-    await client.query(
-      `
-        delete from strategy_role_files
-         where path = $2
-           and strategy_role_id = any($3::uuid[])
-           and strategy_role_id <> $1
-      `,
-      [state.ownerRoleId, STRATEGY_WORKFLOW_PATH, state.roleIds]
-    );
-    await client.query("commit");
+    const db = await ensureDb();
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto("strategy_role_files")
+        .values({
+          id: randomUUID(),
+          strategy_role_id: state.ownerRoleId,
+          path: STRATEGY_WORKFLOW_PATH,
+          content,
+          created_at: now,
+          updated_at: now
+        })
+        .onConflict((oc) =>
+          oc.columns(["strategy_role_id", "path"]).doUpdateSet({
+            content,
+            updated_at: now
+          })
+        )
+        .execute();
+      await trx
+        .deleteFrom("strategy_role_files")
+        .where("path", "=", STRATEGY_WORKFLOW_PATH)
+        .where("strategy_role_id", "in", state.roleIds)
+        .where("strategy_role_id", "!=", state.ownerRoleId)
+        .execute();
+    });
   } catch (error) {
-    await safeRollback(client);
     if (isMissingTableError(error, "strategy_role_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
     throw error;
-  } finally {
-    client.release();
   }
 
   return buildStrategyWorkflowPhasePromptResponse(canonicalWorkflow, state.ownerRoleId, true, true);
@@ -1276,22 +1350,20 @@ export async function updateStrategyWorkflowPhasePrompts(strategyId: string, inp
 async function requireVisibleStrategyRole(strategyId: string, roleId: string) {
   const session = await requireSessionUser();
   try {
-    const result = await query<{ owner_user_id: string; is_shared: boolean }>(
-      `
-        select s.owner_user_id, s.is_shared
-          from strategies s
-          join strategy_roles r on r.strategy_id = s.id
-         where s.id = $1
-           and r.id = $2
-           and (s.owner_user_id = $3 or s.is_shared = true)
-         limit 1
-      `,
-      [strategyId, roleId, session.userId]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("strategies as s")
+      .innerJoin("strategy_roles as r", "r.strategy_id", "s.id")
+      .select(["s.owner_user_id", "s.is_shared"])
+      .where("s.id", "=", strategyId)
+      .where("r.id", "=", roleId)
+      .where((eb) => eb.or([eb("s.owner_user_id", "=", session.userId), eb("s.is_shared", "=", true)]))
+      .limit(1)
+      .executeTakeFirst();
+    if (!result) {
       throw new AppError("NOT_FOUND", 404, "Strategy role not found");
     }
-    const ownerUserId = String(result.rows[0].owner_user_id);
+    const ownerUserId = String(result.owner_user_id);
     return { session, canEdit: ownerUserId === session.userId };
   } catch (error) {
     if (isMissingTableError(error, "strategies") || isMissingTableError(error, "strategy_roles")) {
@@ -1304,16 +1376,14 @@ async function requireVisibleStrategyRole(strategyId: string, roleId: string) {
 export async function listStrategyRoleFiles(strategyId: string, roleId: string) {
   await requireVisibleStrategyRole(strategyId, roleId);
   try {
-    const result = await query<Record<string, unknown>>(
-      `
-        select path, created_at, updated_at
-          from strategy_role_files
-         where strategy_role_id = $1
-         order by path asc
-      `,
-      [roleId]
-    );
-    return result.rows.map((row) => ({
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("strategy_role_files")
+      .select(["path", "created_at", "updated_at"])
+      .where("strategy_role_id", "=", roleId)
+      .orderBy("path", "asc")
+      .execute();
+    return result.map((row) => ({
       path: String(row.path),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at)
@@ -1329,24 +1399,22 @@ export async function listStrategyRoleFiles(strategyId: string, roleId: string) 
 export async function getStrategyRoleFile(strategyId: string, roleId: string, path: string) {
   await requireVisibleStrategyRole(strategyId, roleId);
   try {
-    const result = await query<Record<string, unknown>>(
-      `
-        select path, content, created_at, updated_at
-          from strategy_role_files
-         where strategy_role_id = $1
-           and path = $2
-         limit 1
-      `,
-      [roleId, path]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("strategy_role_files")
+      .select(["path", "content", "created_at", "updated_at"])
+      .where("strategy_role_id", "=", roleId)
+      .where("path", "=", path)
+      .limit(1)
+      .executeTakeFirst();
+    if (!result) {
       throw new AppError("NOT_FOUND", 404, "File not found");
     }
     return {
-      path: String(result.rows[0].path),
-      content: String(result.rows[0].content ?? ""),
-      createdAt: String(result.rows[0].created_at),
-      updatedAt: String(result.rows[0].updated_at)
+      path: String(result.path),
+      content: String(result.content ?? ""),
+      createdAt: String(result.created_at),
+      updatedAt: String(result.updated_at)
     };
   } catch (error) {
     if (isMissingTableError(error, "strategy_role_files")) {
@@ -1365,21 +1433,30 @@ export async function upsertStrategyRoleFile(strategyId: string, roleId: string,
 
   const now = new Date().toISOString();
   try {
-    const result = await query<Record<string, unknown>>(
-      `
-        insert into strategy_role_files (strategy_role_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (strategy_role_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-        returning path, content, created_at, updated_at
-      `,
-      [roleId, data.path, data.content, now]
-    );
+    const db = await ensureDb();
+    const result = await db
+      .insertInto("strategy_role_files")
+      .values({
+        id: randomUUID(),
+        strategy_role_id: roleId,
+        path: data.path,
+        content: data.content,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["strategy_role_id", "path"]).doUpdateSet({
+          content: data.content,
+          updated_at: now
+        })
+      )
+      .returning(["path", "content", "created_at", "updated_at"])
+      .executeTakeFirstOrThrow();
     return {
-      path: String(result.rows[0].path),
-      content: String(result.rows[0].content ?? ""),
-      createdAt: String(result.rows[0].created_at),
-      updatedAt: String(result.rows[0].updated_at)
+      path: String(result.path),
+      content: String(result.content ?? ""),
+      createdAt: String(result.created_at),
+      updatedAt: String(result.updated_at)
     };
   } catch (error) {
     if (isMissingTableError(error, "strategy_role_files")) {
@@ -1397,11 +1474,13 @@ export async function deleteStrategyRoleFile(strategyId: string, roleId: string,
   }
 
   try {
-    const result = await query(
-      "delete from strategy_role_files where strategy_role_id = $1 and path = $2",
-      [roleId, data.path]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const result = await db
+      .deleteFrom("strategy_role_files")
+      .where("strategy_role_id", "=", roleId)
+      .where("path", "=", data.path)
+      .executeTakeFirst();
+    if (Number(result.numDeletedRows ?? 0) !== 1) {
       throw new AppError("NOT_FOUND", 404, "File not found");
     }
     return null;
@@ -1422,11 +1501,13 @@ export async function deleteStrategyRoleFilesByPrefix(strategyId: string, roleId
   const normalized = String(prefix ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
   const like = normalized ? `${normalized.replace(/\/+$/, "")}/%` : "%";
   try {
-    const result = await query(
-      "delete from strategy_role_files where strategy_role_id = $1 and path like $2",
-      [roleId, like]
-    );
-    return { deleted: Number(result.rowCount ?? 0) };
+    const db = await ensureDb();
+    const result = await db
+      .deleteFrom("strategy_role_files")
+      .where("strategy_role_id", "=", roleId)
+      .where("path", "like", like)
+      .executeTakeFirst();
+    return { deleted: Number(result.numDeletedRows ?? 0) };
   } catch (error) {
     if (isMissingTableError(error, "strategy_role_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
@@ -1447,32 +1528,35 @@ export async function moveStrategyRoleFile(strategyId: string, roleId: string, i
 
   const now = new Date().toISOString();
   try {
-    const exists = await query<{ path: string }>(
-      "select path from strategy_role_files where strategy_role_id = $1 and path = $2",
-      [roleId, data.toPath]
-    );
-    if ((exists.rowCount ?? 0) > 0) {
+    const db = await ensureDb();
+    const exists = await db
+      .selectFrom("strategy_role_files")
+      .select("path")
+      .where("strategy_role_id", "=", roleId)
+      .where("path", "=", data.toPath)
+      .executeTakeFirst();
+    if (exists) {
       throw new AppError("CONFLICT", 409, "Target path already exists");
     }
 
-    const updated = await query<Record<string, unknown>>(
-      `
-        update strategy_role_files
-           set path = $3,
-               updated_at = $4
-         where strategy_role_id = $1 and path = $2
-         returning path, content, created_at, updated_at
-      `,
-      [roleId, data.fromPath, data.toPath, now]
-    );
-    if ((updated.rowCount ?? 0) !== 1) {
+    const updated = await db
+      .updateTable("strategy_role_files")
+      .set({
+        path: data.toPath,
+        updated_at: now
+      })
+      .where("strategy_role_id", "=", roleId)
+      .where("path", "=", data.fromPath)
+      .returning(["path", "content", "created_at", "updated_at"])
+      .executeTakeFirst();
+    if (!updated) {
       throw new AppError("NOT_FOUND", 404, "File not found");
     }
     return {
-      path: String(updated.rows[0].path),
-      content: String(updated.rows[0].content ?? ""),
-      createdAt: String(updated.rows[0].created_at),
-      updatedAt: String(updated.rows[0].updated_at)
+      path: String(updated.path),
+      content: String(updated.content ?? ""),
+      createdAt: String(updated.created_at),
+      updatedAt: String(updated.updated_at)
     };
   } catch (error) {
     if (isMissingTableError(error, "strategy_role_files")) {

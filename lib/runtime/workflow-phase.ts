@@ -1,4 +1,5 @@
-import { query } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
+import { sql } from "kysely";
 import type { DebateRecord } from "@/lib/types";
 import type { NormalizedDebateWorkflow } from "@/lib/workflow";
 import { safeParseWorkflowJson } from "@/lib/workflow";
@@ -158,19 +159,17 @@ export function getWorkflowEarliestFinalizationRound(workflow: NormalizedDebateW
 
 export async function listClosedOfficialVoteRounds(userId: string, debateId: string) {
   try {
-    const result = await query<{ path: string }>(
-      `
-        select f.path
-          from debate_files f
-          join debates d on d.id = f.debate_id
-         where f.debate_id = $1
-           and d.user_id = $2
-           and f.path like 'votes/round-%'
-      `,
-      [debateId, userId]
-    );
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_files as f")
+      .innerJoin("debates as d", "d.id", "f.debate_id")
+      .select("f.path")
+      .where("f.debate_id", "=", debateId)
+      .where("d.user_id", "=", userId)
+      .where("f.path", "like", "votes/round-%")
+      .execute();
     const rounds = new Set<number>();
-    for (const row of result.rows) {
+    for (const row of result) {
       const match = String(row.path ?? "").replace(/\\/g, "/").match(/^votes\/round-([0-9]{1,6})\.json$/);
       if (!match) continue;
       const round = Number(match[1]);
@@ -293,21 +292,21 @@ export async function listMissingRequiredDeliverables(input: {
   if (requiredFiles.length <= 0) return [];
   try {
     const requiredPaths = requiredFiles.map((file) => file.path);
-    const result = await query<{ path: string; content: string; content_length: number }>(
-      `
-        select f.path,
-               coalesce(f.content, '') as content,
-               length(trim(coalesce(f.content, '')))::int as content_length
-          from debate_files f
-          join debates d on d.id = f.debate_id
-         where f.debate_id = $1
-           and d.user_id = $2
-           and f.path = any($3::text[])
-      `,
-      [input.debateId, input.userId, requiredPaths]
-    );
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_files as f")
+      .innerJoin("debates as d", "d.id", "f.debate_id")
+      .select([
+        "f.path",
+        sql<string>`coalesce(f.content, '')`.as("content"),
+        sql<number>`length(trim(coalesce(f.content, '')))::int`.as("content_length")
+      ])
+      .where("f.debate_id", "=", input.debateId)
+      .where("d.user_id", "=", input.userId)
+      .where("f.path", "in", requiredPaths)
+      .execute();
     const contentByPath = new Map(
-      result.rows.map((row) => [
+      result.map((row) => [
         String(row.path),
         {
           content: String(row.content ?? ""),

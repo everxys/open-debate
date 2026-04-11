@@ -1,7 +1,11 @@
 import { Pool, type QueryResultRow } from "pg";
+import { Kysely, PostgresDialect } from "kysely";
+
+import type { OpenDebateDb } from "@/lib/db-schema";
 
 /** Global pool singleton with schema readiness tracking */
 const globalPool = globalThis as typeof globalThis & {
+  openDebateDb?: Kysely<OpenDebateDb>;
   openDebatePool?: Pool;
   openDebateSchemaReady?: Promise<void>;
   openDebateRuntimeRecoveryScheduled?: boolean;
@@ -87,6 +91,17 @@ export function getPool(): Pool {
   return globalPool.openDebatePool;
 }
 
+export function getDb(): Kysely<OpenDebateDb> {
+  if (!globalPool.openDebateDb) {
+    globalPool.openDebateDb = new Kysely<OpenDebateDb>({
+      dialect: new PostgresDialect({
+        pool: getPool()
+      })
+    });
+  }
+  return globalPool.openDebateDb;
+}
+
 /** Ensure DB schema is ready and return pool */
 export async function ensureDbReady(): Promise<Pool> {
   const pool = getPool();
@@ -97,6 +112,11 @@ export async function ensureDbReady(): Promise<Pool> {
   scheduleDebateRuntimeRecovery();
   scheduleSummaryJobWorker();
   return pool;
+}
+
+export async function ensureDb() {
+  await ensureDbReady();
+  return getDb();
 }
 
 async function ensureSchema(pool: Pool) {

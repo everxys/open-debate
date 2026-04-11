@@ -1,8 +1,9 @@
 import { randomUUID } from "crypto";
+import { sql } from "kysely";
 
 import { requireSessionUser } from "@/lib/auth";
 import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type DebateParticipantRoleType } from "@/lib/debate-role-types";
-import { query } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
 import { runDebate } from "@/lib/runtime";
@@ -214,34 +215,35 @@ function isMissingColumnError(error: unknown, column: string) {
 
 async function getDebate(id: string) {
   const session = await requireSessionUser();
-  const result = await query<Record<string, unknown>>(
-    "select * from debates where id = $1 and user_id = $2",
-    [id, session.userId]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const row = await db
+    .selectFrom("debates")
+    .selectAll()
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .executeTakeFirst();
+  if (!row) {
     throw new AppError("NOT_FOUND", 404, "Debate not found");
   }
-  return { session, debate: normalizeDebateRow(result.rows[0]) };
+  return { session, debate: normalizeDebateRow(row) };
 }
 
 async function getDebateForView(id: string, userId: string) {
   try {
-    const result = await query<Record<string, unknown>>(
-      `
-        select d.*,
-               (d.user_id = $2) as is_owner
-          from debates d
-         where d.id = $1
-           and (d.user_id = $2 or d.is_shared = true)
-      `,
-      [id, userId]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const row = await db
+      .selectFrom("debates as d")
+      .selectAll("d")
+      .select(sql<boolean>`(d.user_id = ${userId})`.as("is_owner"))
+      .where("d.id", "=", id)
+      .where((eb) => eb.or([eb("d.user_id", "=", userId), eb("d.is_shared", "=", true)]))
+      .executeTakeFirst();
+    if (!row) {
       throw new AppError("NOT_FOUND", 404, "Debate not found");
     }
     return {
-      debate: normalizeDebateRow(result.rows[0]),
-      isOwner: Boolean((result.rows[0] as { is_owner?: unknown }).is_owner)
+      debate: normalizeDebateRow(row),
+      isOwner: Boolean((row as { is_owner?: unknown }).is_owner)
     };
   } catch (error) {
     if (isMissingColumnError(error, "is_shared")) {
@@ -255,19 +257,21 @@ export async function listDebates(scope: "mine" | "shared" = "mine") {
   const session = await requireSessionUser();
   if (scope === "shared") {
     try {
-      const result = await query<Record<string, unknown>>(
-        `
-          select d.*,
-                 (d.user_id = $1) as is_owner,
-                 (select count(*)::int from debate_agents da where da.debate_id = d.id) as agent_count
-            from debates d
-           where d.is_shared = true
-           order by d.updated_at desc
-           limit 200
-        `,
-        [session.userId]
-      );
-      return result.rows.map((row: Record<string, unknown>) => ({
+      const db = await ensureDb();
+      const rows = await db
+        .selectFrom("debates as d")
+        .selectAll("d")
+        .select([
+          sql<boolean>`(d.user_id = ${session.userId})`.as("is_owner"),
+          sql<number>`(
+            select count(*)::int from debate_agents da where da.debate_id = d.id
+          )`.as("agent_count")
+        ])
+        .where("d.is_shared", "=", true)
+        .orderBy("d.updated_at", "desc")
+        .limit(200)
+        .execute();
+      return rows.map((row: Record<string, unknown>) => ({
         ...toListItem(normalizeDebateRow(row)),
         isOwner: Boolean(row.is_owner),
         agentCount: Number(row.agent_count ?? 0)
@@ -280,18 +284,20 @@ export async function listDebates(scope: "mine" | "shared" = "mine") {
     }
   }
 
-  const result = await query<Record<string, unknown>>(
-    `
-      select d.*,
-             true as is_owner,
-             (select count(*)::int from debate_agents da where da.debate_id = d.id) as agent_count
-        from debates d
-       where d.user_id = $1
-       order by d.created_at desc
-    `,
-    [session.userId]
-  );
-  return result.rows.map((row: Record<string, unknown>) => ({
+  const db = await ensureDb();
+  const rows = await db
+    .selectFrom("debates as d")
+    .selectAll("d")
+    .select([
+      sql<boolean>`true`.as("is_owner"),
+      sql<number>`(
+        select count(*)::int from debate_agents da where da.debate_id = d.id
+      )`.as("agent_count")
+    ])
+    .where("d.user_id", "=", session.userId)
+    .orderBy("d.created_at", "desc")
+    .execute();
+  return rows.map((row: Record<string, unknown>) => ({
     ...toListItem(normalizeDebateRow(row)),
     isOwner: Boolean(row.is_owner),
     agentCount: Number(row.agent_count ?? 0)
@@ -317,22 +323,39 @@ async function insertPendingDebate(input: {
   sourceWorkspaceId?: string | null;
   now: string;
 }) {
-  const insertedDebate = await query<Record<string, unknown>>(
-    `insert into debates (
-      user_id, source_workspace_id, question, status, max_turns, current_turn, token_budget, token_used, enable_shared_facts,
-      consensus_reached, consensus_summary, workflow_phase_kind, workflow_phase_title, workflow_phase_round, last_error_code, last_error_message,
-      runtime_notice_kind, runtime_notice_message, runtime_notice_at,
-      started_at, finished_at, stopped_reason, created_at, updated_at
-    ) values (
-      $1,$2,$3,'pending',$4,0,null,0,$5,
-      false,null,null,null,null,null,null,
-      null,null,null,
-      null,null,null,$6,$6
-    )
-    returning *`,
-    [input.userId, input.sourceWorkspaceId ?? null, input.question, input.maxTurns, input.enableSharedFacts, input.now]
-  );
-  return normalizeDebateRow(insertedDebate.rows[0]);
+  const db = await ensureDb();
+  const row = await db
+    .insertInto("debates")
+    .values({
+      user_id: input.userId,
+      source_workspace_id: input.sourceWorkspaceId ?? null,
+      question: input.question,
+      status: "pending",
+      max_turns: input.maxTurns,
+      current_turn: 0,
+      token_budget: null,
+      token_used: 0,
+      enable_shared_facts: input.enableSharedFacts,
+      is_shared: false,
+      consensus_reached: false,
+      consensus_summary: null,
+      workflow_phase_kind: null,
+      workflow_phase_title: null,
+      workflow_phase_round: null,
+      runtime_notice_kind: null,
+      runtime_notice_message: null,
+      runtime_notice_at: null,
+      last_error_code: null,
+      last_error_message: null,
+      started_at: null,
+      finished_at: null,
+      stopped_reason: null,
+      created_at: input.now,
+      updated_at: input.now
+    })
+    .returningAll()
+    .executeTakeFirstOrThrow();
+  return normalizeDebateRow(row);
 }
 
 async function insertDebateAgent(input: {
@@ -342,47 +365,65 @@ async function insertDebateAgent(input: {
   turnOrder: number;
   now: string;
 }) {
-  return query<{ id: string }>(
-    `insert into debate_agents (debate_id, ai_agent_id, display_name, turn_order, turn_count, created_at)
-     values ($1,$2,$3,$4,0,$5)
-     returning id`,
-    [input.debateId, input.agentId, input.displayName, input.turnOrder, input.now]
-  );
+  const db = await ensureDb();
+  return await db
+    .insertInto("debate_agents")
+    .values({
+      debate_id: input.debateId,
+      ai_agent_id: input.agentId,
+      display_name: input.displayName,
+      turn_order: input.turnOrder,
+      turn_count: 0,
+      created_at: input.now
+    })
+    .returning("id")
+    .executeTakeFirstOrThrow();
 }
 
 async function ensureDefaultDebateWorkflow(debateId: string, now: string) {
   // Ensure workflow.json exists so debate flow is deterministic.
   try {
-    await query(
-      `
-        insert into debate_files (debate_id, path, content, created_at, updated_at)
-        values ($1, 'workflow.json', $2, $3, $3)
-        on conflict (debate_id, path) do nothing
-      `,
-      [debateId, DEFAULT_WORKFLOW_JSON, now]
-    );
+    const db = await ensureDb();
+    await db
+      .insertInto("debate_files")
+      .values({
+        debate_id: debateId,
+        path: "workflow.json",
+        content: DEFAULT_WORKFLOW_JSON,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) => oc.columns(["debate_id", "path"]).doNothing())
+      .execute();
   } catch {
     // backward-compat: older DBs may not have debate_files yet.
   }
 }
 
 async function validateOwnedAgents(userId: string, agentIds: string[]) {
-  const agents = await query<{ id: string }>(
-    "select id from ai_agents where user_id = $1 and deleted_at is null and id = any($2::uuid[])",
-    [userId, agentIds]
-  );
-  if ((agents.rowCount ?? 0) !== agentIds.length) {
+  const db = await ensureDb();
+  const agents = await db
+    .selectFrom("ai_agents")
+    .select("id")
+    .where("user_id", "=", userId)
+    .where("deleted_at", "is", null)
+    .where("id", "in", agentIds)
+    .execute();
+  if (agents.length !== agentIds.length) {
     throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid");
   }
 }
 
 async function loadVisibleStrategy(strategyId: string, userId: string) {
   try {
-    const strategyResult = await query<{ id: string }>(
-      "select id from strategies where id = $1 and (owner_user_id = $2 or is_shared = true)",
-      [strategyId, userId]
-    );
-    return strategyResult.rows[0] ?? null;
+    const db = await ensureDb();
+    const row = await db
+      .selectFrom("strategies")
+      .select("id")
+      .where("id", "=", strategyId)
+      .where((eb) => eb.or([eb("owner_user_id", "=", userId), eb("is_shared", "=", true)]))
+      .executeTakeFirst();
+    return row ?? null;
   } catch (error) {
     if (isMissingTableError(error, "strategies")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
@@ -393,12 +434,15 @@ async function loadVisibleStrategy(strategyId: string, userId: string) {
 
 async function loadStrategyRolesMap(strategyId: string, roleIds: string[]) {
   try {
-    const roleResult = await query<Record<string, unknown>>(
-      "select id, name, system_prompt from strategy_roles where strategy_id = $1 and id = any($2::uuid[])",
-      [strategyId, roleIds]
-    );
+    const db = await ensureDb();
+    const roleResult = await db
+      .selectFrom("strategy_roles")
+      .select(["id", "name", "system_prompt"])
+      .where("strategy_id", "=", strategyId)
+      .where("id", "in", roleIds)
+      .execute();
     return new Map(
-      roleResult.rows.map((row) => [
+      roleResult.map((row) => [
         String(row.id),
         {
           id: String(row.id),
@@ -421,18 +465,15 @@ async function copyStrategyDebateFiles(
   now: string,
   options?: { summaryAgentId?: string | null }
 ) {
-  const workflow = await query<{ content: string }>(
-    `
-      select content
-        from strategy_role_files
-       where strategy_role_id = any($1::uuid[])
-         and lower(path) = 'debate/workflow.json'
-       limit 1
-    `,
-    [roleIds]
-  );
-  const workflowContent =
-    (workflow.rowCount ?? 0) >= 1 ? String(workflow.rows[0]?.content ?? "").trim() : "";
+  const db = await ensureDb();
+  const workflow = await db
+    .selectFrom("strategy_role_files")
+    .select("content")
+    .where("strategy_role_id", "in", roleIds)
+    .where(sql<boolean>`lower(path) = 'debate/workflow.json'`)
+    .limit(1)
+    .executeTakeFirst();
+  const workflowContent = workflow ? String(workflow.content ?? "").trim() : "";
   const canonicalWorkflowContent = (() => {
     if (!workflowContent) return DEFAULT_WORKFLOW_JSON;
     try {
@@ -455,40 +496,54 @@ async function copyStrategyDebateFiles(
       return DEFAULT_WORKFLOW_JSON;
     }
   })();
-  await query(
-    `
-      insert into debate_files (debate_id, path, content, created_at, updated_at)
-      values ($1, 'workflow.json', $2, $3, $3)
-      on conflict (debate_id, path)
-      do update set content = excluded.content, updated_at = excluded.updated_at
-    `,
-    [debateId, canonicalWorkflowContent, now]
-  );
+  await db
+    .insertInto("debate_files")
+    .values({
+      debate_id: debateId,
+      path: "workflow.json",
+      content: canonicalWorkflowContent,
+      created_at: now,
+      updated_at: now
+    })
+    .onConflict((oc) =>
+      oc.columns(["debate_id", "path"]).doUpdateSet({
+        content: canonicalWorkflowContent,
+        updated_at: now
+      })
+    )
+    .execute();
 
-  const sharedDebateFiles = await query<{ path: string; content: string }>(
-    `
-      select distinct on (lower(path)) path, content
-        from strategy_role_files
-       where strategy_role_id = any($1::uuid[])
-         and lower(path) like 'debate/ideas/%'
-       order by lower(path), strategy_role_id asc
-    `,
-    [roleIds]
-  );
-  for (const file of sharedDebateFiles.rows) {
+  const sharedDebateFiles = await db
+    .selectFrom("strategy_role_files")
+    .select(["path", "content"])
+    .where("strategy_role_id", "in", roleIds)
+    .where(sql<boolean>`lower(path) like 'debate/ideas/%'`)
+    .distinctOn(sql`lower(path)`)
+    .orderBy(sql`lower(path)`)
+    .orderBy("strategy_role_id", "asc")
+    .execute();
+  for (const file of sharedDebateFiles) {
     const sourcePath = String(file.path ?? "");
     const normalizedPath = sourcePath.replace(/\\/g, "/").replace(/^\/+/, "").trim();
     const debatePath = normalizedPath.replace(/^debate\//i, "");
     if (!debatePath) continue;
-    await query(
-      `
-        insert into debate_files (debate_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (debate_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-      `,
-      [debateId, debatePath, String(file.content ?? ""), now]
-    );
+    const content = String(file.content ?? "");
+    await db
+      .insertInto("debate_files")
+      .values({
+        debate_id: debateId,
+        path: debatePath,
+        content,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["debate_id", "path"]).doUpdateSet({
+          content,
+          updated_at: now
+        })
+      )
+      .execute();
   }
 }
 
@@ -498,12 +553,15 @@ async function copyStrategyRoleFilesToDebateAgent(input: {
   roleName?: string | null;
   now: string;
 }) {
-  const roleFiles = await query<{ path: string; content: string }>(
-    "select path, content from strategy_role_files where strategy_role_id = $1 order by path asc",
-    [input.roleId]
-  );
+  const db = await ensureDb();
+  const roleFiles = await db
+    .selectFrom("strategy_role_files")
+    .select(["path", "content"])
+    .where("strategy_role_id", "=", input.roleId)
+    .orderBy("path", "asc")
+    .execute();
 
-  for (const file of roleFiles.rows) {
+  for (const file of roleFiles) {
     const path = String(file.path ?? "");
     const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").trim().toLowerCase();
     if (normalized.startsWith("memory/")) continue;
@@ -514,26 +572,37 @@ async function copyStrategyRoleFilesToDebateAgent(input: {
     if (normalized.startsWith("facts/")) continue;
     if (normalized.startsWith("votes/")) continue;
     if (normalized.startsWith("question/")) continue;
-    await query(
-      `insert into debate_agent_files (id, debate_agent_id, path, content, created_at, updated_at)
-       values ($1,$2,$3,$4,$5,$5)`,
-      [randomUUID(), input.debateAgentId, path, file.content ?? "", input.now]
-    );
+    await db
+      .insertInto("debate_agent_files")
+      .values({
+        id: randomUUID(),
+        debate_agent_id: input.debateAgentId,
+        path,
+        content: file.content ?? "",
+        created_at: input.now,
+        updated_at: input.now
+      })
+      .execute();
   }
 
-  await query(
-    `insert into debate_agent_files (id, debate_agent_id, path, content, created_at, updated_at)
-     values ($1,$2,$3,$4,$5,$5)
-     on conflict (debate_agent_id, path)
-     do update set content = excluded.content, updated_at = excluded.updated_at`,
-    [
-      randomUUID(),
-      input.debateAgentId,
-      "context/base_role.json",
-      JSON.stringify({ baseRole: input.roleName?.trim() || "Participant" }, null, 2),
-      input.now
-    ]
-  );
+  const baseRoleContent = JSON.stringify({ baseRole: input.roleName?.trim() || "Participant" }, null, 2);
+  await db
+    .insertInto("debate_agent_files")
+    .values({
+      id: randomUUID(),
+      debate_agent_id: input.debateAgentId,
+      path: "context/base_role.json",
+      content: baseRoleContent,
+      created_at: input.now,
+      updated_at: input.now
+    })
+    .onConflict((oc) =>
+      oc.columns(["debate_agent_id", "path"]).doUpdateSet({
+        content: baseRoleContent,
+        updated_at: input.now
+      })
+    )
+    .execute();
 }
 
 async function createDebateWithAgents(
@@ -601,19 +670,28 @@ async function copyWorkspaceFilesToDebate(input: {
   files: Array<{ path: string; content: string }>;
   now: string;
 }) {
+  const db = await ensureDb();
   for (const file of input.files) {
     const normalizedPath = String(file.path ?? "").replace(/\\/g, "/").replace(/^\/+/, "").trim();
     const debatePath = normalizedPath;
     if (!debatePath) continue;
-    await query(
-      `
-        insert into debate_files (debate_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (debate_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-      `,
-      [input.debateId, debatePath, String(file.content ?? ""), input.now]
-    );
+    const content = String(file.content ?? "");
+    await db
+      .insertInto("debate_files")
+      .values({
+        debate_id: input.debateId,
+        path: debatePath,
+        content,
+        created_at: input.now,
+        updated_at: input.now
+      })
+      .onConflict((oc) =>
+        oc.columns(["debate_id", "path"]).doUpdateSet({
+          content,
+          updated_at: input.now
+        })
+      )
+      .execute();
   }
 }
 
@@ -664,6 +742,7 @@ export async function createDebateFromStrategyBindings(
   });
 
   try {
+    const db = await ensureDb();
     const usedDisplayNames = new Set<string>();
     await copyStrategyDebateFiles(debate.id, uniqueRoleIds, now, {
       summaryAgentId: data.summaryAgentId ?? null
@@ -686,17 +765,21 @@ export async function createDebateFromStrategyBindings(
         now
       });
 
-      const debateAgentId = insertParticipant.rows[0]?.id;
+      const debateAgentId = insertParticipant?.id;
       if (!debateAgentId) {
         throw new AppError("INTERNAL_ERROR", 500, "Failed to create debate agent");
       }
 
       const role = rolesById.get(binding.roleId);
-      await query(
-        `insert into debate_agent_overrides (debate_agent_id, system_prompt, created_at, updated_at)
-         values ($1,$2,$3,$3)`,
-        [debateAgentId, role?.systemPrompt ?? null, now]
-      );
+      await db
+        .insertInto("debate_agent_overrides")
+        .values({
+          debate_agent_id: debateAgentId,
+          system_prompt: role?.systemPrompt ?? null,
+          created_at: now,
+          updated_at: now
+        })
+        .execute();
       await copyStrategyRoleFilesToDebateAgent({
         roleId: binding.roleId,
         debateAgentId,
@@ -723,27 +806,27 @@ export async function getDebateDetail(id: string) {
   const session = await requireSessionUser();
   const { debate, isOwner } = await getDebateForView(id, session.userId);
   const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debate.id);
-  const agentRows = await query<Record<string, unknown>>(
-    `
-      select da.id as debate_agent_id,
-             da.ai_agent_id,
-             da.display_name as display_name,
-             da.turn_order,
-             da.turn_count,
-             a.name as agent_name,
-             a.provider as agent_provider,
-             a.context_length as context_length,
-             a.max_input_tokens as max_input_tokens,
-             a.max_output_tokens as max_output_tokens
-        from debate_agents da
-        join ai_agents a on a.id = da.ai_agent_id
-       where da.debate_id = $1
-       order by da.turn_order asc
-    `,
-    [debate.id]
-  );
+  const db = await ensureDb();
+  const agentRows = await db
+    .selectFrom("debate_agents as da")
+    .innerJoin("ai_agents as a", "a.id", "da.ai_agent_id")
+    .select([
+      "da.id as debate_agent_id",
+      "da.ai_agent_id",
+      "da.display_name as display_name",
+      "da.turn_order",
+      "da.turn_count",
+      "a.name as agent_name",
+      "a.provider as agent_provider",
+      "a.context_length as context_length",
+      "a.max_input_tokens as max_input_tokens",
+      "a.max_output_tokens as max_output_tokens"
+    ])
+    .where("da.debate_id", "=", debate.id)
+    .orderBy("da.turn_order", "asc")
+    .execute();
 
-  const agents = agentRows.rows.map((item) => ({
+  const agents = agentRows.map((item) => ({
     id: String(item.ai_agent_id),
     debateAgentId: String(item.debate_agent_id),
     displayName: item.display_name ? String(item.display_name) : `Seat-${Number(item.turn_order)}`,
@@ -783,15 +866,18 @@ export async function updateDebateQuestion(id: string, input: unknown) {
   const data = updateDebateQuestionSchema.parse(input);
   const now = new Date().toISOString();
 
-  const existing = await query<{ status: string; question: string }>(
-    "select status, question from debates where id = $1 and user_id = $2",
-    [id, session.userId]
-  );
-  if ((existing.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const existing = await db
+    .selectFrom("debates")
+    .select(["status", "question"])
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .executeTakeFirst();
+  if (!existing) {
     throw new AppError("NOT_FOUND", 404, "Debate not found");
   }
-  const status = String(existing.rows[0].status ?? "");
-  const previousQuestion = String(existing.rows[0].question ?? "");
+  const status = String(existing.status ?? "");
+  const previousQuestion = String(existing.question ?? "");
   if (status === "running") {
     throw new AppError("CONFLICT", 409, "Please pause the debate before editing the question");
   }
@@ -799,15 +885,18 @@ export async function updateDebateQuestion(id: string, input: unknown) {
     throw new AppError("CONFLICT", 409, "Debate question cannot be edited in current status");
   }
 
-  const result = await query<Record<string, unknown>>(
-    `update debates
-        set question = $3,
-            updated_at = $4
-      where id = $1 and user_id = $2 and status in ('pending','paused')
-      returning *`,
-    [id, session.userId, data.question, now]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const result = await db
+    .updateTable("debates")
+    .set({
+      question: data.question,
+      updated_at: now
+    })
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .where("status", "in", ["pending", "paused"])
+    .returningAll()
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("CONFLICT", 409, "Debate question update failed");
   }
 
@@ -846,14 +935,17 @@ export async function updateDebateQuestion(id: string, input: unknown) {
     const versionPrefix = "question/versions/";
     const pad = (n: number) => String(n).padStart(4, "0");
 
-    const historyRes = await query<{ content: string }>(
-      "select content from debate_files where debate_id = $1 and path = $2 limit 1",
-      [id, historyPath]
-    );
+    const historyRes = await db
+      .selectFrom("debate_files")
+      .select("content")
+      .where("debate_id", "=", id)
+      .where("path", "=", historyPath)
+      .limit(1)
+      .executeTakeFirst();
     let history: HistoryItem[] = [];
-    if ((historyRes.rowCount ?? 0) === 1) {
+    if (historyRes) {
       try {
-        const parsed = JSON.parse(String(historyRes.rows[0].content ?? "")) as unknown;
+        const parsed = JSON.parse(String(historyRes.content ?? "")) as unknown;
         if (Array.isArray(parsed)) {
           history = parsed
             .map((item) => ({
@@ -870,15 +962,22 @@ export async function updateDebateQuestion(id: string, input: unknown) {
     // If no history yet, seed v0001 from previous question (best-effort).
     if (history.length === 0) {
       const seededPath = `${versionPrefix}v${pad(1)}.md`;
-      await query(
-        `
-          insert into debate_files (debate_id, path, content, created_at, updated_at)
-          values ($1, $2, $3, $4, $4)
-          on conflict (debate_id, path)
-          do update set content = excluded.content, updated_at = excluded.updated_at
-        `,
-        [id, seededPath, previousQuestion, now]
-      );
+      await db
+        .insertInto("debate_files")
+        .values({
+          debate_id: id,
+          path: seededPath,
+          content: previousQuestion,
+          created_at: now,
+          updated_at: now
+        })
+        .onConflict((oc) =>
+          oc.columns(["debate_id", "path"]).doUpdateSet({
+            content: previousQuestion,
+            updated_at: now
+          })
+        )
+        .execute();
       history.push({ version: 1, path: seededPath, at: now });
     }
 
@@ -886,26 +985,41 @@ export async function updateDebateQuestion(id: string, input: unknown) {
     const nextVersion = previousVersion + 1;
     const nextVersionPath = `${versionPrefix}v${pad(nextVersion)}.md`;
 
-    await query(
-      `
-        insert into debate_files (debate_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (debate_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-      `,
-      [id, nextVersionPath, data.question, now]
-    );
+    await db
+      .insertInto("debate_files")
+      .values({
+        debate_id: id,
+        path: nextVersionPath,
+        content: data.question,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["debate_id", "path"]).doUpdateSet({
+          content: data.question,
+          updated_at: now
+        })
+      )
+      .execute();
     history.push({ version: nextVersion, path: nextVersionPath, at: now });
 
-    await query(
-      `
-        insert into debate_files (debate_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (debate_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-      `,
-      [id, historyPath, JSON.stringify(history, null, 2), now]
-    );
+    const historyContent = JSON.stringify(history, null, 2);
+    await db
+      .insertInto("debate_files")
+      .values({
+        debate_id: id,
+        path: historyPath,
+        content: historyContent,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["debate_id", "path"]).doUpdateSet({
+          content: historyContent,
+          updated_at: now
+        })
+      )
+      .execute();
 
     const diffMarkdown = [
       "# QUESTION UPDATED",
@@ -922,20 +1036,27 @@ export async function updateDebateQuestion(id: string, input: unknown) {
       .join("\n")
       .trim();
 
-    await query(
-      `
-        insert into debate_files (debate_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (debate_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-      `,
-      [id, "question/latest_diff.md", diffMarkdown, now]
-    );
+    await db
+      .insertInto("debate_files")
+      .values({
+        debate_id: id,
+        path: "question/latest_diff.md",
+        content: diffMarkdown,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["debate_id", "path"]).doUpdateSet({
+          content: diffMarkdown,
+          updated_at: now
+        })
+      )
+      .execute();
   } catch (error) {
     if (!isMissingTableError(error, "debate_files")) throw error;
   }
 
-  return toListItem(normalizeDebateRow(result.rows[0]));
+  return toListItem(normalizeDebateRow(result));
 }
 
 export async function updateDebateSharing(id: string, input: unknown) {
@@ -944,20 +1065,22 @@ export async function updateDebateSharing(id: string, input: unknown) {
   const now = new Date().toISOString();
 
   try {
-    const result = await query<Record<string, unknown>>(
-      `update debates
-          set is_shared = $3,
-              updated_at = $4
-        where id = $1 and user_id = $2
-        returning *`,
-      [id, session.userId, data.isShared, now]
-    );
-
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const result = await db
+      .updateTable("debates")
+      .set({
+        is_shared: data.isShared,
+        updated_at: now
+      })
+      .where("id", "=", id)
+      .where("user_id", "=", session.userId)
+      .returningAll()
+      .executeTakeFirst();
+    if (!result) {
       throw new AppError("NOT_FOUND", 404, "Debate not found");
     }
 
-    return toListItem(normalizeDebateRow(result.rows[0]));
+    return toListItem(normalizeDebateRow(result));
   } catch (error) {
     if (isMissingColumnError(error, "is_shared")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing debates.is_shared column");
@@ -969,18 +1092,25 @@ export async function updateDebateSharing(id: string, input: unknown) {
 export async function deleteDebate(id: string) {
   const session = await requireSessionUser();
 
-  const existing = await query<{ status: string }>(
-    "select status from debates where id = $1 and user_id = $2",
-    [id, session.userId]
-  );
-  if ((existing.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const existing = await db
+    .selectFrom("debates")
+    .select("status")
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .executeTakeFirst();
+  if (!existing) {
     throw new AppError("NOT_FOUND", 404, "Debate not found");
   }
-  if (["pending", "running", "paused"].includes(String(existing.rows[0].status))) {
+  if (["pending", "running", "paused"].includes(String(existing.status))) {
     throw new AppError("CONFLICT", 409, "Please stop the debate before deleting");
   }
 
-  await query("delete from debates where id = $1 and user_id = $2", [id, session.userId]);
+  await db
+    .deleteFrom("debates")
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .execute();
   return { id };
 }
 
@@ -990,38 +1120,36 @@ export async function deleteStoppedDebates(options?: { maxCompletedRounds?: numb
     typeof options?.maxCompletedRounds === "number" && Number.isFinite(options.maxCompletedRounds)
       ? Math.max(0, Math.floor(options.maxCompletedRounds))
       : null;
-  const result = await query<{ id: string }>(
-    `
-      with target as (
-        select d.id
-          from debates d
-         where d.user_id = $1
-           and d.status = 'stopped'
-           and (
-             $2::int is null
-             or floor(
-               d.current_turn::numeric
-               / greatest(
-                   1,
-                   coalesce(
-                     (
-                       select count(*)::int
-                         from debate_agents da
-                        where da.debate_id = d.id
-                     ),
-                     0
-                   )
-                 )::numeric
-             ) < $2::int
-           )
-      )
-      delete from debates d
-      using target t
-      where d.id = t.id
-      returning d.id
-    `,
-    [session.userId, maxCompletedRounds]
-  );
+  const db = await ensureDb();
+  const result = await db.executeQuery<{ id: string }>(sql`
+    with target as (
+      select d.id
+        from debates d
+       where d.user_id = ${session.userId}
+         and d.status = 'stopped'
+         and (
+           ${maxCompletedRounds}::int is null
+           or floor(
+             d.current_turn::numeric
+             / greatest(
+                 1,
+                 coalesce(
+                   (
+                     select count(*)::int
+                       from debate_agents da
+                      where da.debate_id = d.id
+                   ),
+                   0
+                 )
+               )::numeric
+           ) < ${maxCompletedRounds}::int
+         )
+    )
+    delete from debates d
+    using target t
+    where d.id = t.id
+    returning d.id
+  `.compile(db));
   return {
     deletedCount: result.rows.length,
     ids: result.rows.map((row) => String(row.id))
@@ -1040,6 +1168,7 @@ export async function listDebateTurns(
   const session = await requireSessionUser();
   const { debate } = await getDebateForView(id, session.userId);
   const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debate.id);
+  const db = await ensureDb();
   const afterRaw = options?.afterTurnNumber ?? null;
   const afterTurnNumber = typeof afterRaw === "number" && Number.isFinite(afterRaw) && afterRaw >= 0 ? Math.floor(afterRaw) : null;
   const beforeRaw = options?.beforeTurnNumber ?? null;
@@ -1053,50 +1182,49 @@ export async function listDebateTurns(
   const isBackfill = beforeTurnNumber !== null;
   const isInitialRecentWindow = afterTurnNumber === null && beforeTurnNumber === null && limit !== null;
   const shouldQueryDescending = isBackfill || isInitialRecentWindow;
-  const countResult = await query<{ count: number }>(
-    "select count(*)::int as count from debate_agents where debate_id = $1",
-    [debate.id]
-  );
-  const participantCount = Math.max(1, Number(countResult.rows[0]?.count ?? 0) || 1);
-  const voteRoundRows = await query<{ path: string }>(
-    `
-      select path
-        from debate_files
-       where debate_id = $1
-         and path like 'votes/round-%'
-    `,
-    [debate.id]
-  );
+  const countResult = await db
+    .selectFrom("debate_agents")
+    .select(sql<number>`count(*)::int`.as("count"))
+    .where("debate_id", "=", debate.id)
+    .executeTakeFirst();
+  const participantCount = Math.max(1, Number(countResult?.count ?? 0) || 1);
+  const voteRoundRows = await db
+    .selectFrom("debate_files")
+    .select("path")
+    .where("debate_id", "=", debate.id)
+    .where("path", "like", "votes/round-%")
+    .execute();
   const closedVoteRounds = new Set<number>();
-  for (const row of voteRoundRows.rows) {
+  for (const row of voteRoundRows) {
     const match = String(row.path ?? "").replace(/\\/g, "/").match(/^votes\/round-([0-9]{1,6})\.json$/);
     if (!match) continue;
     const round = Number(match[1]);
     if (Number.isFinite(round) && round > 0) closedVoteRounds.add(Math.floor(round));
   }
-  const turnRows = await query<Record<string, unknown>>(
-    `
-      select t.*,
-             coalesce(da.display_name, a.name) as agent_name,
-             a.provider as agent_provider,
-             left(t.content, $4::int) as content_preview,
-             char_length(t.content) as content_length,
-             (t.structured_output is not null) as has_structured_output
-       from debate_turns t
-       join ai_agents a on a.id = t.ai_agent_id
-       left join debate_agents da on da.id = t.debate_agent_id
-       where t.debate_id = $1
-         and ($2::int is null or t.turn_number > $2::int)
-         and ($3::int is null or t.turn_number < $3::int)
-       order by t.turn_number ${shouldQueryDescending ? "desc" : "asc"}
-       ${limit ? `limit $5::int` : ""}
-    `,
-    limit
-      ? [debate.id, afterTurnNumber, beforeTurnNumber, previewChars, limit + 1]
-      : [debate.id, afterTurnNumber, beforeTurnNumber, previewChars]
-  );
-
-  let rows = turnRows.rows;
+  let turnQuery = db
+    .selectFrom("debate_turns as t")
+    .innerJoin("ai_agents as a", "a.id", "t.ai_agent_id")
+    .leftJoin("debate_agents as da", "da.id", "t.debate_agent_id")
+    .selectAll("t")
+    .select([
+      sql<string>`coalesce(da.display_name, a.name)`.as("agent_name"),
+      "a.provider as agent_provider",
+      sql<string>`left(t.content, ${previewChars})`.as("content_preview"),
+      sql<number>`char_length(t.content)`.as("content_length"),
+      sql<boolean>`(t.structured_output is not null)`.as("has_structured_output")
+    ])
+    .where("t.debate_id", "=", debate.id);
+  if (afterTurnNumber !== null) {
+    turnQuery = turnQuery.where("t.turn_number", ">", afterTurnNumber);
+  }
+  if (beforeTurnNumber !== null) {
+    turnQuery = turnQuery.where("t.turn_number", "<", beforeTurnNumber);
+  }
+  turnQuery = turnQuery.orderBy("t.turn_number", shouldQueryDescending ? "desc" : "asc");
+  if (limit) {
+    turnQuery = turnQuery.limit(limit + 1);
+  }
+  let rows = await turnQuery.execute();
   const hasMore = limit ? rows.length > limit : false;
   if (limit && rows.length > limit) rows = rows.slice(0, limit);
   if (shouldQueryDescending) rows = rows.reverse();
@@ -1155,26 +1283,25 @@ export async function getDebateTurnDetail(id: string, turnNumber: number) {
   const session = await requireSessionUser();
   const { debate } = await getDebateForView(id, session.userId);
   const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debate.id);
+  const db = await ensureDb();
   if (!Number.isFinite(turnNumber) || turnNumber <= 0) {
     throw new AppError("VALIDATION_ERROR", 400, "Invalid turn number");
   }
   const safeTurnNumber = Math.max(1, Math.floor(turnNumber));
-  const countResult = await query<{ count: number }>(
-    "select count(*)::int as count from debate_agents where debate_id = $1",
-    [debate.id]
-  );
-  const participantCount = Math.max(1, Number(countResult.rows[0]?.count ?? 0) || 1);
-  const voteRoundRows = await query<{ path: string }>(
-    `
-      select path
-        from debate_files
-       where debate_id = $1
-         and path like 'votes/round-%'
-    `,
-    [debate.id]
-  );
+  const countResult = await db
+    .selectFrom("debate_agents")
+    .select(sql<number>`count(*)::int`.as("count"))
+    .where("debate_id", "=", debate.id)
+    .executeTakeFirst();
+  const participantCount = Math.max(1, Number(countResult?.count ?? 0) || 1);
+  const voteRoundRows = await db
+    .selectFrom("debate_files")
+    .select("path")
+    .where("debate_id", "=", debate.id)
+    .where("path", "like", "votes/round-%")
+    .execute();
   const closedVoteRounds = new Set<number>();
-  for (const voteRow of voteRoundRows.rows) {
+  for (const voteRow of voteRoundRows) {
     const match = String(voteRow.path ?? "").replace(/\\/g, "/").match(/^votes\/round-([0-9]{1,6})\.json$/);
     if (!match) continue;
     const round = Number(match[1]);
@@ -1188,27 +1315,26 @@ export async function getDebateTurnDetail(id: string, turnNumber: number) {
     if (closedVoteRounds.has(actualRoundNumber)) continue;
     spokenRounds += 1;
   }
-  const result = await query<Record<string, unknown>>(
-    `
-      select t.*,
-             coalesce(da.display_name, a.name) as agent_name,
-             a.provider as agent_provider,
-             left(t.content, $3::int) as content_preview,
-             char_length(t.content) as content_length,
-             (t.structured_output is not null) as has_structured_output
-        from debate_turns t
-        join ai_agents a on a.id = t.ai_agent_id
-        left join debate_agents da on da.id = t.debate_agent_id
-       where t.debate_id = $1
-         and t.turn_number = $2
-       limit 1
-    `,
-    [debate.id, safeTurnNumber, 220]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const result = await db
+    .selectFrom("debate_turns as t")
+    .innerJoin("ai_agents as a", "a.id", "t.ai_agent_id")
+    .leftJoin("debate_agents as da", "da.id", "t.debate_agent_id")
+    .selectAll("t")
+    .select([
+      sql<string>`coalesce(da.display_name, a.name)`.as("agent_name"),
+      "a.provider as agent_provider",
+      sql<string>`left(t.content, 220)`.as("content_preview"),
+      sql<number>`char_length(t.content)`.as("content_length"),
+      sql<boolean>`(t.structured_output is not null)`.as("has_structured_output")
+    ])
+    .where("t.debate_id", "=", debate.id)
+    .where("t.turn_number", "=", safeTurnNumber)
+    .limit(1)
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("NOT_FOUND", 404, "Turn not found");
   }
-  const row = result.rows[0];
+  const row = result;
   return {
     id: String(row.id),
     turnNumber: safeTurnNumber,
@@ -1256,19 +1382,17 @@ export async function listDebateAllFiles(debateId: string): Promise<DebateAllFil
   }
 
   const entries: DebateAllFileEntry[] = [];
+  const db = await ensureDb();
 
   try {
-    const debateFiles = await query<{ path: string; updated_at: string | null }>(
-      `
-        select f.path, f.updated_at
-          from debate_files f
-         where f.debate_id = $1
-         order by f.path asc
-         limit 5000
-      `,
-      [debateId]
-    );
-    for (const row of debateFiles.rows) {
+    const debateFiles = await db
+      .selectFrom("debate_files as f")
+      .select(["f.path", "f.updated_at"])
+      .where("f.debate_id", "=", debateId)
+      .orderBy("f.path", "asc")
+      .limit(5000)
+      .execute();
+    for (const row of debateFiles) {
       entries.push({
         scope: "debate",
         path: String(row.path),
@@ -1283,22 +1407,23 @@ export async function listDebateAllFiles(debateId: string): Promise<DebateAllFil
   }
 
   try {
-    const agentFiles = await query<{ debate_agent_id: string; turn_order: number | null; display_name: string | null; path: string; updated_at: string | null }>(
-      `
-        select da.id as debate_agent_id,
-               da.turn_order as turn_order,
-               da.display_name as display_name,
-               f.path as path,
-               f.updated_at as updated_at
-          from debate_agent_files f
-          join debate_agents da on da.id = f.debate_agent_id
-         where da.debate_id = $1
-         order by da.turn_order asc nulls last, da.display_name asc nulls last, f.path asc
-         limit 20000
-      `,
-      [debateId]
-    );
-    for (const row of agentFiles.rows) {
+    const agentFiles = await db
+      .selectFrom("debate_agent_files as f")
+      .innerJoin("debate_agents as da", "da.id", "f.debate_agent_id")
+      .select([
+        "da.id as debate_agent_id",
+        "da.turn_order as turn_order",
+        "da.display_name as display_name",
+        "f.path as path",
+        "f.updated_at as updated_at"
+      ])
+      .where("da.debate_id", "=", debateId)
+      .orderBy("da.turn_order", "asc")
+      .orderBy(sql`da.display_name`, "asc")
+      .orderBy("f.path", "asc")
+      .limit(20000)
+      .execute();
+    for (const row of agentFiles) {
       entries.push({
         scope: "agent",
         debateAgentId: String(row.debate_agent_id),
@@ -1327,18 +1452,16 @@ export async function listDebateFiles(id: string, prefix?: string) {
   }
 
   try {
-    const result = await query<{ path: string }>(
-      `
-        select f.path
-          from debate_files f
-         where f.debate_id = $1
-           and f.path like $2
-         order by f.path asc
-         limit 500
-      `,
-      [id, `${(prefix ?? "").trim()}%`]
-    );
-    return result.rows.map((row) => String(row.path));
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_files as f")
+      .select("f.path")
+      .where("f.debate_id", "=", id)
+      .where("f.path", "like", `${(prefix ?? "").trim()}%`)
+      .orderBy("f.path", "asc")
+      .limit(500)
+      .execute();
+    return result.map((row) => String(row.path));
   } catch (error) {
     if (isMissingTableError(error, "debate_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_files table");
@@ -1355,24 +1478,22 @@ export async function readDebateFile(id: string, path: string) {
   }
 
   try {
-    const result = await query<{ content: string; updated_at: string; version: number }>(
-      `
-        select f.content, f.updated_at, f.version
-          from debate_files f
-         where f.debate_id = $1
-           and f.path = $2
-         limit 1
-      `,
-      [id, path]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_files as f")
+      .select(["f.content", "f.updated_at", "f.version"])
+      .where("f.debate_id", "=", id)
+      .where("f.path", "=", path)
+      .limit(1)
+      .executeTakeFirst();
+    if (!result) {
       throw new AppError("NOT_FOUND", 404, "File not found");
     }
     return {
       path,
-      content: String(result.rows[0].content ?? ""),
-      updatedAt: String(result.rows[0].updated_at ?? ""),
-      version: Number(result.rows[0].version ?? 1) || 1
+      content: String(result.content ?? ""),
+      updatedAt: String(result.updated_at ?? ""),
+      version: Number(result.version ?? 1) || 1
     };
   } catch (error) {
     if (isMissingTableError(error, "debate_files")) {
@@ -1390,20 +1511,18 @@ export async function listDebateAgentFiles(debateId: string, debateAgentId: stri
   }
 
   try {
-    const result = await query<{ path: string }>(
-      `
-        select f.path
-          from debate_agent_files f
-          join debate_agents da on da.id = f.debate_agent_id
-         where da.debate_id = $1
-           and f.debate_agent_id = $2
-           and f.path like $3
-         order by f.path asc
-         limit 500
-      `,
-      [debateId, debateAgentId, `${(prefix ?? "").trim()}%`]
-    );
-    return result.rows.map((row) => String(row.path));
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_agent_files as f")
+      .innerJoin("debate_agents as da", "da.id", "f.debate_agent_id")
+      .select("f.path")
+      .where("da.debate_id", "=", debateId)
+      .where("f.debate_agent_id", "=", debateAgentId)
+      .where("f.path", "like", `${(prefix ?? "").trim()}%`)
+      .orderBy("f.path", "asc")
+      .limit(500)
+      .execute();
+    return result.map((row) => String(row.path));
   } catch (error) {
     if (isMissingTableError(error, "debate_agent_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_agent_files table");
@@ -1420,25 +1539,23 @@ export async function readDebateAgentFile(debateId: string, debateAgentId: strin
   }
 
   try {
-    const result = await query<{ content: string; updated_at: string }>(
-      `
-        select f.content, f.updated_at
-          from debate_agent_files f
-          join debate_agents da on da.id = f.debate_agent_id
-         where da.debate_id = $1
-           and f.debate_agent_id = $2
-           and f.path = $3
-         limit 1
-      `,
-      [debateId, debateAgentId, path]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("debate_agent_files as f")
+      .innerJoin("debate_agents as da", "da.id", "f.debate_agent_id")
+      .select(["f.content", "f.updated_at"])
+      .where("da.debate_id", "=", debateId)
+      .where("f.debate_agent_id", "=", debateAgentId)
+      .where("f.path", "=", path)
+      .limit(1)
+      .executeTakeFirst();
+    if (!result) {
       throw new AppError("NOT_FOUND", 404, "File not found");
     }
     return {
       path,
-      content: String(result.rows[0].content ?? ""),
-      updatedAt: String(result.rows[0].updated_at ?? "")
+      content: String(result.content ?? ""),
+      updatedAt: String(result.updated_at ?? "")
     };
   } catch (error) {
     if (isMissingTableError(error, "debate_agent_files")) {
@@ -1471,7 +1588,8 @@ export async function listDebateFileActivity(
   const beforeId = typeof options?.beforeId === "string" && options.beforeId.trim() ? options.beforeId.trim() : null;
 
   try {
-    const result = await query<{
+    const db = await ensureDb();
+    const result = await db.executeQuery<{
       id: string;
       action: DebateFileActivityAction;
       scope: DebateFileActivityScope;
@@ -1491,80 +1609,74 @@ export async function listDebateFileActivity(
       actor_name: string | null;
       actor_seat_name: string | null;
       target_seat_name: string | null;
-    }>(
-      `
-        with cursor_row as (
-          select created_at, id
-            from debate_file_activity_logs
-           where id = $4
-           limit 1
-        )
-        select
-          l.id,
-          l.action,
-          l.scope,
-          l.path,
-          l.debate_agent_id,
-          l.target_debate_agent_id,
-          l.turn_number,
-          l.round_number,
-          l.created_at,
-          l.write_mode,
-          l.before_version,
-          l.after_version,
-          l.before_content,
-          l.after_content,
-          l.target_heading,
-          l.reason,
-          a.name as actor_name,
-          da.display_name as actor_seat_name,
-          target_da.display_name as target_seat_name
-        from debate_file_activity_logs l
-        join debate_agents da on da.id = l.debate_agent_id
-        join ai_agents a on a.id = da.ai_agent_id
-        left join debate_agents target_da on target_da.id = l.target_debate_agent_id
-        where l.debate_id = $1
-          and (
-            $2::text is null
-            or ($2::text = 'write' and l.action = 'write' and (l.reason is null or l.reason not like 'summarizer:%'))
-            or ($2::text = 'summarizer_write' and l.action = 'write' and l.reason like 'summarizer:%')
-            or ($2::text = 'read' and l.action <> 'write')
-          )
-          and ($3::text is null or l.path = $3::text)
-          and (
-            $4::uuid is null
-            or exists (
-              select 1
-                from cursor_row c
-               where (l.created_at, l.id) < (c.created_at, c.id)
-            )
-          )
-        order by l.created_at desc, l.id desc
-        limit $5
-      `,
-      [debateId, action, path, beforeId, limit + 1]
-    );
-
-    const countsResult = await query<{ action: string; count: number }>(
-      `
-        select
-          case
-            when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
-            when action = 'write' then 'write'
-            else 'read'
-          end as action,
-          count(*)::int as count
+    }>(sql`
+      with cursor_row as (
+        select created_at, id
           from debate_file_activity_logs
-         where debate_id = $1
-         group by
-          case
-            when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
-            when action = 'write' then 'write'
-            else 'read'
-          end
-      `,
-      [debateId]
-    );
+         where id = ${beforeId}
+         limit 1
+      )
+      select
+        l.id,
+        l.action,
+        l.scope,
+        l.path,
+        l.debate_agent_id,
+        l.target_debate_agent_id,
+        l.turn_number,
+        l.round_number,
+        l.created_at,
+        l.write_mode,
+        l.before_version,
+        l.after_version,
+        l.before_content,
+        l.after_content,
+        l.target_heading,
+        l.reason,
+        a.name as actor_name,
+        da.display_name as actor_seat_name,
+        target_da.display_name as target_seat_name
+      from debate_file_activity_logs l
+      join debate_agents da on da.id = l.debate_agent_id
+      join ai_agents a on a.id = da.ai_agent_id
+      left join debate_agents target_da on target_da.id = l.target_debate_agent_id
+      where l.debate_id = ${debateId}
+        and (
+          ${action}::text is null
+          or (${action}::text = 'write' and l.action = 'write' and (l.reason is null or l.reason not like 'summarizer:%'))
+          or (${action}::text = 'summarizer_write' and l.action = 'write' and l.reason like 'summarizer:%')
+          or (${action}::text = 'read' and l.action <> 'write')
+        )
+        and (${path}::text is null or l.path = ${path}::text)
+        and (
+          ${beforeId}::uuid is null
+          or exists (
+            select 1
+              from cursor_row c
+             where (l.created_at, l.id) < (c.created_at, c.id)
+          )
+        )
+      order by l.created_at desc, l.id desc
+      limit ${limit + 1}
+    `.compile(db));
+
+    const countsResult = await db.executeQuery<{ action: string; count: number }>(sql`
+      select
+        case
+          when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
+          when action = 'write' then 'write'
+          else 'read'
+        end as action,
+        count(*)::int as count
+        from debate_file_activity_logs
+       where debate_id = ${debateId}
+       group by
+        case
+          when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
+          when action = 'write' then 'write'
+          else 'read'
+        end
+    `.compile(db));
 
     const hasMore = result.rows.length > limit;
     const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
@@ -1637,7 +1749,8 @@ export async function getDebateFileActivityDetail(debateId: string, entryId: str
   }
 
   try {
-    const result = await query<{
+    const db = await ensureDb();
+    const result = await db.executeQuery<{
       id: string;
       action: DebateFileActivityAction;
       scope: DebateFileActivityScope;
@@ -1657,39 +1770,36 @@ export async function getDebateFileActivityDetail(debateId: string, entryId: str
       actor_name: string | null;
       actor_seat_name: string | null;
       target_seat_name: string | null;
-    }>(
-      `
-        select
-          l.id,
-          l.action,
-          l.scope,
-          l.path,
-          l.debate_agent_id,
-          l.target_debate_agent_id,
-          l.turn_number,
-          l.round_number,
-          l.created_at,
-          l.write_mode,
-          l.before_version,
-          l.after_version,
-          l.before_content,
-          l.after_content,
-          l.target_heading,
-          l.reason,
-          a.name as actor_name,
-          da.display_name as actor_seat_name,
-          target_da.display_name as target_seat_name
-        from debate_file_activity_logs l
-        join debate_agents da on da.id = l.debate_agent_id
-        join ai_agents a on a.id = da.ai_agent_id
-        left join debate_agents target_da on target_da.id = l.target_debate_agent_id
-        where l.debate_id = $1
-          and l.id = $2
-        limit 1
-      `,
-      [debateId, entryId]
-    );
-    if ((result.rowCount ?? 0) !== 1) {
+    }>(sql`
+      select
+        l.id,
+        l.action,
+        l.scope,
+        l.path,
+        l.debate_agent_id,
+        l.target_debate_agent_id,
+        l.turn_number,
+        l.round_number,
+        l.created_at,
+        l.write_mode,
+        l.before_version,
+        l.after_version,
+        l.before_content,
+        l.after_content,
+        l.target_heading,
+        l.reason,
+        a.name as actor_name,
+        da.display_name as actor_seat_name,
+        target_da.display_name as target_seat_name
+      from debate_file_activity_logs l
+      join debate_agents da on da.id = l.debate_agent_id
+      join ai_agents a on a.id = da.ai_agent_id
+      left join debate_agents target_da on target_da.id = l.target_debate_agent_id
+      where l.debate_id = ${debateId}
+        and l.id = ${entryId}
+      limit 1
+    `.compile(db));
+    if ((result.rows.length ?? 0) !== 1) {
       throw new AppError("NOT_FOUND", 404, "File activity not found");
     }
     const row = result.rows[0];
@@ -1747,33 +1857,31 @@ export async function startDebateSegment(id: string, input: unknown) {
   const body = input as { reason?: unknown };
   const reason = typeof body?.reason === "string" ? body.reason.trim() : "";
 
-  const debateRes = await query<{ status: string; current_turn: number; question: string }>(
-    "select status, current_turn, question from debates where id = $1 and user_id = $2",
-    [id, session.userId]
-  );
-  if ((debateRes.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const debateRes = await db
+    .selectFrom("debates")
+    .select(["status", "current_turn", "question"])
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .executeTakeFirst();
+  if (!debateRes) {
     throw new AppError("NOT_FOUND", 404, "Debate not found");
   }
 
-  const status = String(debateRes.rows[0].status ?? "");
-  const currentTurn = Number(debateRes.rows[0].current_turn ?? 0);
-  const question = String(debateRes.rows[0].question ?? "");
+  const status = String(debateRes.status ?? "");
+  const currentTurn = Number(debateRes.current_turn ?? 0);
+  const question = String(debateRes.question ?? "");
   if (status !== "paused") {
     throw new AppError("CONFLICT", 409, "Please pause the debate before starting a new segment");
   }
 
-  const participants = await query<{ debate_agent_id: string; turn_order: number; display_name: string | null }>(
-    `
-      select da.id as debate_agent_id,
-             da.turn_order,
-             da.display_name as display_name
-        from debate_agents da
-       where da.debate_id = $1
-       order by da.turn_order asc
-    `,
-    [id]
-  );
-  const participantCount = participants.rows.length;
+  const participants = await db
+    .selectFrom("debate_agents as da")
+    .select(["da.id as debate_agent_id", "da.turn_order", "da.display_name as display_name"])
+    .where("da.debate_id", "=", id)
+    .orderBy("da.turn_order", "asc")
+    .execute();
+  const participantCount = participants.length;
   if (participantCount < 2) {
     throw new AppError("VALIDATION_ERROR", 400, "Debate requires at least 2 agents");
   }
@@ -1787,11 +1895,14 @@ export async function startDebateSegment(id: string, input: unknown) {
 
   let workflow: ReturnType<typeof normalizeDebateWorkflow> | null = null;
   try {
-    const workflowRes = await query<{ content: string }>(
-      "select content from debate_files where debate_id = $1 and path = 'workflow.json' limit 1",
-      [id]
-    );
-    const workflowRaw = (workflowRes.rowCount ?? 0) === 1 ? String(workflowRes.rows[0]?.content ?? "") : "";
+    const workflowRes = await db
+      .selectFrom("debate_files")
+      .select("content")
+      .where("debate_id", "=", id)
+      .where("path", "=", "workflow.json")
+      .limit(1)
+      .executeTakeFirst();
+    const workflowRaw = workflowRes ? String(workflowRes.content ?? "") : "";
     workflow = workflowRaw ? normalizeDebateWorkflow(JSON.parse(workflowRaw) as unknown) : null;
   } catch {
     workflow = null;
@@ -1799,21 +1910,28 @@ export async function startDebateSegment(id: string, input: unknown) {
 
   let directive = "";
   try {
-    const directiveRes = await query<{ content: string }>(
-      "select content from debate_files where debate_id = $1 and path = 'votes/decision.md' limit 1",
-      [id]
-    );
-    directive = (directiveRes.rowCount ?? 0) === 1 ? String(directiveRes.rows[0]?.content ?? "") : "";
+    const directiveRes = await db
+      .selectFrom("debate_files")
+      .select("content")
+      .where("debate_id", "=", id)
+      .where("path", "=", "votes/decision.md")
+      .limit(1)
+      .executeTakeFirst();
+    directive = directiveRes ? String(directiveRes.content ?? "") : "";
   } catch {
     directive = "";
   }
 
   const checkpointPrefix = "context/checkpoints/seg-";
-  const existing = await query<{ path: string }>(
-    "select path from debate_files where debate_id = $1 and path like $2 order by path asc limit 200",
-    [id, `${checkpointPrefix}%`]
-  );
-  const nextIndex = (existing.rowCount ?? 0) + 1;
+  const existing = await db
+    .selectFrom("debate_files")
+    .select("path")
+    .where("debate_id", "=", id)
+    .where("path", "like", `${checkpointPrefix}%`)
+    .orderBy("path", "asc")
+    .limit(200)
+    .execute();
+  const nextIndex = existing.length + 1;
   const pad = (n: number) => String(n).padStart(4, "0");
   const seg = `seg-${pad(nextIndex)}`;
   const checkpointPath = `${checkpointPrefix}${pad(nextIndex)}.md`;
@@ -1831,7 +1949,7 @@ export async function startDebateSegment(id: string, input: unknown) {
   lines.push(question ? question : "(empty)");
   lines.push("");
   lines.push("## Seats (current order)");
-  for (const row of participants.rows) {
+  for (const row of participants) {
     lines.push(`- Seat-${Number(row.turn_order)}: ${String(row.display_name ?? `Seat-${Number(row.turn_order)}`)}`);
   }
 
@@ -1857,33 +1975,55 @@ export async function startDebateSegment(id: string, input: unknown) {
   const checkpointContent = lines.join("\n").trim() + "\n";
 
   try {
-    await query(
-      `
-        insert into debate_files (debate_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (debate_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-      `,
-      [id, "context/window.json", JSON.stringify({ enabled: true, minTurnNumber, at: now, seg, reason }, null, 2), now]
-    );
-    await query(
-      `
-        insert into debate_files (debate_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (debate_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-      `,
-      [id, "context/segment.md", checkpointContent, now]
-    );
-    await query(
-      `
-        insert into debate_files (debate_id, path, content, created_at, updated_at)
-        values ($1, $2, $3, $4, $4)
-        on conflict (debate_id, path)
-        do update set content = excluded.content, updated_at = excluded.updated_at
-      `,
-      [id, checkpointPath, checkpointContent, now]
-    );
+    const windowContent = JSON.stringify({ enabled: true, minTurnNumber, at: now, seg, reason }, null, 2);
+    await db
+      .insertInto("debate_files")
+      .values({
+        debate_id: id,
+        path: "context/window.json",
+        content: windowContent,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["debate_id", "path"]).doUpdateSet({
+          content: windowContent,
+          updated_at: now
+        })
+      )
+      .execute();
+    await db
+      .insertInto("debate_files")
+      .values({
+        debate_id: id,
+        path: "context/segment.md",
+        content: checkpointContent,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["debate_id", "path"]).doUpdateSet({
+          content: checkpointContent,
+          updated_at: now
+        })
+      )
+      .execute();
+    await db
+      .insertInto("debate_files")
+      .values({
+        debate_id: id,
+        path: checkpointPath,
+        content: checkpointContent,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["debate_id", "path"]).doUpdateSet({
+          content: checkpointContent,
+          updated_at: now
+        })
+      )
+      .execute();
   } catch (error) {
     if (isMissingTableError(error, "debate_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_files table");
@@ -1897,163 +2037,182 @@ export async function startDebateSegment(id: string, input: unknown) {
 export async function startDebate(id: string) {
   const session = await requireSessionUser();
 
-  const before = await query<{ status: string; current_turn: number }>(
-    "select status, current_turn from debates where id = $1 and user_id = $2",
-    [id, session.userId]
-  );
-  if ((before.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const before = await db
+    .selectFrom("debates")
+    .select(["status", "current_turn"])
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .executeTakeFirst();
+  if (!before) {
     throw new AppError("NOT_FOUND", 404, "Debate not found");
   }
-  const beforeStatus = String(before.rows[0].status ?? "");
-  const beforeTurn = Number(before.rows[0].current_turn ?? 0);
+  const beforeStatus = String(before.status ?? "");
+  const beforeTurn = Number(before.current_turn ?? 0);
 
   const now = new Date().toISOString();
-  const result = await query<Record<string, unknown>>(
-    `update debates
-        set status = 'running',
-            started_at = coalesce(started_at, $3),
-            runtime_notice_kind = null,
-            runtime_notice_message = null,
-            runtime_notice_at = null,
-            updated_at = $3
-      where id = $1 and user_id = $2 and status in ('pending','paused')
-      returning *`,
-    [id, session.userId, now]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const result = await db
+    .updateTable("debates")
+    .set({
+      status: "running",
+      started_at: sql`coalesce(started_at, ${now})`,
+      runtime_notice_kind: null,
+      runtime_notice_message: null,
+      runtime_notice_at: null,
+      updated_at: now
+    })
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .where("status", "in", ["pending", "paused"])
+    .returningAll()
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("CONFLICT", 409, "Debate cannot be started");
   }
 
   // Safety: older versions could accidentally seed memory/* into a brand-new debate (via strategy role files).
   // Ensure a new debate starts with a fresh context.
   if (beforeStatus === "pending" && beforeTurn === 0) {
-    await query(
-      `
-        delete from debate_agent_files f
-        using debate_agents da
-        where f.debate_agent_id = da.id
-          and da.debate_id = $1
-          and lower(replace(f.path, '\\\\', '/')) like 'memory/%'
-      `,
-      [id]
-    );
+    await db.executeQuery(sql`
+      delete from debate_agent_files f
+      using debate_agents da
+      where f.debate_agent_id = da.id
+        and da.debate_id = ${id}
+        and lower(replace(f.path, '\\\\', '/')) like 'memory/%'
+    `.compile(db));
 
     // Also clean any other debate-internal files that should never be seeded from strategy role files.
-    await query(
-      `
-        delete from debate_agent_files f
-        using debate_agents da
-        where f.debate_agent_id = da.id
-          and da.debate_id = $1
-          and (
-            lower(replace(f.path, '\\\\', '/')) like 'debate/%'
-            or (
-              lower(replace(f.path, '\\\\', '/')) like 'context/%'
-              and lower(replace(f.path, '\\\\', '/')) <> 'context/base_role.json'
-            )
-            or lower(replace(f.path, '\\\\', '/')) like 'facts/%'
-            or lower(replace(f.path, '\\\\', '/')) like 'votes/%'
-            or lower(replace(f.path, '\\\\', '/')) like 'question/%'
+    await db.executeQuery(sql`
+      delete from debate_agent_files f
+      using debate_agents da
+      where f.debate_agent_id = da.id
+        and da.debate_id = ${id}
+        and (
+          lower(replace(f.path, '\\\\', '/')) like 'debate/%'
+          or (
+            lower(replace(f.path, '\\\\', '/')) like 'context/%'
+            and lower(replace(f.path, '\\\\', '/')) <> 'context/base_role.json'
           )
-      `,
-      [id]
-    );
+          or lower(replace(f.path, '\\\\', '/')) like 'facts/%'
+          or lower(replace(f.path, '\\\\', '/')) like 'votes/%'
+          or lower(replace(f.path, '\\\\', '/')) like 'question/%'
+        )
+    `.compile(db));
 
-    await query("delete from debate_files where debate_id = $1 and path = $2", [id, "facts/board.md"]);
-    await query(
-      `
-        delete from debate_files
-         where debate_id = $1
-           and (
-             lower(replace(path, '\\\\', '/')) like 'context/%'
-             or lower(replace(path, '\\\\', '/')) like 'facts/%'
-             or lower(replace(path, '\\\\', '/')) like 'votes/%'
-             or lower(replace(path, '\\\\', '/')) like 'question/%'
-           )
-      `,
-      [id]
-    );
+    await db
+      .deleteFrom("debate_files")
+      .where("debate_id", "=", id)
+      .where("path", "=", "facts/board.md")
+      .execute();
+    await db.executeQuery(sql`
+      delete from debate_files
+       where debate_id = ${id}
+         and (
+           lower(replace(path, '\\\\', '/')) like 'context/%'
+           or lower(replace(path, '\\\\', '/')) like 'facts/%'
+           or lower(replace(path, '\\\\', '/')) like 'votes/%'
+           or lower(replace(path, '\\\\', '/')) like 'question/%'
+         )
+    `.compile(db));
   }
 
   void runDebate(id, session.userId);
-  return toListItem(normalizeDebateRow(result.rows[0]));
+  return toListItem(normalizeDebateRow(result));
 }
 
 export async function pauseDebate(id: string) {
   const session = await requireSessionUser();
-  const result = await query<Record<string, unknown>>(
-    `update debates
-        set status = 'paused',
-            updated_at = $3
-      where id = $1 and user_id = $2 and status = 'running'
-      returning *`,
-    [id, session.userId, new Date().toISOString()]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const now = new Date().toISOString();
+  const db = await ensureDb();
+  const result = await db
+    .updateTable("debates")
+    .set({
+      status: "paused",
+      updated_at: now
+    })
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .where("status", "=", "running")
+    .returningAll()
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("CONFLICT", 409, "Only running debates can be paused");
   }
-  return toListItem(normalizeDebateRow(result.rows[0]));
+  return toListItem(normalizeDebateRow(result));
 }
 
 export async function resumeDebate(id: string) {
   const session = await requireSessionUser();
-  const result = await query<Record<string, unknown>>(
-    `update debates
-        set status = 'running',
-            runtime_notice_kind = null,
-            runtime_notice_message = null,
-            runtime_notice_at = null,
-            updated_at = $3
-      where id = $1 and user_id = $2 and status = 'paused'
-      returning *`,
-    [id, session.userId, new Date().toISOString()]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const now = new Date().toISOString();
+  const db = await ensureDb();
+  const result = await db
+    .updateTable("debates")
+    .set({
+      status: "running",
+      runtime_notice_kind: null,
+      runtime_notice_message: null,
+      runtime_notice_at: null,
+      updated_at: now
+    })
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .where("status", "=", "paused")
+    .returningAll()
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("CONFLICT", 409, "Only paused debates can be resumed");
   }
   void runDebate(id, session.userId);
-  return toListItem(normalizeDebateRow(result.rows[0]));
+  return toListItem(normalizeDebateRow(result));
 }
 
 export async function repairDebate(id: string) {
   const session = await requireSessionUser();
   const now = new Date().toISOString();
-  const result = await query<Record<string, unknown>>(
-    `update debates
-        set status = 'paused',
-            finished_at = null,
-            stopped_reason = null,
-            runtime_notice_kind = 'interrupted',
-            runtime_notice_message = $3,
-            runtime_notice_at = $4,
-            updated_at = $4
-      where id = $1 and user_id = $2 and status = 'failed'
-      returning *`,
-    [id, session.userId, "该辩论已从 failed 修复为 paused；请确认状态后手动恢复运行", now]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const result = await db
+    .updateTable("debates")
+    .set({
+      status: "paused",
+      finished_at: null,
+      stopped_reason: null,
+      runtime_notice_kind: "interrupted",
+      runtime_notice_message: "该辩论已从 failed 修复为 paused；请确认状态后手动恢复运行",
+      runtime_notice_at: now,
+      updated_at: now
+    })
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .where("status", "=", "failed")
+    .returningAll()
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("CONFLICT", 409, "Only failed debates can be repaired");
   }
-  return toListItem(normalizeDebateRow(result.rows[0]));
+  return toListItem(normalizeDebateRow(result));
 }
 
 export async function stopDebate(id: string, reason: string) {
   const session = await requireSessionUser();
   const now = new Date().toISOString();
-  const result = await query<Record<string, unknown>>(
-    `update debates
-        set status = 'stopped',
-            stopped_reason = $3,
-            finished_at = $4,
-            updated_at = $4
-      where id = $1 and user_id = $2 and status in ('pending','running','paused')
-      returning *`,
-    [id, session.userId, reason, now]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const result = await db
+    .updateTable("debates")
+    .set({
+      status: "stopped",
+      stopped_reason: reason,
+      finished_at: now,
+      updated_at: now
+    })
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .where("status", "in", ["pending", "running", "paused"])
+    .returningAll()
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("CONFLICT", 409, "Debate is already finished");
   }
-  return toListItem(normalizeDebateRow(result.rows[0]));
+  return toListItem(normalizeDebateRow(result));
 }
 
 export async function appendAgentToDebate(id: string, agentId: string) {
@@ -2062,35 +2221,51 @@ export async function appendAgentToDebate(id: string, agentId: string) {
     throw new AppError("CONFLICT", 409, "Only running/paused debates can add new agents");
   }
 
-  const agent = await query<{ id: string }>(
-    "select id from ai_agents where user_id = $1 and deleted_at is null and id = $2",
-    [session.userId, agentId]
-  );
-  if ((agent.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const agent = await db
+    .selectFrom("ai_agents")
+    .select("id")
+    .where("user_id", "=", session.userId)
+    .where("deleted_at", "is", null)
+    .where("id", "=", agentId)
+    .executeTakeFirst();
+  if (!agent) {
     throw new AppError("NOT_FOUND", 404, "Agent not found");
   }
 
-  const maxOrderResult = await query<{ max: number }>(
-    "select coalesce(max(turn_order), 0)::int as max from debate_agents where debate_id = $1",
-    [debate.id]
-  );
-  const maxOrder = maxOrderResult.rows[0]?.max ?? 0;
-  const existingDisplayNames = await query<{ display_name: string | null }>(
-    "select display_name from debate_agents where debate_id = $1",
-    [debate.id]
-  );
+  const maxOrderResult = await db
+    .selectFrom("debate_agents")
+    .select(sql<number>`coalesce(max(turn_order), 0)::int`.as("max"))
+    .where("debate_id", "=", debate.id)
+    .executeTakeFirst();
+  const maxOrder = maxOrderResult?.max ?? 0;
+  const existingDisplayNames = await db
+    .selectFrom("debate_agents")
+    .select("display_name")
+    .where("debate_id", "=", debate.id)
+    .execute();
   const usedDisplayNames = new Set(
-    existingDisplayNames.rows.map((row) => (row.display_name ? String(row.display_name) : "")).filter(Boolean)
+    existingDisplayNames.map((row) => (row.display_name ? String(row.display_name) : "")).filter(Boolean)
   );
   const now = new Date().toISOString();
 
-  await query(
-    `insert into debate_agents (debate_id, ai_agent_id, display_name, turn_order, turn_count, created_at)
-     values ($1,$2,$3,$4,0,$5)`,
-    [debate.id, agentId, createUniqueDisplayName(usedDisplayNames), maxOrder + 1, now]
-  );
+  await db
+    .insertInto("debate_agents")
+    .values({
+      debate_id: debate.id,
+      ai_agent_id: agentId,
+      display_name: createUniqueDisplayName(usedDisplayNames),
+      turn_order: maxOrder + 1,
+      turn_count: 0,
+      created_at: now
+    })
+    .execute();
 
-  await query("update debates set updated_at = $2 where id = $1", [debate.id, now]);
+  await db
+    .updateTable("debates")
+    .set({ updated_at: now })
+    .where("id", "=", debate.id)
+    .execute();
 
   return getDebateDetail(debate.id);
 }

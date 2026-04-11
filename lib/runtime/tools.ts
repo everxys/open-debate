@@ -1,4 +1,4 @@
-import { query } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import {
   DELIVERABLE_REPLACE_SHRINK_MIN_CHARS,
@@ -27,29 +27,22 @@ import {
 import type { DebateRecord } from "@/lib/types";
 
 export async function loadDebatePhaseState(input: { userId: string; debateId: string }) {
-  const result = await query<{
-    current_turn: number;
-    consensus_reached: boolean;
-    status: string;
-    workflow_phase_kind: DebateRecord["workflowPhaseKind"] | null;
-  }>(
-    `
-      select current_turn, consensus_reached, status, workflow_phase_kind
-        from debates
-       where id = $1
-         and user_id = $2
-       limit 1
-    `,
-    [input.debateId, input.userId]
-  );
-  if ((result.rowCount ?? 0) !== 1) {
+  const db = await ensureDb();
+  const result = await db
+    .selectFrom("debates")
+    .select(["current_turn", "consensus_reached", "status", "workflow_phase_kind"])
+    .where("id", "=", input.debateId)
+    .where("user_id", "=", input.userId)
+    .limit(1)
+    .executeTakeFirst();
+  if (!result) {
     throw new AppError("NOT_FOUND", 404, "Debate not found");
   }
   return {
-    currentTurn: Number(result.rows[0].current_turn ?? 0),
-    consensusReached: Boolean(result.rows[0].consensus_reached),
-    status: String(result.rows[0].status ?? ""),
-    workflowPhaseKind: (result.rows[0].workflow_phase_kind as DebateRecord["workflowPhaseKind"] | null) ?? null
+    currentTurn: Number(result.current_turn ?? 0),
+    consensusReached: Boolean(result.consensus_reached),
+    status: String(result.status ?? ""),
+    workflowPhaseKind: (result.workflow_phase_kind as DebateRecord["workflowPhaseKind"] | null) ?? null
   };
 }
 
@@ -280,20 +273,18 @@ export async function toolVoteCast(input: {
 
   let voterSeat: string | null = null;
   try {
-    const seatRow = await query<{ turn_order: number }>(
-      `
-        select da.turn_order
-          from debate_agents da
-          join debates d on d.id = da.debate_id
-         where da.id = $1
-           and da.debate_id = $2
-           and d.user_id = $3
-         limit 1
-      `,
-      [input.debateAgentId, input.debateId, input.userId]
-    );
-    if ((seatRow.rowCount ?? 0) === 1) {
-      const seatOrder = Number(seatRow.rows[0].turn_order);
+    const db = await ensureDb();
+    const seatRow = await db
+      .selectFrom("debate_agents as da")
+      .innerJoin("debates as d", "d.id", "da.debate_id")
+      .select("da.turn_order")
+      .where("da.id", "=", input.debateAgentId)
+      .where("da.debate_id", "=", input.debateId)
+      .where("d.user_id", "=", input.userId)
+      .limit(1)
+      .executeTakeFirst();
+    if (seatRow) {
+      const seatOrder = Number(seatRow.turn_order);
       if (Number.isFinite(seatOrder) && seatOrder > 0) voterSeat = `Seat-${Math.floor(seatOrder)}`;
     }
   } catch {
