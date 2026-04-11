@@ -5,6 +5,8 @@
 - 辩论与 workflow 阶段模块已迁到 Kysely：`lib/debates.ts` 和 `lib/runtime/workflow-phase.ts` 的查询与写入全量收口，debates 相关表类型补齐并用 Kysely 统一查询风格。
 - AI 代理与验证码模块也已迁到 Kysely：`lib/agents.ts` 与 `lib/verification.ts` 改用 Kysely 查询/事务，并补齐 `ai_agent_files`、`email_verification_codes` 的 schema 定义。
 - 运行时与任务队列也完成 Kysely 收口：`lib/runtime-main.ts`、`lib/runtime/tools.ts`、`lib/summary-jobs.ts`、`lib/summary-job-worker.ts`、`lib/rate-limit.ts`、`lib/auth.ts`、`lib/debate-role-types.ts`、`lib/debate-runtime-recovery.ts` 全部改为 Kysely 访问，并补齐 `users / rate_limit_counters / debate_summary_jobs` 的 schema。
+- NPM 依赖安全修复：升级 `next` 到 `15.5.15`，并补充 `dompurify / brace-expansion / picomatch / flatted` 的 overrides；当前 `npm audit` 已清零。
+- Next 配置更新：`experimental.typedRoutes` 迁到 `typedRoutes`，并补上 `outputFileTracingRoot` 以消除 workspace root 警告。
 - AI 配置页的启用/禁用操作不再使用浏览器系统默认确认框，已改成页面内自定义弹窗，交互风格与现有面板保持一致。
 - AI 配置列表新增 `全部 / 已启用 / 已禁用` 三个 tab，默认显示“全部”，可以直接按状态筛选。
 - AI 配置卡片和筛选 tab 都补上了更明显的状态标识：启用显示绿点，禁用显示红点，状态一眼可见。
