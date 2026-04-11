@@ -269,6 +269,39 @@ button {
   position: relative;
 }
 
+.agentStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.agentStatusDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.agentStatusEnabled {
+  color: var(--green);
+}
+
+.agentStatusEnabled .agentStatusDot {
+  background: #16a34a;
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.12);
+}
+
+.agentStatusDisabled {
+  color: var(--red);
+}
+
+.agentStatusDisabled .agentStatusDot {
+  background: #dc2626;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.12);
+}
+
 .agentEditorEditing {
   border-color: rgba(38, 99, 235, 0.55);
   background: #f7faff;

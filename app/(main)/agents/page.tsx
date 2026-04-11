@@ -25,6 +25,8 @@ type OpenRouterModel = {
   maxOutputTokens: number | null;
 };
 
+type AgentFilterTab = "all" | "enabled" | "disabled";
+
 const initialForm = {
   name: "",
   provider: "openai",
@@ -38,6 +40,7 @@ const initialForm = {
 
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [filterTab, setFilterTab] = useState<AgentFilterTab>("all");
   const [form, setForm] = useState(initialForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingOriginal, setEditingOriginal] = useState<{
@@ -69,6 +72,7 @@ export default function AgentsPage() {
   const [debugLoading, setDebugLoading] = useState(false);
   const [debugTitle, setDebugTitle] = useState("");
   const [debugText, setDebugText] = useState("");
+  const [toggleDialogAgent, setToggleDialogAgent] = useState<Agent | null>(null);
 
   async function readPayload(response: Response) {
     const contentType = response.headers.get("content-type") ?? "";
@@ -173,6 +177,14 @@ export default function AgentsPage() {
     }
     return out;
   })();
+
+  const enabledAgentsCount = agents.filter((agent) => agent.isActive).length;
+  const disabledAgentsCount = agents.length - enabledAgentsCount;
+  const filteredAgents = agents.filter((agent) => {
+    if (filterTab === "enabled") return agent.isActive;
+    if (filterTab === "disabled") return !agent.isActive;
+    return true;
+  });
 
   const canTestDraft =
     form.model.trim().length > 0 &&
@@ -438,10 +450,8 @@ export default function AgentsPage() {
 
   async function toggleAgentActive(agent: Agent) {
     if (togglingAgentId === agent.id) return;
-    const nextActive = !agent.isActive;
-    const ok = window.confirm(`确认${nextActive ? "启用" : "禁用"}该 AI 配置？`);
-    if (!ok) return;
     setTogglingAgentId(agent.id);
+    const nextActive = !agent.isActive;
     let response: Response;
     try {
       response = await fetch(`/api/agents/${agent.id}`, {
@@ -464,6 +474,12 @@ export default function AgentsPage() {
     showToast("success", nextActive ? "已启用" : "已禁用");
     await loadAgents();
     setTogglingAgentId(null);
+    setToggleDialogAgent(null);
+  }
+
+  function openToggleDialog(agent: Agent) {
+    if (togglingAgentId === agent.id) return;
+    setToggleDialogAgent(agent);
   }
 
   function toggleSelected(id: string) {
@@ -714,6 +730,63 @@ export default function AgentsPage() {
                   {isImporting ? "导入中..." : "导入文件"}
                 </button>
               </section>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {toggleDialogAgent ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setToggleDialogAgent(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            zIndex: 1001
+          }}
+        >
+          <div
+            className="panel stack"
+            onClick={(event) => event.stopPropagation()}
+            style={{ width: "min(520px, 100%)" }}
+          >
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <strong>{toggleDialogAgent.isActive ? "确认禁用 AI 配置" : "确认启用 AI 配置"}</strong>
+              <button className="btn" type="button" onClick={() => setToggleDialogAgent(null)}>
+                关闭
+              </button>
+            </div>
+            <div className="stack" style={{ gap: 8 }}>
+              <div>
+                {toggleDialogAgent.isActive
+                  ? `禁用后，“${toggleDialogAgent.name}”将不会出现在可用 AI 配置里。`
+                  : `启用后，“${toggleDialogAgent.name}”会重新出现在可用 AI 配置里。`}
+              </div>
+              <div className="muted">
+                Provider: {toggleDialogAgent.provider} · Model: {toggleDialogAgent.model}
+              </div>
+            </div>
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button className="btn btn-muted" type="button" onClick={() => setToggleDialogAgent(null)}>
+                取消
+              </button>
+              <button
+                className={`btn ${toggleDialogAgent.isActive ? "btn-danger" : "btn-primary"}`}
+                type="button"
+                disabled={togglingAgentId === toggleDialogAgent.id}
+                onClick={() => void toggleAgentActive(toggleDialogAgent)}
+              >
+                {togglingAgentId === toggleDialogAgent.id
+                  ? "处理中..."
+                  : toggleDialogAgent.isActive
+                    ? "确认禁用"
+                    : "确认启用"}
+              </button>
             </div>
           </div>
         </div>
@@ -1016,8 +1089,40 @@ export default function AgentsPage() {
             导入/导出
           </button>
         </div>
+        <div className="tabsBar">
+          <button
+            type="button"
+            className={`tab ${filterTab === "all" ? "tabActive" : ""}`}
+            onClick={() => setFilterTab("all")}
+          >
+            <span className="tabName">全部</span>
+            <span className="muted">{agents.length}</span>
+          </button>
+          <button
+            type="button"
+            className={`tab ${filterTab === "enabled" ? "tabActive" : ""}`}
+            onClick={() => setFilterTab("enabled")}
+          >
+            <span className="agentStatus agentStatusEnabled">
+              <span className="agentStatusDot" aria-hidden="true" />
+              已启用
+            </span>
+            <span className="muted">{enabledAgentsCount}</span>
+          </button>
+          <button
+            type="button"
+            className={`tab ${filterTab === "disabled" ? "tabActive" : ""}`}
+            onClick={() => setFilterTab("disabled")}
+          >
+            <span className="agentStatus agentStatusDisabled">
+              <span className="agentStatusDot" aria-hidden="true" />
+              已禁用
+            </span>
+            <span className="muted">{disabledAgentsCount}</span>
+          </button>
+        </div>
         <div className="card-list">
-          {agents.map((agent) => (
+          {filteredAgents.map((agent) => (
             <div
               className={`panel stack agentCard ${agent.id === editingId ? "agentCardEditing" : ""}`}
               key={agent.id}
@@ -1031,11 +1136,12 @@ export default function AgentsPage() {
                   />
                   <strong>{agent.name}</strong>
                 </label>
-                <span className="muted">
-                  {agent.provider}
-                  {agent.isActive ? "" : " · 已禁用"}
+                <span className={`agentStatus ${agent.isActive ? "agentStatusEnabled" : "agentStatusDisabled"}`}>
+                  <span className="agentStatusDot" aria-hidden="true" />
+                  {agent.isActive ? "已启用" : "已禁用"}
                 </span>
               </div>
+              <div className="muted">{agent.provider}</div>
               <div className="muted">{agent.model}</div>
               {agent.contextLength ? <div className="muted">Context: {agent.contextLength.toLocaleString()}</div> : null}
               {agent.maxInputTokens ? <div className="muted">Max input: {agent.maxInputTokens.toLocaleString()}</div> : null}
@@ -1065,7 +1171,7 @@ export default function AgentsPage() {
                 >
                   {duplicatingAgentId === agent.id ? "复制中..." : "复制"}
                 </button>
-                <button className="btn" disabled={togglingAgentId === agent.id} onClick={() => void toggleAgentActive(agent)}>
+                <button className="btn" disabled={togglingAgentId === agent.id} onClick={() => openToggleDialog(agent)}>
                   {togglingAgentId === agent.id ? "处理中..." : agent.isActive ? "禁用" : "启用"}
                 </button>
                 <Link className="btn" href={`/agents/${agent.id}/files`}>
@@ -1077,7 +1183,17 @@ export default function AgentsPage() {
               </div>
             </div>
           ))}
-          {agents.length === 0 ? <div className="muted">暂无 AI 配置</div> : null}
+          {filteredAgents.length === 0 ? (
+            <div className="muted">
+              {agents.length === 0
+                ? "暂无 AI 配置"
+                : filterTab === "enabled"
+                  ? "暂无已启用的 AI 配置"
+                  : filterTab === "disabled"
+                    ? "暂无已禁用的 AI 配置"
+                    : "暂无 AI 配置"}
+            </div>
+          ) : null}
         </div>
       </section>
     </div>
