@@ -219,9 +219,9 @@ export default function DebatesPage() {
   const finished = debates.filter((debate) =>
     ["completed", "stopped", "failed"].includes(debate.status)
   );
-  const stopped = debates.filter((debate) => debate.status === "stopped");
+  const stoppableFinished = debates.filter((debate) => ["stopped", "failed"].includes(debate.status));
   const clearThreshold = Math.max(0, Number.parseInt(clearBelowRounds || "0", 10) || 0);
-  const stoppedBelowThreshold = stopped.filter((debate) => {
+  const stoppableFinishedBelowThreshold = stoppableFinished.filter((debate) => {
     const count = Math.max(1, Number(debate.agentCount ?? 0) || 1);
     const completedRounds = Math.floor((Number(debate.currentTurn ?? 0) || 0) / count);
     return completedRounds < clearThreshold;
@@ -352,7 +352,11 @@ export default function DebatesPage() {
           <h3 style={{ margin: 0 }}>已结束</h3>
           {scope === "mine" ? (
             <div className="row" style={{ gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <button className="btn" disabled={stopped.length === 0 || purgingStopped} onClick={() => setClearMenuOpen((current) => !current)}>
+              <button
+                className="btn"
+                disabled={stoppableFinished.length === 0 || purgingStopped}
+                onClick={() => setClearMenuOpen((current) => !current)}
+              >
                 {purgingStopped ? "清空中..." : "清空..."}
               </button>
               <button className="btn" disabled={finished.length === 0} onClick={() => setSelectedFinishedIds(finished.map((d) => d.id))}>
@@ -487,12 +491,12 @@ export default function DebatesPage() {
             style={{ width: "min(520px, 100%)", display: "grid", gap: 12 }}
           >
             <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
-              <strong>清空已停止辩论</strong>
+              <strong>清空已停止/失败辩论</strong>
               <button className="btn" disabled={purgingStopped} onClick={() => setClearMenuOpen(false)}>
                 关闭
               </button>
             </div>
-            <div className="muted">只处理 `status = stopped` 的辩论，不影响 `completed` 或 `failed`。</div>
+            <div className="muted">只处理 `status = stopped` 或 `failed` 的辩论，不影响 `completed`。</div>
             <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <span>清空已完成轮数小于</span>
               <input
@@ -503,10 +507,10 @@ export default function DebatesPage() {
                 onChange={(event) => setClearBelowRounds(event.target.value)}
                 style={{ width: 96 }}
               />
-              <span>轮的已停止辩论</span>
+              <span>轮的已停止/失败辩论</span>
             </div>
             <div className="muted">
-              当前将删除 {stoppedBelowThreshold.length} 场符合条件的已停止辩论。
+              当前将删除 {stoppableFinishedBelowThreshold.length} 场符合条件的已停止/失败辩论。
             </div>
             <div className="row" style={{ gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
               <button className="btn" disabled={purgingStopped} onClick={() => setClearMenuOpen(false)}>
@@ -514,11 +518,11 @@ export default function DebatesPage() {
               </button>
               <button
                 className="btn btn-danger"
-                disabled={purgingStopped || stoppedBelowThreshold.length === 0}
+                disabled={purgingStopped || stoppableFinishedBelowThreshold.length === 0}
                 onClick={() => {
                   if (
                     !window.confirm(
-                      `确定清空已完成轮数小于 ${clearThreshold} 轮的已停止辩论 ${stoppedBelowThreshold.length} 场吗？`
+                      `确定清空已完成轮数小于 ${clearThreshold} 轮的已停止/失败辩论 ${stoppableFinishedBelowThreshold.length} 场吗？`
                     )
                   ) {
                     return;
@@ -526,7 +530,9 @@ export default function DebatesPage() {
                   void purgeStoppedDebates(clearThreshold);
                 }}
               >
-                {purgingStopped ? "清空中..." : `确认清空${stoppedBelowThreshold.length > 0 ? ` (${stoppedBelowThreshold.length})` : ""}`}
+                {purgingStopped
+                  ? "清空中..."
+                  : `确认清空${stoppableFinishedBelowThreshold.length > 0 ? ` (${stoppableFinishedBelowThreshold.length})` : ""}`}
               </button>
             </div>
           </div>

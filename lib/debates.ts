@@ -1135,7 +1135,7 @@ export async function deleteStoppedDebates(options?: { maxCompletedRounds?: numb
       select d.id
         from debates d
        where d.user_id = ${session.userId}
-         and d.status = 'stopped'
+         and d.status in ('stopped', 'failed')
          and (
            ${maxCompletedRounds}::int is null
            or floor(
