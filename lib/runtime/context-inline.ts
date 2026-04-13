@@ -1,5 +1,10 @@
 import type { AgentRecord, DebateRecord } from "@/lib/types";
-import type { NormalizedDebateWorkflow, WorkflowContextAccessScope, WorkflowPhaseKind } from "@/lib/workflow";
+import type {
+  NormalizedDebateWorkflow,
+  WorkflowContextAccessScope,
+  WorkflowContextAccessTargetType,
+  WorkflowPhaseKind
+} from "@/lib/workflow";
 
 import {
   PROMPT_HARD_MAX_CHARS_ANTHROPIC,
@@ -9,6 +14,7 @@ import {
 export type ResolvedContextAccessRule = {
   category: "alwaysRead" | "readWhenNeeded" | "unlockAfterPhase";
   scope: WorkflowContextAccessScope;
+  targetType: WorkflowContextAccessTargetType;
   pathPrefix: string;
   maxFiles: number;
   maxCharsPerFile: number;
@@ -39,6 +45,14 @@ export function isDirectChildPath(prefix: string, path: string) {
   if (!normalizedPath.startsWith(normalizedPrefix)) return false;
   const rest = normalizedPath.slice(normalizedPrefix.length);
   return rest.length > 0 && !rest.includes("/");
+}
+
+export function matchesContextAccessPath(rule: Pick<ResolvedContextAccessRule, "targetType" | "pathPrefix" | "recursive">, path: string) {
+  const normalizedPath = normalizeContextPath(path);
+  const normalizedPrefix = normalizeContextPath(rule.pathPrefix);
+  if (rule.targetType === "file") return normalizedPath === normalizedPrefix;
+  if (!normalizedPath.startsWith(normalizedPrefix)) return false;
+  return rule.recursive ? true : isDirectChildPath(normalizedPrefix, normalizedPath);
 }
 
 export function hasContextAccessRules(workflow: NormalizedDebateWorkflow | null) {
@@ -113,9 +127,7 @@ export function matchContextAccessRule(
   return (
     rules.find((rule) => {
       if (rule.scope !== scope) return false;
-      const normalizedPrefix = normalizeContextPath(rule.pathPrefix);
-      if (!normalizedPath.startsWith(normalizedPrefix)) return false;
-      return rule.recursive ? true : isDirectChildPath(normalizedPrefix, normalizedPath);
+      return matchesContextAccessPath(rule, normalizedPath);
     }) ?? null
   );
 }
@@ -131,21 +143,23 @@ export function buildContextAccessSummaryLines(input: {
   if (resolvedRules.autoRead.length > 0) {
     lines.push("- Auto-read now:");
     for (const rule of resolvedRules.autoRead) {
-      lines.push(`  - [${rule.scope}] ${rule.pathPrefix}`);
+      lines.push(`  - [${rule.scope}] ${rule.targetType === "file" ? "file" : "dir"} ${rule.pathPrefix}`);
     }
   }
 
   if (resolvedRules.readable.length > 0) {
     lines.push("- Readable on demand:");
     for (const rule of resolvedRules.readable) {
-      lines.push(`  - [${rule.scope}] ${rule.pathPrefix}`);
+      lines.push(`  - [${rule.scope}] ${rule.targetType === "file" ? "file" : "dir"} ${rule.pathPrefix}`);
     }
   }
 
   if (resolvedRules.locked.length > 0) {
     lines.push("- Locked until phase:");
     for (const rule of resolvedRules.locked) {
-      lines.push(`  - [${rule.scope}] ${rule.pathPrefix} · unlock=${rule.phaseKind}`);
+      lines.push(
+        `  - [${rule.scope}] ${rule.targetType === "file" ? "file" : "dir"} ${rule.pathPrefix} · unlock=${rule.phaseKind}`
+      );
     }
     lines.push("- IMPORTANT: Locked paths are unavailable in the current phase. Do not try to read them now; wait until they are unlocked.");
   }

@@ -176,3 +176,20 @@ export const updateStrategyWorkflowPhasePromptsSchema = z.object({
 });
 
 export const updateStrategyWorkflowConfigSchema = z.object({ workflowConfig: z.unknown() });
+
+export const strategyFileAccessRuleSchema = z.object({
+  scope: z.enum(["shared", "seat"]),
+  targetType: z.enum(["file", "dir"]),
+  targetPath: relativeFilePathSchema,
+  accessMode: z.enum(["always_read", "read_when_needed", "unlock_after_phase"]),
+  phaseKind: z.enum(["analysis", "deliberation", "finalization_vote", "finalization"]).nullable().optional(),
+  strategyRoleId: z.string().min(1).nullable().optional()
+});
+
+export const updateStrategyFileAccessRuleSchema = strategyFileAccessRuleSchema.partial().extend({
+  targetPath: relativeFilePathSchema.optional()
+});
+
+export const deleteStrategyFileAccessRuleSchema = z.object({
+  ruleId: z.string().min(1)
+});

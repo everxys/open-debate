@@ -121,22 +121,41 @@ export async function ensureDb() {
 
 async function ensureSchema(pool: Pool) {
   // Keep this minimal: make new columns backward-compatible with existing volumes.
-  await pool.query("alter table users add column if not exists role text not null default 'user'");
-  await pool.query(
+  async function hasTable(tableName: string) {
+    const result = await pool.query<{ oid: string | null }>("select to_regclass($1) as oid", [`public.${tableName}`]);
+    return Boolean(result.rows[0]?.oid);
+  }
+
+  async function alterTableIfExists(tableName: string, statement: string) {
+    if (!(await hasTable(tableName))) return;
+    await pool.query(statement);
+  }
+
+  async function createIndexIfTableExists(tableName: string, statement: string) {
+    if (!(await hasTable(tableName))) return;
+    await pool.query(statement);
+  }
+
+  await alterTableIfExists("users", "alter table users add column if not exists role text not null default 'user'");
+  await alterTableIfExists(
+    "debates",
     "alter table debates add column if not exists enable_shared_facts boolean not null default true"
   );
-  await pool.query("alter table ai_agents add column if not exists context_length int null");
-  await pool.query("alter table ai_agents add column if not exists max_input_tokens int null");
-  await pool.query("alter table ai_agents add column if not exists max_output_tokens int null");
-  await pool.query("alter table ai_agents add column if not exists deleted_at timestamptz null");
-  await pool.query("alter table debates add column if not exists workflow_phase_kind text null");
-  await pool.query("alter table debates add column if not exists workflow_phase_title text null");
-  await pool.query("alter table debates add column if not exists workflow_phase_round int null");
-  await pool.query("alter table debates add column if not exists runtime_notice_kind text null");
-  await pool.query("alter table debates add column if not exists runtime_notice_message text null");
-  await pool.query("alter table debates add column if not exists runtime_notice_at timestamptz null");
-  await pool.query("alter table debates add column if not exists source_workspace_id uuid null");
-  await pool.query("create index if not exists idx_debates_source_workspace_id on debates(source_workspace_id)");
+  await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists context_length int null");
+  await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists max_input_tokens int null");
+  await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists max_output_tokens int null");
+  await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists deleted_at timestamptz null");
+  await alterTableIfExists("debates", "alter table debates add column if not exists workflow_phase_kind text null");
+  await alterTableIfExists("debates", "alter table debates add column if not exists workflow_phase_title text null");
+  await alterTableIfExists("debates", "alter table debates add column if not exists workflow_phase_round int null");
+  await alterTableIfExists("debates", "alter table debates add column if not exists runtime_notice_kind text null");
+  await alterTableIfExists("debates", "alter table debates add column if not exists runtime_notice_message text null");
+  await alterTableIfExists("debates", "alter table debates add column if not exists runtime_notice_at timestamptz null");
+  await alterTableIfExists("debates", "alter table debates add column if not exists source_workspace_id uuid null");
+  await createIndexIfTableExists(
+    "debates",
+    "create index if not exists idx_debates_source_workspace_id on debates(source_workspace_id)"
+  );
   await pool.query(`
     do $$
     begin
@@ -227,12 +246,42 @@ async function ensureSchema(pool: Pool) {
       unique (workspace_id, path)
     )
   `);
+  await pool.query(`
+    create table if not exists strategy_shared_files (
+      id uuid primary key,
+      strategy_id uuid not null,
+      path text not null,
+      content text not null default '',
+      created_at timestamptz not null,
+      updated_at timestamptz not null,
+      unique (strategy_id, path)
+    )
+  `);
+  await pool.query(`
+    create table if not exists strategy_file_access_rules (
+      id uuid primary key,
+      strategy_id uuid not null,
+      strategy_role_id uuid null,
+      scope text not null,
+      target_type text not null,
+      target_path text not null,
+      access_mode text not null,
+      phase_kind text null,
+      created_at timestamptz not null,
+      updated_at timestamptz not null,
+      unique (strategy_id, scope, strategy_role_id, target_type, target_path)
+    )
+  `);
   await pool.query("create index if not exists idx_workspaces_owner_user_id_updated_at on workspaces (owner_user_id, updated_at desc)");
   await pool.query("create index if not exists idx_workspaces_strategy_id_updated_at on workspaces (strategy_id, updated_at desc)");
   await pool.query("create index if not exists idx_workspace_role_bindings_workspace_id_role_order on workspace_role_bindings (workspace_id, role_order asc)");
   await pool.query("create index if not exists idx_workspace_files_workspace_id_updated_at on workspace_files (workspace_id, updated_at desc)");
+  await pool.query("create index if not exists idx_strategy_shared_files_strategy_id_updated_at on strategy_shared_files (strategy_id, updated_at desc)");
+  await pool.query("create index if not exists idx_strategy_file_access_rules_strategy_id_scope on strategy_file_access_rules (strategy_id, scope, updated_at desc)");
+  await pool.query("create index if not exists idx_strategy_file_access_rules_role_id on strategy_file_access_rules (strategy_role_id, updated_at desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_created_at on debate_file_activity_logs (debate_id, created_at desc, id desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_action_created_at on debate_file_activity_logs (debate_id, action, created_at desc, id desc)");
+  await pool.query("create index if not exists idx_debate_file_activity_logs_nav on debate_file_activity_logs (debate_id, debate_agent_id, round_number, turn_number, created_at desc, id desc)");
   await pool.query(`
     create table if not exists debate_summary_jobs (
       id uuid primary key,
@@ -244,6 +293,8 @@ async function ensureSchema(pool: Pool) {
       round_number int null,
       depends_on_keys jsonb not null default '[]'::jsonb,
       payload_json jsonb not null default '{}'::jsonb,
+      priority int not null default 100,
+      run_after timestamptz null,
       attempt_count int not null default 0,
       last_error text null,
       next_retry_at timestamptz null,
@@ -255,9 +306,39 @@ async function ensureSchema(pool: Pool) {
       unique (debate_id, job_key)
     )
   `);
+  await pool.query("alter table debate_summary_jobs add column if not exists priority int not null default 100");
+  await pool.query("alter table debate_summary_jobs add column if not exists run_after timestamptz null");
   await pool.query("create index if not exists idx_debate_summary_jobs_status_retry on debate_summary_jobs (status, next_retry_at asc nulls first, updated_at asc)");
+  await pool.query("create index if not exists idx_debate_summary_jobs_runnable on debate_summary_jobs (status, run_after asc nulls first, priority asc, updated_at asc)");
+  await pool.query(`
+    create index if not exists idx_debate_summary_jobs_active_runnable
+      on debate_summary_jobs (status, priority asc, run_after asc nulls first, next_retry_at asc nulls first, updated_at asc)
+      where status in ('queued', 'retry_wait', 'blocked', 'running')
+  `);
+  await pool.query(`
+    create index if not exists idx_debate_summary_jobs_running_locked_at
+      on debate_summary_jobs (locked_at asc)
+      where status = 'running'
+  `);
   await pool.query("create index if not exists idx_debate_summary_jobs_debate_status on debate_summary_jobs (debate_id, status, updated_at desc)");
   await pool.query("create index if not exists idx_debate_summary_jobs_kind_round_turn on debate_summary_jobs (debate_id, kind, round_number asc, turn_number asc)");
+  await pool.query(`
+    create table if not exists debate_summary_workers (
+      id text primary key,
+      mode text not null default 'embedded',
+      status text not null default 'running',
+      started_at timestamptz not null,
+      last_heartbeat_at timestamptz not null,
+      current_job_id uuid null,
+      current_debate_id uuid null,
+      current_job_key text null,
+      claimed_count int not null default 0,
+      completed_count int not null default 0,
+      failed_count int not null default 0,
+      updated_at timestamptz not null
+    )
+  `);
+  await pool.query("create index if not exists idx_debate_summary_workers_last_heartbeat on debate_summary_workers (last_heartbeat_at desc)");
   await pool.query(`
     do $$
     begin
@@ -386,6 +467,75 @@ async function ensureSchema(pool: Pool) {
         alter table workspace_files
           add constraint workspace_files_workspace_id_fkey
           foreign key (workspace_id) references workspaces(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'strategy_shared_files_strategy_id_fkey'
+      ) then
+        alter table strategy_shared_files
+          add constraint strategy_shared_files_strategy_id_fkey
+          foreign key (strategy_id) references strategies(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'strategy_file_access_rules_strategy_id_fkey'
+      ) then
+        alter table strategy_file_access_rules
+          add constraint strategy_file_access_rules_strategy_id_fkey
+          foreign key (strategy_id) references strategies(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'strategy_file_access_rules_strategy_role_id_fkey'
+      ) then
+        alter table strategy_file_access_rules
+          add constraint strategy_file_access_rules_strategy_role_id_fkey
+          foreign key (strategy_role_id) references strategy_roles(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'strategy_file_access_rules_scope_check'
+      ) then
+        alter table strategy_file_access_rules
+          add constraint strategy_file_access_rules_scope_check
+          check (scope in ('shared', 'seat'));
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'strategy_file_access_rules_target_type_check'
+      ) then
+        alter table strategy_file_access_rules
+          add constraint strategy_file_access_rules_target_type_check
+          check (target_type in ('file', 'dir'));
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'strategy_file_access_rules_access_mode_check'
+      ) then
+        alter table strategy_file_access_rules
+          add constraint strategy_file_access_rules_access_mode_check
+          check (access_mode in ('always_read', 'read_when_needed', 'unlock_after_phase'));
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'strategy_file_access_rules_phase_kind_check'
+      ) then
+        alter table strategy_file_access_rules
+          add constraint strategy_file_access_rules_phase_kind_check
+          check (phase_kind is null or phase_kind in ('analysis', 'deliberation', 'finalization_vote', 'finalization'));
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'strategy_file_access_rules_scope_role_check'
+      ) then
+        alter table strategy_file_access_rules
+          add constraint strategy_file_access_rules_scope_role_check
+          check (
+            (scope = 'shared' and strategy_role_id is null) or
+            (scope = 'seat' and strategy_role_id is not null)
+          );
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'strategy_file_access_rules_unlock_scope_check'
+      ) then
+        alter table strategy_file_access_rules
+          add constraint strategy_file_access_rules_unlock_scope_check
+          check (
+            access_mode <> 'unlock_after_phase' or
+            (scope = 'shared' and phase_kind is not null)
+          );
       end if;
     exception when undefined_table then
       null;
@@ -535,7 +685,7 @@ async function ensureSchema(pool: Pool) {
       ) then
         alter table users add constraint users_role_check check (role in ('user', 'admin'));
       end if;
-    exception when duplicate_object then
+    exception when undefined_table or duplicate_object then
       null;
     end $$;
   `);

@@ -9,8 +9,11 @@ import {
   agentFileMoveSchema,
   agentFileUpsertSchema,
   createStrategySchema,
+  deleteStrategyFileAccessRuleSchema,
   relativeFilePathSchema,
+  strategyFileAccessRuleSchema,
   updateStrategySchema,
+  updateStrategyFileAccessRuleSchema,
   updateStrategyWorkflowConfigSchema,
   updateStrategyWorkflowPhasePromptsSchema
 } from "@/lib/validation";
@@ -18,7 +21,10 @@ import {
   createDefaultDebateWorkflowConfig,
   normalizeDebateWorkflow,
   toCanonicalWorkflowConfig,
-  type DebateWorkflowConfig
+  type DebateWorkflowConfig,
+  type WorkflowContextAccessScope,
+  type WorkflowContextAccessTargetType,
+  type WorkflowPhaseKind
 } from "@/lib/workflow";
 
 // === DB row types ===
@@ -59,12 +65,31 @@ type StrategyFolderManifest = {
     description: string | null;
     isShared: boolean;
   };
+  sharedFiles?: Array<{
+    path: string;
+    updatedAt?: string | null;
+  }>;
   roles: Array<{
     folderName: string;
     name: string;
     roleOrder: number;
     sourceRoleId: string;
   }>;
+};
+
+type StrategyFileAccessMode = "always_read" | "read_when_needed" | "unlock_after_phase";
+
+type StrategyFileAccessRuleRecord = {
+  id: string;
+  strategyId: string;
+  strategyRoleId: string | null;
+  scope: WorkflowContextAccessScope;
+  targetType: WorkflowContextAccessTargetType;
+  targetPath: string;
+  accessMode: StrategyFileAccessMode;
+  phaseKind: WorkflowPhaseKind | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 // === Normalizers ===
@@ -92,6 +117,211 @@ function normalizeStrategyRoleRow(row: Record<string, unknown>) {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
+}
+
+function normalizeStrategyFileAccessRuleRow(row: Record<string, unknown>): StrategyFileAccessRuleRecord {
+  return {
+    id: String(row.id),
+    strategyId: String(row.strategy_id),
+    strategyRoleId: row.strategy_role_id ? String(row.strategy_role_id) : null,
+    scope: row.scope === "seat" ? "seat" : "shared",
+    targetType: row.target_type === "file" ? "file" : "dir",
+    targetPath: normalizeStrategyAccessTargetPath(String(row.target_path ?? ""), row.target_type === "file" ? "file" : "dir"),
+    accessMode:
+      row.access_mode === "unlock_after_phase"
+        ? "unlock_after_phase"
+        : row.access_mode === "read_when_needed"
+          ? "read_when_needed"
+          : "always_read",
+    phaseKind: isWorkflowPhaseKind(row.phase_kind) ? row.phase_kind : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at)
+  };
+}
+
+function isWorkflowPhaseKind(value: unknown): value is WorkflowPhaseKind {
+  return value === "analysis" || value === "deliberation" || value === "finalization_vote" || value === "finalization";
+}
+
+function normalizeStrategyAccessTargetPath(path: string, targetType: WorkflowContextAccessTargetType) {
+  const normalized = String(path ?? "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!normalized || normalized.includes("..")) {
+    throw new AppError("VALIDATION_ERROR", 400, "Invalid target path");
+  }
+  return targetType === "dir" ? `${normalized.replace(/\/+$/, "")}/` : normalized.replace(/\/+$/, "");
+}
+
+function inferContextBudget(targetPath: string, targetType: WorkflowContextAccessTargetType) {
+  const normalized = targetPath.toLowerCase();
+  if (targetType === "file") {
+    if (normalized.endsWith("facts/board.md")) return { maxFiles: 1, maxCharsPerFile: 16_000, recursive: false };
+    if (normalized.endsWith("workflow.json")) return { maxFiles: 1, maxCharsPerFile: 14_000, recursive: false };
+    if (normalized.includes("/protocol/") || normalized.startsWith("protocol/")) {
+      return { maxFiles: 1, maxCharsPerFile: 10_000, recursive: false };
+    }
+    return { maxFiles: 1, maxCharsPerFile: 8_000, recursive: false };
+  }
+  if (normalized.includes("turn_summaries/")) return { maxFiles: 2, maxCharsPerFile: 6_000, recursive: true };
+  if (normalized.includes("round_summaries/")) return { maxFiles: 2, maxCharsPerFile: 8_000, recursive: true };
+  if (normalized.includes("/protocol/") || normalized.startsWith("protocol/")) {
+    return { maxFiles: 12, maxCharsPerFile: 8_000, recursive: true };
+  }
+  if (normalized.includes("/templates/") || normalized.startsWith("templates/")) {
+    return { maxFiles: 6, maxCharsPerFile: 8_000, recursive: true };
+  }
+  return { maxFiles: 6, maxCharsPerFile: 4_000, recursive: true };
+}
+
+export function strategyFileAccessRulesToWorkflowContextAccess(
+  rules: StrategyFileAccessRuleRecord[]
+): NonNullable<DebateWorkflowConfig["contextAccess"]> {
+  const alwaysRead: NonNullable<DebateWorkflowConfig["contextAccess"]>["alwaysRead"] = [];
+  const readWhenNeeded: NonNullable<DebateWorkflowConfig["contextAccess"]>["readWhenNeeded"] = [];
+  const unlockAfterPhase: NonNullable<DebateWorkflowConfig["contextAccess"]>["unlockAfterPhase"] = [];
+  const dedupe = new Set<string>();
+
+  for (const rule of rules) {
+    const budget = inferContextBudget(rule.targetPath, rule.targetType);
+    const key = `${rule.scope}:${rule.targetType}:${rule.targetPath}:${rule.accessMode}:${rule.phaseKind ?? ""}`;
+    if (dedupe.has(key)) continue;
+    dedupe.add(key);
+    const baseRule = {
+      scope: rule.scope,
+      targetType: rule.targetType,
+      pathPrefix: rule.targetPath,
+      maxFiles: budget.maxFiles,
+      maxCharsPerFile: budget.maxCharsPerFile,
+      recursive: budget.recursive
+    };
+    if (rule.accessMode === "always_read") {
+      alwaysRead.push(baseRule);
+      continue;
+    }
+    if (rule.accessMode === "read_when_needed") {
+      readWhenNeeded.push(baseRule);
+      continue;
+    }
+    if (!rule.phaseKind) continue;
+    unlockAfterPhase.push({ ...baseRule, phaseKind: rule.phaseKind });
+  }
+
+  return { alwaysRead, readWhenNeeded, unlockAfterPhase };
+}
+
+export function mergeWorkflowConfigWithFileAccessRules(
+  workflowConfig: DebateWorkflowConfig,
+  rules: StrategyFileAccessRuleRecord[]
+): DebateWorkflowConfig {
+  const next = JSON.parse(JSON.stringify(workflowConfig)) as DebateWorkflowConfig;
+  next.contextAccess = strategyFileAccessRulesToWorkflowContextAccess(rules);
+  return toCanonicalWorkflowConfig(next) ?? next;
+}
+
+function getLegacyWorkflowContextAccessRules(
+  strategyId: string,
+  roleIds: string[],
+  workflowConfig: DebateWorkflowConfig
+): Array<Omit<StrategyFileAccessRuleRecord, "id" | "createdAt" | "updatedAt">> {
+  const normalized = normalizeDebateWorkflow(workflowConfig);
+  if (!normalized) return [];
+  const seatRoleId = roleIds[0] ?? null;
+  const rules: Array<Omit<StrategyFileAccessRuleRecord, "id" | "createdAt" | "updatedAt">> = [];
+  const pushRule = (
+    accessMode: StrategyFileAccessMode,
+    item: { scope: WorkflowContextAccessScope; pathPrefix: string; phaseKind?: WorkflowPhaseKind }
+  ) => {
+    if (item.scope === "shared") {
+      rules.push({
+        strategyId,
+        strategyRoleId: null,
+        scope: "shared",
+        targetType: item.pathPrefix.endsWith("/") ? "dir" : "file",
+        targetPath: normalizeStrategyAccessTargetPath(item.pathPrefix, item.pathPrefix.endsWith("/") ? "dir" : "file"),
+        accessMode,
+        phaseKind: accessMode === "unlock_after_phase" ? item.phaseKind ?? null : null
+      });
+      return;
+    }
+    for (const roleId of roleIds) {
+      rules.push({
+        strategyId,
+        strategyRoleId: roleId ?? seatRoleId,
+        scope: "seat",
+        targetType: item.pathPrefix.endsWith("/") ? "dir" : "file",
+        targetPath: normalizeStrategyAccessTargetPath(item.pathPrefix, item.pathPrefix.endsWith("/") ? "dir" : "file"),
+        accessMode,
+        phaseKind: null
+      });
+    }
+  };
+
+  for (const rule of normalized.contextAccess.alwaysRead) pushRule("always_read", rule);
+  for (const rule of normalized.contextAccess.readWhenNeeded) pushRule("read_when_needed", rule);
+  for (const rule of normalized.contextAccess.unlockAfterPhase) {
+    if (rule.scope !== "shared") continue;
+    pushRule("unlock_after_phase", rule);
+  }
+  return rules;
+}
+
+async function listStrategyFileAccessRulesInternal(strategyId: string) {
+  try {
+    const db = await ensureDb();
+    const rows = await db
+      .selectFrom("strategy_file_access_rules")
+      .selectAll()
+      .where("strategy_id", "=", strategyId)
+      .orderBy("scope", "asc")
+      .orderBy("strategy_role_id", "asc")
+      .orderBy("target_path", "asc")
+      .execute();
+    return rows.map((row) => normalizeStrategyFileAccessRuleRow(row));
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_file_access_rules")) return [] as StrategyFileAccessRuleRecord[];
+    throw error;
+  }
+}
+
+async function ensureStrategyFileAccessRulesMigrated(
+  strategyId: string,
+  roleIds: string[],
+  workflowConfig: DebateWorkflowConfig
+) {
+  const existing = await listStrategyFileAccessRulesInternal(strategyId);
+  if (existing.length > 0) return existing;
+  const legacyRules = getLegacyWorkflowContextAccessRules(strategyId, roleIds, workflowConfig);
+  if (legacyRules.length <= 0) return existing;
+
+  const now = new Date().toISOString();
+  const db = await ensureDb();
+  await db.transaction().execute(async (trx) => {
+    for (const rule of legacyRules) {
+      // eslint-disable-next-line no-await-in-loop
+      await trx
+        .insertInto("strategy_file_access_rules")
+        .values({
+          id: randomUUID(),
+          strategy_id: strategyId,
+          strategy_role_id: rule.strategyRoleId,
+          scope: rule.scope,
+          target_type: rule.targetType,
+          target_path: rule.targetPath,
+          access_mode: rule.accessMode,
+          phase_kind: rule.phaseKind,
+          created_at: now,
+          updated_at: now
+        })
+        .onConflict((oc) =>
+          oc.columns(["strategy_id", "scope", "strategy_role_id", "target_type", "target_path"]).doUpdateSet({
+            access_mode: rule.accessMode,
+            phase_kind: rule.phaseKind,
+            updated_at: now
+          })
+        )
+        .execute();
+    }
+  });
+  return listStrategyFileAccessRulesInternal(strategyId);
 }
 
 function toPortableSlug(value: string, fallback: string) {
@@ -138,9 +368,22 @@ function renderStrategyFolderReadme(manifest: StrategyFolderManifest) {
     "",
     "在策略详情页使用“上传文件夹覆盖”时，请选择当前目录本身，而不是只选其中单个子目录。",
     "",
-    "## Roles",
+    "## Shared Files",
     ""
   ];
+  const sharedFiles = manifest.sharedFiles ?? [];
+  if (sharedFiles.length <= 0) {
+    lines.push("- (none)");
+  } else {
+    for (const file of sharedFiles.slice().sort((a, b) => a.path.localeCompare(b.path))) {
+      lines.push(`- shared/${file.path}`);
+    }
+  }
+  lines.push(
+    "",
+    "## Roles",
+    ""
+  );
   for (const role of manifest.roles.slice().sort((a, b) => a.roleOrder - b.roleOrder)) {
     lines.push(`- #${role.roleOrder} ${role.name} -> ${role.folderName}/`);
   }
@@ -470,6 +713,26 @@ export async function getStrategyDetail(id: string) {
 export async function getStrategyFolderExport(id: string) {
   const detail = await getStrategyDetail(id);
   const rootFolderName = `strategy-${toPortableSlug(detail.name, detail.id)}`;
+  let sharedFiles: Array<{ path: string; content: string; updatedAt: string | null }> = [];
+  try {
+    const db = await ensureDb();
+    const rows = await db
+      .selectFrom("strategy_shared_files")
+      .select(["path", "content", "updated_at"])
+      .where("strategy_id", "=", detail.id)
+      .orderBy("path", "asc")
+      .execute();
+    sharedFiles = rows.map((row) => ({
+      path: String(row.path),
+      content: String(row.content ?? ""),
+      updatedAt: row.updated_at ? String(row.updated_at) : null
+    }));
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_shared_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
   const manifest: StrategyFolderManifest = {
     formatVersion: 1,
     exportedAt: new Date().toISOString(),
@@ -479,6 +742,7 @@ export async function getStrategyFolderExport(id: string) {
       description: detail.description,
       isShared: detail.isShared
     },
+    sharedFiles: sharedFiles.map((file) => ({ path: file.path, updatedAt: file.updatedAt })),
     roles: detail.roles
       .slice()
       .sort((a, b) => a.roleOrder - b.roleOrder)
@@ -521,6 +785,12 @@ export async function getStrategyFolderExport(id: string) {
         content: file.content ?? ""
       });
     }
+  }
+  for (const file of sharedFiles) {
+    entries.push({
+      path: `${rootFolderName}/shared/${file.path}`,
+      content: file.content ?? ""
+    });
   }
 
   return {
@@ -579,6 +849,15 @@ export async function overwriteStrategyFromFolderUpload(
             : strategy.description,
         isShared: typeof parsed.strategy.isShared === "boolean" ? parsed.strategy.isShared : strategy.isShared
       },
+      sharedFiles: Array.isArray(parsed.sharedFiles)
+        ? parsed.sharedFiles
+            .map((file) => ({
+              path: typeof file.path === "string" ? file.path : "",
+              updatedAt:
+                typeof file.updatedAt === "string" || file.updatedAt === null ? file.updatedAt : undefined
+            }))
+            .filter((file) => file.path)
+        : [],
       roles: parsed.roles
         .map((role) => ({
           folderName: typeof role.folderName === "string" ? role.folderName : "",
@@ -624,6 +903,17 @@ export async function overwriteStrategyFromFolderUpload(
       };
     });
 
+  const sharedFiles = Array.from(fileMap.entries())
+    .filter(([relativePath]) => relativePath.startsWith("shared/"))
+    .map(([relativePath, content]) => ({
+      path: relativeFilePathSchema.parse(relativePath.slice("shared/".length)),
+      content: agentFileUpsertSchema.parse({
+        path: relativePath.slice("shared/".length),
+        content
+      }).content
+    }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+
   const now = new Date().toISOString();
   try {
     const db = await ensureDb();
@@ -650,6 +940,7 @@ export async function overwriteStrategyFromFolderUpload(
         await trx.deleteFrom("strategy_role_files").where("strategy_role_id", "in", existingRoleIds).execute();
       }
       await trx.deleteFrom("strategy_roles").where("strategy_id", "=", strategyId).execute();
+      await trx.deleteFrom("strategy_shared_files").where("strategy_id", "=", strategyId).execute();
 
       for (const role of nextRoles) {
         await trx
@@ -679,12 +970,27 @@ export async function overwriteStrategyFromFolderUpload(
             .execute();
         }
       }
+
+      for (const file of sharedFiles) {
+        await trx
+          .insertInto("strategy_shared_files")
+          .values({
+            id: randomUUID(),
+            strategy_id: strategyId,
+            path: file.path,
+            content: file.content,
+            created_at: now,
+            updated_at: now
+          })
+          .execute();
+      }
     });
   } catch (error) {
     if (
       isMissingTableError(error, "strategies") ||
       isMissingTableError(error, "strategy_roles") ||
-      isMissingTableError(error, "strategy_role_files")
+      isMissingTableError(error, "strategy_role_files") ||
+      isMissingTableError(error, "strategy_shared_files")
     ) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
@@ -827,6 +1133,26 @@ export async function forkStrategy(id: string) {
             .execute();
         }
       }
+
+      const sharedFiles = await trx
+        .selectFrom("strategy_shared_files")
+        .select(["path", "content"])
+        .where("strategy_id", "=", source.id)
+        .orderBy("path", "asc")
+        .execute();
+      for (const file of sharedFiles) {
+        await trx
+          .insertInto("strategy_shared_files")
+          .values({
+            id: randomUUID(),
+            strategy_id: forkId,
+            path: file.path,
+            content: file.content ?? "",
+            created_at: now,
+            updated_at: now
+          })
+          .execute();
+      }
     });
     return { id: forkId };
   } catch (error) {
@@ -835,6 +1161,7 @@ export async function forkStrategy(id: string) {
       isMissingTableError(error, "strategies") ||
       isMissingTableError(error, "strategy_roles") ||
       isMissingTableError(error, "strategy_role_files") ||
+      isMissingTableError(error, "strategy_shared_files") ||
       isMissingColumnError(error, "forked_from_strategy_id")
     ) {
       if (isMissingColumnError(error, "forked_from_strategy_id")) {
@@ -1185,7 +1512,7 @@ async function loadStrategyWorkflowPhasePromptState(strategyId: string) {
 
     const owner = rows.find((row) => String(row.workflow_content ?? "").trim()) ?? rows[0];
     const rawWorkflow = String(owner.workflow_content ?? "").trim();
-    const workflowConfig = (() => {
+    const baseWorkflowConfig = (() => {
       if (!rawWorkflow) return createDefaultDebateWorkflowConfig();
       try {
         const parsed = JSON.parse(rawWorkflow) as DebateWorkflowConfig;
@@ -1194,11 +1521,18 @@ async function loadStrategyWorkflowPhasePromptState(strategyId: string) {
         return createDefaultDebateWorkflowConfig();
       }
     })();
+    const fileAccessRules = await ensureStrategyFileAccessRulesMigrated(
+      strategy.id,
+      rows.map((row) => String(row.id)),
+      baseWorkflowConfig
+    );
+    const workflowConfig = mergeWorkflowConfigWithFileAccessRules(baseWorkflowConfig, fileAccessRules);
 
     return {
       canEdit,
       ownerRoleId: String(owner.id),
       roleIds: rows.map((row) => String(row.id)),
+      fileAccessRules,
       workflowConfig,
       hasExistingWorkflow: Boolean(rawWorkflow)
     };
@@ -1237,10 +1571,11 @@ export async function updateStrategyWorkflowConfig(strategyId: string, input: un
     throw new AppError("FORBIDDEN", 403, "Permission denied");
   }
 
-  const canonicalWorkflow = toCanonicalWorkflowConfig(data.workflowConfig);
-  if (!canonicalWorkflow) {
+  const nextBaseWorkflow = toCanonicalWorkflowConfig(data.workflowConfig);
+  if (!nextBaseWorkflow) {
     throw new AppError("VALIDATION_ERROR", 400, "Invalid workflow config");
   }
+  const canonicalWorkflow = mergeWorkflowConfigWithFileAccessRules(nextBaseWorkflow, state.fileAccessRules);
 
   const now = new Date().toISOString();
   const content = JSON.stringify(canonicalWorkflow, null, 2);
@@ -1308,7 +1643,10 @@ export async function updateStrategyWorkflowPhasePrompts(strategyId: string, inp
   };
 
   const now = new Date().toISOString();
-  const canonicalWorkflow = toCanonicalWorkflowConfig(nextWorkflow) ?? nextWorkflow;
+  const canonicalWorkflow = mergeWorkflowConfigWithFileAccessRules(
+    toCanonicalWorkflowConfig(nextWorkflow) ?? nextWorkflow,
+    state.fileAccessRules
+  );
   const content = JSON.stringify(canonicalWorkflow, null, 2);
   try {
     const db = await ensureDb();
@@ -1373,6 +1711,192 @@ async function requireVisibleStrategyRole(strategyId: string, roleId: string) {
   }
 }
 
+async function requireVisibleStrategy(strategyId: string) {
+  const { strategy, canEdit } = await getStrategyRowById(strategyId);
+  return { strategy, canEdit };
+}
+
+async function assertStrategyRoleBelongsToStrategy(strategyId: string, roleId: string) {
+  const db = await ensureDb();
+  const row = await db
+    .selectFrom("strategy_roles")
+    .select(["id"])
+    .where("strategy_id", "=", strategyId)
+    .where("id", "=", roleId)
+    .executeTakeFirst();
+  if (!row) {
+    throw new AppError("VALIDATION_ERROR", 400, "Role does not belong to strategy");
+  }
+}
+
+export async function listStrategyFileAccessRules(strategyId: string) {
+  await requireVisibleStrategy(strategyId);
+  return listStrategyFileAccessRulesInternal(strategyId);
+}
+
+export async function createStrategyFileAccessRule(strategyId: string, input: unknown) {
+  const data = strategyFileAccessRuleSchema.parse(input);
+  const { canEdit } = await requireVisibleStrategy(strategyId);
+  if (!canEdit) {
+    throw new AppError("FORBIDDEN", 403, "Permission denied");
+  }
+  if (data.scope === "shared" && data.strategyRoleId) {
+    throw new AppError("VALIDATION_ERROR", 400, "Shared rules cannot bind strategyRoleId");
+  }
+  if (data.scope === "seat" && !data.strategyRoleId) {
+    throw new AppError("VALIDATION_ERROR", 400, "Seat rules require strategyRoleId");
+  }
+  if (data.accessMode === "unlock_after_phase" && data.scope !== "shared") {
+    throw new AppError("VALIDATION_ERROR", 400, "Phase unlock only supports shared files");
+  }
+  if (data.accessMode === "unlock_after_phase" && !data.phaseKind) {
+    throw new AppError("VALIDATION_ERROR", 400, "Phase unlock requires phaseKind");
+  }
+  if (data.strategyRoleId) {
+    await assertStrategyRoleBelongsToStrategy(strategyId, data.strategyRoleId);
+  }
+
+  const now = new Date().toISOString();
+  const targetPath = normalizeStrategyAccessTargetPath(data.targetPath, data.targetType);
+  try {
+    const db = await ensureDb();
+    const row = await db
+      .insertInto("strategy_file_access_rules")
+      .values({
+        id: randomUUID(),
+        strategy_id: strategyId,
+        strategy_role_id: data.scope === "seat" ? data.strategyRoleId ?? null : null,
+        scope: data.scope,
+        target_type: data.targetType,
+        target_path: targetPath,
+        access_mode: data.accessMode,
+        phase_kind: data.accessMode === "unlock_after_phase" ? data.phaseKind ?? null : null,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["strategy_id", "scope", "strategy_role_id", "target_type", "target_path"]).doUpdateSet({
+          access_mode: data.accessMode,
+          phase_kind: data.accessMode === "unlock_after_phase" ? data.phaseKind ?? null : null,
+          updated_at: now
+        })
+      )
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    return normalizeStrategyFileAccessRuleRow(row);
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_file_access_rules")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+export async function updateStrategyFileAccessRule(strategyId: string, ruleId: string, input: unknown) {
+  const data = updateStrategyFileAccessRuleSchema.parse(input);
+  const { canEdit } = await requireVisibleStrategy(strategyId);
+  if (!canEdit) {
+    throw new AppError("FORBIDDEN", 403, "Permission denied");
+  }
+
+  const db = await ensureDb();
+  const existing = await db
+    .selectFrom("strategy_file_access_rules")
+    .selectAll()
+    .where("strategy_id", "=", strategyId)
+    .where("id", "=", ruleId)
+    .executeTakeFirst();
+  if (!existing) {
+    throw new AppError("NOT_FOUND", 404, "Rule not found");
+  }
+
+  const nextScope = data.scope ?? (existing.scope === "seat" ? "seat" : "shared");
+  const nextTargetType = data.targetType ?? (existing.target_type === "file" ? "file" : "dir");
+  const nextAccessMode =
+    data.accessMode ?? (existing.access_mode === "unlock_after_phase" ? "unlock_after_phase" : existing.access_mode === "read_when_needed" ? "read_when_needed" : "always_read");
+  const nextRoleId =
+    nextScope === "seat"
+      ? data.strategyRoleId === undefined
+        ? (existing.strategy_role_id ? String(existing.strategy_role_id) : null)
+        : data.strategyRoleId
+      : null;
+  const nextPhaseKind =
+    nextAccessMode === "unlock_after_phase"
+      ? data.phaseKind === undefined
+        ? (isWorkflowPhaseKind(existing.phase_kind) ? existing.phase_kind : null)
+        : data.phaseKind
+      : null;
+  const nextPath = data.targetPath
+    ? normalizeStrategyAccessTargetPath(data.targetPath, nextTargetType)
+    : normalizeStrategyAccessTargetPath(String(existing.target_path ?? ""), nextTargetType);
+
+  if (nextScope === "shared" && nextRoleId) {
+    throw new AppError("VALIDATION_ERROR", 400, "Shared rules cannot bind strategyRoleId");
+  }
+  if (nextScope === "seat" && !nextRoleId) {
+    throw new AppError("VALIDATION_ERROR", 400, "Seat rules require strategyRoleId");
+  }
+  if (nextAccessMode === "unlock_after_phase" && nextScope !== "shared") {
+    throw new AppError("VALIDATION_ERROR", 400, "Phase unlock only supports shared files");
+  }
+  if (nextAccessMode === "unlock_after_phase" && !nextPhaseKind) {
+    throw new AppError("VALIDATION_ERROR", 400, "Phase unlock requires phaseKind");
+  }
+  if (nextRoleId) {
+    await assertStrategyRoleBelongsToStrategy(strategyId, nextRoleId);
+  }
+
+  const now = new Date().toISOString();
+  try {
+    const row = await db
+      .updateTable("strategy_file_access_rules")
+      .set({
+        strategy_role_id: nextRoleId,
+        scope: nextScope,
+        target_type: nextTargetType,
+        target_path: nextPath,
+        access_mode: nextAccessMode,
+        phase_kind: nextPhaseKind,
+        updated_at: now
+      })
+      .where("strategy_id", "=", strategyId)
+      .where("id", "=", ruleId)
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    return normalizeStrategyFileAccessRuleRow(row);
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_file_access_rules")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+export async function deleteStrategyFileAccessRule(strategyId: string, ruleId: string) {
+  deleteStrategyFileAccessRuleSchema.parse({ ruleId });
+  const { canEdit } = await requireVisibleStrategy(strategyId);
+  if (!canEdit) {
+    throw new AppError("FORBIDDEN", 403, "Permission denied");
+  }
+  try {
+    const db = await ensureDb();
+    const result = await db
+      .deleteFrom("strategy_file_access_rules")
+      .where("strategy_id", "=", strategyId)
+      .where("id", "=", ruleId)
+      .executeTakeFirst();
+    if (Number(result.numDeletedRows ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "Rule not found");
+    }
+    return null;
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_file_access_rules")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
 export async function listStrategyRoleFiles(strategyId: string, roleId: string) {
   await requireVisibleStrategyRole(strategyId, roleId);
   try {
@@ -1390,6 +1914,199 @@ export async function listStrategyRoleFiles(strategyId: string, roleId: string) 
     }));
   } catch (error) {
     if (isMissingTableError(error, "strategy_role_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+export async function listStrategySharedFiles(strategyId: string) {
+  await requireVisibleStrategy(strategyId);
+  try {
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("strategy_shared_files")
+      .select(["path", "created_at", "updated_at"])
+      .where("strategy_id", "=", strategyId)
+      .orderBy("path", "asc")
+      .execute();
+    return result.map((row) => ({
+      path: String(row.path),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at)
+    }));
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_shared_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+export async function getStrategySharedFile(strategyId: string, path: string) {
+  await requireVisibleStrategy(strategyId);
+  try {
+    const db = await ensureDb();
+    const result = await db
+      .selectFrom("strategy_shared_files")
+      .select(["path", "content", "created_at", "updated_at"])
+      .where("strategy_id", "=", strategyId)
+      .where("path", "=", path)
+      .limit(1)
+      .executeTakeFirst();
+    if (!result) {
+      throw new AppError("NOT_FOUND", 404, "File not found");
+    }
+    return {
+      path: String(result.path),
+      content: String(result.content ?? ""),
+      createdAt: String(result.created_at),
+      updatedAt: String(result.updated_at)
+    };
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_shared_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+export async function upsertStrategySharedFile(strategyId: string, input: unknown) {
+  const data = agentFileUpsertSchema.parse(input);
+  const { canEdit } = await requireVisibleStrategy(strategyId);
+  if (!canEdit) {
+    throw new AppError("FORBIDDEN", 403, "Permission denied");
+  }
+
+  const now = new Date().toISOString();
+  try {
+    const db = await ensureDb();
+    const result = await db
+      .insertInto("strategy_shared_files")
+      .values({
+        id: randomUUID(),
+        strategy_id: strategyId,
+        path: data.path,
+        content: data.content,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["strategy_id", "path"]).doUpdateSet({
+          content: data.content,
+          updated_at: now
+        })
+      )
+      .returning(["path", "content", "created_at", "updated_at"])
+      .executeTakeFirstOrThrow();
+    return {
+      path: String(result.path),
+      content: String(result.content ?? ""),
+      createdAt: String(result.created_at),
+      updatedAt: String(result.updated_at)
+    };
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_shared_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+export async function deleteStrategySharedFile(strategyId: string, input: unknown) {
+  const data = agentFileDeleteSchema.parse(input);
+  const { canEdit } = await requireVisibleStrategy(strategyId);
+  if (!canEdit) {
+    throw new AppError("FORBIDDEN", 403, "Permission denied");
+  }
+
+  try {
+    const db = await ensureDb();
+    const result = await db
+      .deleteFrom("strategy_shared_files")
+      .where("strategy_id", "=", strategyId)
+      .where("path", "=", data.path)
+      .executeTakeFirst();
+    if (Number(result.numDeletedRows ?? 0) !== 1) {
+      throw new AppError("NOT_FOUND", 404, "File not found");
+    }
+    return null;
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_shared_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+export async function deleteStrategySharedFilesByPrefix(strategyId: string, prefix: string) {
+  const { canEdit } = await requireVisibleStrategy(strategyId);
+  if (!canEdit) {
+    throw new AppError("FORBIDDEN", 403, "Permission denied");
+  }
+
+  const normalized = String(prefix ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const like = normalized ? `${normalized.replace(/\/+$/, "")}/%` : "%";
+  try {
+    const db = await ensureDb();
+    const result = await db
+      .deleteFrom("strategy_shared_files")
+      .where("strategy_id", "=", strategyId)
+      .where("path", "like", like)
+      .executeTakeFirst();
+    return { deleted: Number(result.numDeletedRows ?? 0) };
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_shared_files")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
+    }
+    throw error;
+  }
+}
+
+export async function moveStrategySharedFile(strategyId: string, input: unknown) {
+  const data = agentFileMoveSchema.parse(input);
+  const { canEdit } = await requireVisibleStrategy(strategyId);
+  if (!canEdit) {
+    throw new AppError("FORBIDDEN", 403, "Permission denied");
+  }
+  if (data.fromPath === data.toPath) {
+    throw new AppError("VALIDATION_ERROR", 400, "fromPath and toPath must be different");
+  }
+
+  const now = new Date().toISOString();
+  try {
+    const db = await ensureDb();
+    const exists = await db
+      .selectFrom("strategy_shared_files")
+      .select("path")
+      .where("strategy_id", "=", strategyId)
+      .where("path", "=", data.toPath)
+      .executeTakeFirst();
+    if (exists) {
+      throw new AppError("CONFLICT", 409, "Target path already exists");
+    }
+
+    const updated = await db
+      .updateTable("strategy_shared_files")
+      .set({
+        path: data.toPath,
+        updated_at: now
+      })
+      .where("strategy_id", "=", strategyId)
+      .where("path", "=", data.fromPath)
+      .returning(["path", "content", "created_at", "updated_at"])
+      .executeTakeFirst();
+    if (!updated) {
+      throw new AppError("NOT_FOUND", 404, "File not found");
+    }
+    return {
+      path: String(updated.path),
+      content: String(updated.content ?? ""),
+      createdAt: String(updated.created_at),
+      updatedAt: String(updated.updated_at)
+    };
+  } catch (error) {
+    if (isMissingTableError(error, "strategy_shared_files")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing strategies tables");
     }
     throw error;

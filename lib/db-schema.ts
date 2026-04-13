@@ -39,6 +39,28 @@ export type StrategyRoleFileTable = {
   updated_at: TimestampString;
 };
 
+export type StrategySharedFileTable = {
+  id: Generated<string>;
+  strategy_id: string;
+  path: string;
+  content: string;
+  created_at: TimestampString;
+  updated_at: TimestampString;
+};
+
+export type StrategyFileAccessRuleTable = {
+  id: Generated<string>;
+  strategy_id: string;
+  strategy_role_id: string | null;
+  scope: string;
+  target_type: string;
+  target_path: string;
+  access_mode: string;
+  phase_kind: string | null;
+  created_at: TimestampString;
+  updated_at: TimestampString;
+};
+
 export type WorkspaceTable = {
   id: string;
   owner_user_id: string;
@@ -137,6 +159,8 @@ export type DebateSummaryJobTable = {
   round_number: number | null;
   depends_on_keys: unknown;
   payload_json: unknown;
+  priority: number;
+  run_after: NullableTimestampString;
   attempt_count: number;
   last_error: string | null;
   next_retry_at: NullableTimestampString;
@@ -145,6 +169,21 @@ export type DebateSummaryJobTable = {
   created_at: TimestampString;
   updated_at: TimestampString;
   completed_at: NullableTimestampString;
+};
+
+export type DebateSummaryWorkerTable = {
+  id: string;
+  mode: string;
+  status: string;
+  started_at: TimestampString;
+  last_heartbeat_at: TimestampString;
+  current_job_id: string | null;
+  current_debate_id: string | null;
+  current_job_key: string | null;
+  claimed_count: number;
+  completed_count: number;
+  failed_count: number;
+  updated_at: TimestampString;
 };
 
 export type DebateTable = {
@@ -283,6 +322,7 @@ export type OpenDebateDb = {
   debate_context_embeddings: DebateContextEmbeddingTable;
   debate_files: DebateFileTable;
   debate_summary_jobs: DebateSummaryJobTable;
+  debate_summary_workers: DebateSummaryWorkerTable;
   debate_turns: DebateTurnTable;
   debates: DebateTable;
   email_verification_codes: EmailVerificationCodeTable;
@@ -290,7 +330,9 @@ export type OpenDebateDb = {
   retrieval_configs: RetrievalConfigTable;
   strategies: StrategyTable;
   strategy_favorites: StrategyFavoriteTable;
+  strategy_file_access_rules: StrategyFileAccessRuleTable;
   strategy_role_files: StrategyRoleFileTable;
+  strategy_shared_files: StrategySharedFileTable;
   strategy_roles: StrategyRoleTable;
   users: UserTable;
   workspace_files: WorkspaceFileTable;

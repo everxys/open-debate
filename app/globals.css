@@ -244,6 +244,145 @@ button {
   background: #fbfdff;
 }
 
+.strategySplit {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.strategySidebar {
+  position: sticky;
+  top: 16px;
+  height: fit-content;
+}
+
+.strategyMain {
+  min-width: 0;
+}
+
+.strategyTab {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.strategyTab:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(20, 38, 63, 0.10);
+}
+
+.strategyTabLabel {
+  position: relative;
+  z-index: 1;
+}
+
+.strategyTabActive {
+  box-shadow: 0 12px 26px rgba(38, 99, 235, 0.26);
+}
+
+.strategyPanelContent {
+  animation: none;
+}
+
+.strategyRoleEditorPanel {
+  min-height: 520px;
+}
+
+.strategyPanelBox {
+  min-height: 640px;
+  height: 74vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  scrollbar-gutter: stable;
+}
+
+.strategyPanelStack {
+  position: relative;
+  height: 74vh;
+  min-height: 640px;
+}
+
+.strategyPanelLayer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.strategyPanelLayer.isActive {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.strategyPanelLayer[aria-hidden="true"] {
+  pointer-events: none;
+  contain: layout style paint;
+}
+
+.strategyRoleEditorBody {
+  flex: 1;
+}
+
+.strategyPanelFill {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.strategyPanelBox .filesTreeBox,
+.strategyPanelBox .editorBox,
+.strategyPanelBox .panel {
+  min-height: 0;
+  height: 100%;
+}
+
+.strategyPanelBox .filesTreeBox {
+  display: flex;
+  flex-direction: column;
+}
+
+.strategyPanelBox .treeRoot {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.strategyPanelBox .editorBox {
+  flex: 1;
+  min-height: 0;
+}
+
+.strategyPromptField {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.strategyRoleEditorPanel .strategyPrompt {
+  flex: 1;
+  min-height: 0;
+  resize: vertical;
+}
+
+@media (max-width: 960px) {
+  .strategySplit {
+    grid-template-columns: 1fr;
+  }
+
+  .strategySidebar {
+    position: static;
+  }
+}
+
 .agentCard {
   position: relative;
 }
@@ -513,6 +652,35 @@ button {
   min-height: 0;
 }
 
+.debateFilesAction {
+  min-width: 140px;
+}
+
+.debateFilesActionLabel {
+  display: inline-grid;
+  align-items: center;
+  justify-content: center;
+  min-width: 100%;
+}
+
+.debateFilesActionLabel::after {
+  content: attr(data-label);
+  visibility: hidden;
+  height: 0;
+  display: block;
+  overflow: hidden;
+}
+
+.debateFilesPanel .filesTreeBox {
+  min-height: 0;
+  flex: 1;
+}
+
+.debateFilesPanel .treeRoot {
+  height: 100%;
+  min-height: 0;
+}
+
 .debateViewerShell {
   grid-column: 3;
   min-width: 0;
@@ -769,6 +937,97 @@ button {
   line-height: 1.5;
 }
 
+.runtimeErrorBox {
+  border: 1px solid rgba(248, 113, 113, 0.32);
+  border-radius: 12px;
+  background: rgba(254, 242, 242, 0.72);
+  padding: 8px 10px;
+  color: #64748b;
+}
+
+.runtimeErrorBox summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.runtimeErrorBox summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtimeErrorBox summary small {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: #94a3b8;
+}
+
+.runtimeErrorMessage {
+  margin-top: 8px;
+  max-height: 96px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.runtimeErrorBox pre {
+  margin: 8px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.summaryJobsBox {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fbfdff;
+  padding: 10px 12px;
+}
+
+.summaryJobsBox summary {
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  align-items: center;
+}
+
+.summaryJobsBox summary span,
+.summaryJobsBox summary small {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summaryJobsBox summary small {
+  grid-column: 1 / -1;
+}
+
+.summaryJobsActions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.summaryJobsList {
+  display: grid;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  margin-top: 10px;
+}
+
 .turn {
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -970,6 +1229,197 @@ button {
   }
 }
 
+.debateFileActivityExplorer {
+  display: grid;
+  grid-template-columns: minmax(248px, 288px) minmax(0, 1fr);
+  gap: 14px;
+  flex: 1;
+  min-height: 0;
+}
+
+.debateFileActivitySidebar,
+.debateFileActivityMain {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #fcfdff;
+  min-height: 0;
+}
+
+.debateFileActivitySidebar {
+  padding: 10px;
+  overflow: auto;
+}
+
+.debateFileActivityMain {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.debateFileActivityMainHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(247, 250, 255, 0.96), rgba(252, 253, 255, 0.96));
+}
+
+.debateFileActivityMainBody {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 12px;
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.debateFileActivityTreeGroup + .debateFileActivityTreeGroup {
+  margin-top: 6px;
+}
+
+.debateFileActivityTreeChildren {
+  margin-left: 14px;
+  border-left: 1px solid rgba(203, 213, 225, 0.8);
+  padding-left: 8px;
+}
+
+.debateFileActivityTreeRow {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+  min-height: 36px;
+  border-radius: 12px;
+}
+
+.debateFileActivityTreeRow.is-round,
+.debateFileActivityTreeRow.is-turn {
+  min-height: 34px;
+}
+
+.debateFileActivityTreeRow.is-selected {
+  background: rgba(38, 99, 235, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(38, 99, 235, 0.18);
+}
+
+.debateFileActivityToggle,
+.debateFileActivityTreeButton {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 0;
+}
+
+.debateFileActivityToggle {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: #4d5f7b;
+}
+
+.debateFileActivityToggle:hover {
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.debateFileActivityTreeButton {
+  min-width: 0;
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  padding: 6px 10px 6px 0;
+}
+
+.debateFileActivityTreeLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.debateFileActivityTreeCount {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: #5d6d86;
+  font-size: 12px;
+}
+
+.debateFileActivityRoleTag {
+  padding: 2px 8px;
+  font-size: 12px;
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.debateFileActivityTreeSpacer {
+  width: 20px;
+  height: 20px;
+}
+
+.debateFileActivityEntry {
+  border: 1px solid rgba(203, 213, 225, 0.92);
+  border-radius: 14px;
+  background: #fff;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.debateFileActivityEntryTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.debateFileActivityEntryPath {
+  min-width: 0;
+  flex: 1;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.debateFileActivityActionTag,
+.debateFileActivityDiagTag {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.debateFileActivityEntryMeta,
+.debateFileActivityEntryStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 6px;
+  align-items: center;
+}
+
+.debateFileActivityEntryHint {
+  margin-top: 6px;
+}
+
+@media (max-width: 1080px) {
+  .debateFileActivityExplorer {
+    grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .debateFileActivityRoleTag {
+    padding: 2px 6px;
+    font-size: 11px;
+  }
+
+  .debateFileActivityEntry {
+    padding: 9px 10px;
+  }
+}
+
 @media (max-width: 900px) {
   .grid-2 {
     grid-template-columns: 1fr;
@@ -977,5 +1427,26 @@ button {
 
   .grid-3 {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .debateFileActivityExplorer {
+    grid-template-columns: 1fr;
+  }
+
+  .debateFileActivityMain {
+    order: 1;
+    min-height: 420px;
+  }
+
+  .debateFileActivitySidebar {
+    order: 2;
+    max-height: 240px;
+  }
+
+  .debateFileActivityMainHeader {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

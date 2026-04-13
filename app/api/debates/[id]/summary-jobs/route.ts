@@ -3,6 +3,7 @@ import { toErrorResponse, AppError } from "@/lib/http";
 import { readSession } from "@/lib/session";
 import {
   enqueueDebateSummaryJob,
+  FACTS_BOARD_JOB_KEY,
   listDebateSummaryJobs,
   retryFailedDebateSummaryJobs
 } from "@/lib/summary-jobs";
@@ -175,7 +176,7 @@ export async function POST(
       const job = await enqueueDebateSummaryJob({
         debateId: id,
         kind: "facts_board",
-        jobKey: `facts:manual:${Date.now()}`,
+        jobKey: FACTS_BOARD_JOB_KEY,
         turnNumber,
         roundNumber,
         payload: {
@@ -186,8 +187,13 @@ export async function POST(
           sourceLabel,
           sourceSummary,
           turnNumber,
-          roundNumber
+          roundNumber,
+          sourceKey: "manual",
+          sourcePriority: latestRound?.roundNumber ? "round" : "turn",
+          sourceUpdatedAt: new Date().toISOString()
         },
+        priority: 20,
+        runAfter: new Date().toISOString(),
         force: true
       });
       return new Response(JSON.stringify({ success: true, data: job }), { headers: { "Content-Type": "application/json" } });

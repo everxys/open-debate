@@ -9,6 +9,29 @@ export function resolveChatUrl(agent: AgentRecord) {
     : `${normalized}/messages`;
 }
 
+function normalizeOpenAiChatBody(body: Record<string, unknown>) {
+  const messages = Array.isArray(body.messages)
+    ? body.messages.map((message) => {
+        if (!message || typeof message !== "object") return message;
+        const record = message as Record<string, unknown>;
+        if (!Array.isArray(record.tool_calls)) return message;
+        return {
+          ...record,
+          tool_calls: record.tool_calls.map((toolCall) => {
+            if (!toolCall || typeof toolCall !== "object") return toolCall;
+            const call = toolCall as Record<string, unknown>;
+            return {
+              ...call,
+              type: typeof call.type === "string" && call.type ? call.type : "function"
+            };
+          })
+        };
+      })
+    : body.messages;
+
+  return { ...body, messages };
+}
+
 async function readSseJsonLines(response: Response, onData: (data: string) => void) {
   if (!response.body) return;
   const reader = response.body.getReader();
@@ -47,6 +70,7 @@ export async function openAiChatStream(args: {
   apiKey: string;
   body: Record<string, unknown>;
 }) {
+  const body = normalizeOpenAiChatBody(args.body);
   const response = await fetch(args.url, {
     method: "POST",
     headers: {
@@ -54,7 +78,7 @@ export async function openAiChatStream(args: {
       Authorization: `Bearer ${args.apiKey}`
     },
     body: JSON.stringify({
-      ...args.body,
+      ...body,
       stream: true,
       stream_options: { include_usage: true }
     })
@@ -122,6 +146,7 @@ export async function openAiChatStream(args: {
     .sort((a, b) => a[0] - b[0])
     .map(([, value]) => ({
       id: value.id ?? "",
+      type: "function",
       function: {
         name: value.function?.name ?? "",
         arguments: value.function?.arguments ?? "{}"
@@ -139,7 +164,7 @@ export async function openAiChatOnce(args: { url: string; apiKey: string; body: 
       "Content-Type": "application/json",
       Authorization: `Bearer ${args.apiKey}`
     },
-    body: JSON.stringify(args.body)
+    body: JSON.stringify(normalizeOpenAiChatBody(args.body))
   });
 
   const payload = await response.json().catch(() => ({}));
@@ -152,6 +177,7 @@ export async function openAiChatOnce(args: { url: string; apiKey: string; body: 
   const toolCalls = Array.isArray(message?.tool_calls)
     ? (message.tool_calls as Array<{ id?: unknown; function?: { name?: unknown; arguments?: unknown } }>).map((c) => ({
         id: typeof c.id === "string" ? c.id : "",
+        type: "function",
         function: {
           name: typeof c.function?.name === "string" ? c.function.name : "",
           arguments: typeof c.function?.arguments === "string" ? c.function.arguments : "{}"
@@ -164,6 +190,7 @@ export async function openAiChatOnce(args: { url: string; apiKey: string; body: 
 }
 
 export async function openAiUsageProbe(args: { url: string; apiKey: string; body: Record<string, unknown> }) {
+  const body = normalizeOpenAiChatBody(args.body);
   const response = await fetch(args.url, {
     method: "POST",
     headers: {
@@ -171,7 +198,7 @@ export async function openAiUsageProbe(args: { url: string; apiKey: string; body
       Authorization: `Bearer ${args.apiKey}`
     },
     body: JSON.stringify({
-      ...args.body,
+      ...body,
       max_tokens: 1,
       stream: false,
       tool_choice: "none",

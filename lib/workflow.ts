@@ -1,9 +1,11 @@
 export type WorkflowPhaseKind = "analysis" | "deliberation" | "finalization_vote" | "finalization";
 export type WorkflowContextAccessScope = "shared" | "seat";
+export type WorkflowContextAccessTargetType = "file" | "dir";
 export type WorkflowCompletionMode = "consensus_only" | "consensus_plus_outputs" | "workflow_gate";
 
 export type DebateWorkflowContextAccessRule = {
   scope?: WorkflowContextAccessScope;
+  targetType?: WorkflowContextAccessTargetType;
   pathPrefix?: string;
   maxFiles?: number | null;
   maxCharsPerFile?: number | null;
@@ -219,6 +221,7 @@ export type NormalizedDebateWorkflow = {
   contextAccess: {
     alwaysRead: Array<{
       scope: WorkflowContextAccessScope;
+      targetType: WorkflowContextAccessTargetType;
       pathPrefix: string;
       maxFiles: number;
       maxCharsPerFile: number;
@@ -226,6 +229,7 @@ export type NormalizedDebateWorkflow = {
     }>;
     readWhenNeeded: Array<{
       scope: WorkflowContextAccessScope;
+      targetType: WorkflowContextAccessTargetType;
       pathPrefix: string;
       maxFiles: number;
       maxCharsPerFile: number;
@@ -234,6 +238,7 @@ export type NormalizedDebateWorkflow = {
     unlockAfterPhase: Array<{
       phaseKind: WorkflowPhaseKind;
       scope: WorkflowContextAccessScope;
+      targetType: WorkflowContextAccessTargetType;
       pathPrefix: string;
       maxFiles: number;
       maxCharsPerFile: number;
@@ -407,6 +412,11 @@ function normalizeWorkflowFilePath(value: unknown) {
   const normalized = trimmed.replace(/\\/g, "/").replace(/^\/+/, "");
   if (!normalized || normalized.includes("..") || normalized.endsWith("/")) return null;
   return normalized;
+}
+
+function normalizeContextAccessPath(value: unknown, targetType: WorkflowContextAccessTargetType | null) {
+  if (targetType === "file") return normalizeWorkflowFilePath(value);
+  return normalizeWorkflowPathPrefix(value);
 }
 
 function normalizeVoting(value: unknown): NormalizedDebateWorkflow["voting"] {
@@ -772,10 +782,15 @@ function normalizeContextAccessScope(value: unknown): WorkflowContextAccessScope
   return value === "shared" || value === "seat" ? value : null;
 }
 
+function normalizeContextAccessTargetType(value: unknown): WorkflowContextAccessTargetType {
+  return value === "file" ? "file" : "dir";
+}
+
 function normalizeContextAccessRule(
   value: unknown
 ): {
   scope: WorkflowContextAccessScope;
+  targetType: WorkflowContextAccessTargetType;
   pathPrefix: string;
   maxFiles: number;
   maxCharsPerFile: number;
@@ -783,14 +798,18 @@ function normalizeContextAccessRule(
 } | null {
   const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
   const scope = normalizeContextAccessScope(obj?.scope);
-  const pathPrefix = normalizeWorkflowPathPrefix(obj?.pathPrefix);
+  const targetType = normalizeContextAccessTargetType(obj?.targetType);
+  const pathPrefix = normalizeContextAccessPath(obj?.pathPrefix, targetType);
   if (!scope || !pathPrefix) return null;
+  const defaultMaxFiles = targetType === "file" ? 1 : 6;
+  const defaultMaxCharsPerFile = targetType === "file" ? 8_000 : 4_000;
   return {
     scope,
+    targetType,
     pathPrefix,
-    maxFiles: toPositiveInt(obj?.maxFiles) ?? 6,
-    maxCharsPerFile: toPositiveInt(obj?.maxCharsPerFile) ?? 4_000,
-    recursive: obj?.recursive === undefined ? true : Boolean(obj?.recursive)
+    maxFiles: toPositiveInt(obj?.maxFiles) ?? defaultMaxFiles,
+    maxCharsPerFile: toPositiveInt(obj?.maxCharsPerFile) ?? defaultMaxCharsPerFile,
+    recursive: targetType === "file" ? false : obj?.recursive === undefined ? true : Boolean(obj?.recursive)
   };
 }
 
@@ -822,16 +841,16 @@ function normalizeContextAccess(value: unknown): NormalizedDebateWorkflow["conte
     : [];
 
   const seen = new Set<string>();
-  const register = (scope: WorkflowContextAccessScope, pathPrefix: string) => {
-    const key = `${scope}:${pathPrefix.toLowerCase()}`;
+  const register = (scope: WorkflowContextAccessScope, targetType: WorkflowContextAccessTargetType, pathPrefix: string) => {
+    const key = `${scope}:${targetType}:${pathPrefix.toLowerCase()}`;
     if (seen.has(key)) {
       throw new Error(`Duplicate contextAccess rule for ${key}`);
     }
     seen.add(key);
   };
-  for (const rule of alwaysRead) register(rule.scope, rule.pathPrefix);
-  for (const rule of readWhenNeeded) register(rule.scope, rule.pathPrefix);
-  for (const rule of unlockAfterPhase) register(rule.scope, rule.pathPrefix);
+  for (const rule of alwaysRead) register(rule.scope, rule.targetType, rule.pathPrefix);
+  for (const rule of readWhenNeeded) register(rule.scope, rule.targetType, rule.pathPrefix);
+  for (const rule of unlockAfterPhase) register(rule.scope, rule.targetType, rule.pathPrefix);
 
   return { alwaysRead, readWhenNeeded, unlockAfterPhase };
 }
@@ -971,6 +990,7 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
     contextAccess: {
       alwaysRead: normalized.contextAccess.alwaysRead.map((rule) => ({
         scope: rule.scope,
+        targetType: rule.targetType,
         pathPrefix: rule.pathPrefix,
         maxFiles: rule.maxFiles,
         maxCharsPerFile: rule.maxCharsPerFile,
@@ -978,6 +998,7 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
       })),
       readWhenNeeded: normalized.contextAccess.readWhenNeeded.map((rule) => ({
         scope: rule.scope,
+        targetType: rule.targetType,
         pathPrefix: rule.pathPrefix,
         maxFiles: rule.maxFiles,
         maxCharsPerFile: rule.maxCharsPerFile,
@@ -986,6 +1007,7 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
       unlockAfterPhase: normalized.contextAccess.unlockAfterPhase.map((rule) => ({
         phaseKind: rule.phaseKind,
         scope: rule.scope,
+        targetType: rule.targetType,
         pathPrefix: rule.pathPrefix,
         maxFiles: rule.maxFiles,
         maxCharsPerFile: rule.maxCharsPerFile,

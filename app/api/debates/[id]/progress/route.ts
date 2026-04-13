@@ -2,7 +2,7 @@ import { query } from "@/lib/db";
 import { getDebateLiveProgress } from "@/lib/debate-live";
 import { toErrorResponse } from "@/lib/http";
 import { readSession } from "@/lib/session";
-import { listActiveDebateSummaryJobs, toDebateSummaryJobLiveView } from "@/lib/summary-jobs";
+import { getSummaryWorkerHealthSnapshot, listActiveDebateSummaryJobs, toDebateSummaryJobLiveView } from "@/lib/summary-jobs";
 
 export const runtime = "nodejs";
 
@@ -47,8 +47,9 @@ export async function GET(
     for (const job of live.summaryJobs) {
       mergedJobs.set(job.key, job);
     }
+    const workerHealth = await getSummaryWorkerHealthSnapshot().catch(() => ({ workers: [], queue: [] }));
 
-    return new Response(JSON.stringify({ success: true, data: { progress: live.progress, summaryJobs: [...mergedJobs.values()] } }), {
+    return new Response(JSON.stringify({ success: true, data: { progress: live.progress, summaryJobs: [...mergedJobs.values()], workerHealth } }), {
       headers: { "Content-Type": "application/json" }
     });
   } catch (error) {

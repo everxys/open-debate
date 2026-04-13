@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 
 import { RoleFilesManagerColumns } from "@/components/strategies/role-files-manager";
+import { StrategySharedFilesManagerColumns } from "@/components/strategies/shared-files-manager";
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 
 type StrategyDetail = {
@@ -12,6 +13,7 @@ type StrategyDetail = {
   name: string;
   description: string | null;
   isShared: boolean;
+  updatedAt?: string | null;
   forkedFromStrategyId?: string | null;
   isFavorited?: boolean;
   favoriteCount?: number;
@@ -83,6 +85,16 @@ type WorkflowConfigPayload = {
   [key: string]: unknown;
 };
 
+type StrategyFileAccessRule = {
+  id: string;
+  strategyRoleId: string | null;
+  scope: "shared" | "seat";
+  targetType: "file" | "dir";
+  targetPath: string;
+  accessMode: "always_read" | "read_when_needed" | "unlock_after_phase";
+  phaseKind: WorkflowPhaseKind | null;
+};
+
 type WorkflowPromptDialogState =
   | null
   | {
@@ -124,6 +136,21 @@ function summarizePrompt(value: string) {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (!normalized) return "未配置";
   return normalized.length > 90 ? `${normalized.slice(0, 90)}...` : normalized;
+}
+
+function formatLocalTime(value: string | null | undefined) {
+  if (!value) return "未知";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "未知";
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function summarizeRoles(roles: RoleDraft[]) {
+  if (roles.length <= 0) return "暂无角色";
+  const names = roles.map((role) => role.name || "(未命名)");
+  const preview = names.slice(0, 6).join("、");
+  if (names.length <= 6) return `${preview}（共 ${names.length} 个）`;
+  return `${preview} 等 ${names.length} 个`;
 }
 
 function createContextAccessRule(): WorkflowContextAccessRule {
@@ -281,6 +308,48 @@ export default function StrategyDetailPage() {
   const [workflowContextAccessSaving, setWorkflowContextAccessSaving] = useState(false);
   const [workflowSummarizerSaving, setWorkflowSummarizerSaving] = useState(false);
   const folderImportInputRef = useRef<HTMLInputElement | null>(null);
+  const [fileAccessRules, setFileAccessRules] = useState<StrategyFileAccessRule[]>([]);
+  const [fileAccessRulesLoading, setFileAccessRulesLoading] = useState(false);
+  const [strategyPanel, setStrategyPanel] = useState<"shared" | "roleFiles" | "roleEditor" | "phaseUnlock">("shared");
+  const [mountedPanels, setMountedPanels] = useState({ shared: true, roleFiles: false, roleEditor: false, phaseUnlock: false });
+
+  const refreshFileAccessRules = useCallback(async () => {
+    if (!id) return;
+    setFileAccessRulesLoading(true);
+    try {
+      const response = await fetch(`/api/strategies/${id}/file-access-rules`, { cache: "no-store" });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "加载文件读取规则失败");
+        return;
+      }
+      const items = Array.isArray(payload.data) ? payload.data : [];
+      setFileAccessRules(
+        items.map((item: Record<string, unknown>) => ({
+          id: String(item.id ?? ""),
+          strategyRoleId: typeof item.strategyRoleId === "string" ? item.strategyRoleId : null,
+          scope: item.scope === "seat" ? "seat" : "shared",
+          targetType: item.targetType === "file" ? "file" : "dir",
+          targetPath: String(item.targetPath ?? ""),
+          accessMode:
+            item.accessMode === "unlock_after_phase"
+              ? "unlock_after_phase"
+              : item.accessMode === "read_when_needed"
+                ? "read_when_needed"
+                : "always_read",
+          phaseKind:
+            item.phaseKind === "analysis" ||
+            item.phaseKind === "deliberation" ||
+            item.phaseKind === "finalization_vote" ||
+            item.phaseKind === "finalization"
+              ? item.phaseKind
+              : null
+        }))
+      );
+    } finally {
+      setFileAccessRulesLoading(false);
+    }
+  }, [id, showToast]);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -310,12 +379,14 @@ export default function StrategyDetailPage() {
     setWorkflowPhasePromptsLoading(true);
     setWorkflowContextAccessLoading(true);
     try {
-      const [workflowResponse, workflowConfigResponse] = await Promise.all([
+      const [workflowResponse, workflowConfigResponse, fileAccessRulesResponse] = await Promise.all([
         fetch(`/api/strategies/${id}/workflow-phase-prompts`),
-        fetch(`/api/strategies/${id}/workflow-config`)
+        fetch(`/api/strategies/${id}/workflow-config`),
+        fetch(`/api/strategies/${id}/file-access-rules`, { cache: "no-store" })
       ]);
       const workflowPayload = await readPayload(workflowResponse);
       const workflowConfigPayload = await readPayload(workflowConfigResponse);
+      const fileAccessRulesPayload = await readPayload(fileAccessRulesResponse);
       if (!workflowResponse.ok) {
         showToast("error", workflowPayload.error?.message ?? "加载阶段注入提示词失败");
       } else {
@@ -348,6 +419,33 @@ export default function StrategyDetailPage() {
         setWorkflowContextAccess(normalizeContextAccessPayload(nextWorkflowConfig?.contextAccess));
         setWorkflowSummarizer(normalizeSummarizerPayload(nextWorkflowConfig?.summarizer));
       }
+      if (!fileAccessRulesResponse.ok) {
+        showToast("error", fileAccessRulesPayload.error?.message ?? "加载文件读取规则失败");
+      } else {
+        const items = Array.isArray(fileAccessRulesPayload.data) ? fileAccessRulesPayload.data : [];
+        setFileAccessRules(
+          items.map((item: Record<string, unknown>) => ({
+            id: String(item.id ?? ""),
+            strategyRoleId: typeof item.strategyRoleId === "string" ? item.strategyRoleId : null,
+            scope: item.scope === "seat" ? "seat" : "shared",
+            targetType: item.targetType === "file" ? "file" : "dir",
+            targetPath: String(item.targetPath ?? ""),
+            accessMode:
+              item.accessMode === "unlock_after_phase"
+                ? "unlock_after_phase"
+                : item.accessMode === "read_when_needed"
+                  ? "read_when_needed"
+                  : "always_read",
+            phaseKind:
+              item.phaseKind === "analysis" ||
+              item.phaseKind === "deliberation" ||
+              item.phaseKind === "finalization_vote" ||
+              item.phaseKind === "finalization"
+                ? item.phaseKind
+                : null
+          }))
+        );
+      }
     } finally {
       setWorkflowPhasePromptsLoading(false);
       setWorkflowContextAccessLoading(false);
@@ -357,6 +455,21 @@ export default function StrategyDetailPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    setMountedPanels((current) => {
+      if (strategyPanel === "shared" && current.shared) return current;
+      if (strategyPanel === "roleFiles" && current.roleFiles) return current;
+      if (strategyPanel === "roleEditor" && current.roleEditor) return current;
+      if (strategyPanel === "phaseUnlock" && current.phaseUnlock) return current;
+      return {
+        shared: current.shared || strategyPanel === "shared",
+        roleFiles: current.roleFiles || strategyPanel === "roleFiles",
+        roleEditor: current.roleEditor || strategyPanel === "roleEditor",
+        phaseUnlock: current.phaseUnlock || strategyPanel === "phaseUnlock"
+      };
+    });
+  }, [strategyPanel]);
 
   async function toggleFavorite() {
     if (!detail || detail.canEdit) return;
@@ -1030,8 +1143,6 @@ export default function StrategyDetailPage() {
       if (!basicOk) return;
       const phaseOk = await saveWorkflowPhasePrompts({ silent: true });
       if (!phaseOk) return;
-      const contextOk = await saveWorkflowContextAccess({ silent: true });
-      if (!contextOk) return;
       const summarizerOk = await saveWorkflowSummarizer({ silent: true });
       if (!summarizerOk) return;
       showToast("success", "已保存全部修改");
@@ -1047,6 +1158,28 @@ export default function StrategyDetailPage() {
   const activeRole = roles[activeRoleIndex] ?? null;
   const selectedCount = selectedRoleIds.size;
   const canDeleteSelected = detail.canEdit && selectedCount > 0 && roles.length - selectedCount >= 2;
+  const roleSummary = summarizeRoles(roles);
+  const phaseSummary = workflowPhasePromptsLoading
+    ? "加载中..."
+    : workflowPhasePrompts.length > 0
+      ? `已配置 ${workflowPhasePrompts.length} 个阶段`
+      : "未配置阶段";
+  const contextRuleCount = fileAccessRules.length;
+  const contextSummary = fileAccessRulesLoading
+    ? "加载中..."
+    : contextRuleCount > 0
+      ? `已配置 ${contextRuleCount} 条规则`
+      : "未配置规则";
+  const summarizerSummary = workflowSummarizer.enabled
+    ? [
+        workflowSummarizer.perTurn ? "每回摘要" : null,
+        workflowSummarizer.perRound ? "每轮摘要" : null,
+        workflowSummarizer.factsBoard ? "事实板" : null
+      ]
+        .filter(Boolean)
+        .join(" / ") || "已启用"
+    : "未启用";
+  const workflowSummary = [phaseSummary, summarizerSummary, contextSummary].join(" · ");
 
   return (
     <div className="grid" style={{ gap: 20 }}>
@@ -1114,68 +1247,38 @@ export default function StrategyDetailPage() {
         </div>
       ) : null}
 
-      <section className="panel">
-        <input
-          ref={folderImportInputRef}
-          type="file"
-          multiple
-          onChange={(event) => void onStrategyFolderPicked(event)}
-          style={{ display: "none" }}
-          {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
-        />
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <div className="row" style={{ gap: 10, alignItems: "center" }}>
-            <Link className="btn btn-primary" href={`/workspaces/new?strategyId=${detail.id}`}>
-              创建工作台
-            </Link>
-            <div>
-              <h2 style={{ margin: 0 }}>策略</h2>
-              <div className="muted">{detail.canEdit ? "可编辑" : "只读（来自社区分享）"}</div>
+      <input
+        ref={folderImportInputRef}
+        type="file"
+        multiple
+        onChange={(event) => void onStrategyFolderPicked(event)}
+        style={{ display: "none" }}
+        {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+      />
+
+      <section className="panel stack">
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+          <div className="stack" style={{ gap: 6 }}>
+            <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <h2 style={{ margin: 0 }}>策略概览</h2>
+              <span className="muted">{detail.canEdit ? "可编辑" : "只读（来自社区分享）"}</span>
+            </div>
+            <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+              <span className="muted">最近更新：{formatLocalTime(detail.updatedAt)}</span>
+              <span className="muted">共享状态：{isShared ? "已共享" : "未共享"}</span>
+              {detail.isShared ? (
+                <span className="muted">收藏 {detail.favoriteCount ?? 0} · Fork {detail.forkCount ?? 0}</span>
+              ) : null}
             </div>
           </div>
-          <div className="row">
-            <button className="btn" disabled={isExportingFolder} onClick={() => void downloadStrategyFolder()}>
-              {isExportingFolder ? "导出中..." : "下载文件夹"}
-            </button>
-            {detail.canEdit ? (
-              <button className="btn" disabled={isImportingFolder} onClick={openStrategyFolderImport}>
-                {isImportingFolder ? "导入中..." : "上传文件夹覆盖"}
-              </button>
-            ) : null}
-            {!detail.canEdit ? (
-              <>
-                <button className="btn" disabled={isFavoriting} onClick={() => void toggleFavorite()}>
-                  {isFavoriting ? "处理中..." : detail.isFavorited ? "取消收藏" : "收藏"}
-                </button>
-                <button className="btn" disabled={isForking} onClick={() => void forkOne()}>
-                  {isForking ? "Fork 中..." : "Fork"}
-                </button>
-              </>
-            ) : null}
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
             <Link className="btn" href="/strategies">
               返回
             </Link>
-          </div>
-        </div>
-      </section>
-
-      <section className="panel stack">
-        <div className="row">
-          <div className="field" style={{ flex: 1 }}>
-            <label>策略名称</label>
-            <input value={name} disabled={!detail.canEdit} onChange={(event) => setName(event.target.value)} />
-          </div>
-          <label className="row" style={{ alignItems: "center", gap: 8, marginTop: 22 }}>
-            <input
-              type="checkbox"
-              checked={isShared}
-              disabled={!detail.canEdit}
-              onChange={(event) => setIsShared(event.target.checked)}
-            />
-            <span>分享到社区</span>
-          </label>
-          {detail.canEdit ? (
-            <>
+            <Link className="btn btn-primary" href={`/workspaces/new?strategyId=${detail.id}`}>
+              创建工作台
+            </Link>
+            {detail.canEdit ? (
               <button
                 className="btn btn-primary"
                 disabled={
@@ -1192,509 +1295,589 @@ export default function StrategyDetailPage() {
                   ? "保存中..."
                   : "保存全部"}
               </button>
-              <button className="btn btn-danger" disabled={isDeleting} onClick={() => void deleteOne()}>
-                {isDeleting ? "删除中..." : "删除"}
-              </button>
-            </>
-          ) : null}
+            ) : (
+              <>
+                <button className="btn" disabled={isFavoriting} onClick={() => void toggleFavorite()}>
+                  {isFavoriting ? "处理中..." : detail.isFavorited ? "取消收藏" : "收藏"}
+                </button>
+                <button className="btn" disabled={isForking} onClick={() => void forkOne()}>
+                  {isForking ? "Fork 中..." : "Fork"}
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
-        <div className="field">
-          <label>描述（可选）</label>
-          <textarea value={description} disabled={!detail.canEdit} onChange={(event) => setDescription(event.target.value)} />
-        </div>
-      </section>
-
-      <section className="panel stack">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <div>
-            <strong>独立总结器（可选）</strong>
-            <div className="muted">策略可以声明一台独立总结器，用于每回摘要、每轮摘要和结构化事实板。真正绑定哪台 AI，会在基于策略创建的工作台里再选择。</div>
+        <div className="grid" style={{ gap: 12 }}>
+          <div className="field">
+            <label>策略名称</label>
+            <input value={name} disabled={!detail.canEdit} onChange={(event) => setName(event.target.value)} />
+          </div>
+          <div className="field">
+            <label>描述（可选）</label>
+            <textarea value={description} disabled={!detail.canEdit} onChange={(event) => setDescription(event.target.value)} />
           </div>
         </div>
 
         <label className="row" style={{ alignItems: "center", gap: 8 }}>
           <input
             type="checkbox"
-            checked={workflowSummarizer.enabled}
+            checked={isShared}
             disabled={!detail.canEdit}
-            onChange={(event) =>
-              setWorkflowSummarizer((current) => ({
-                ...current,
-                enabled: event.target.checked
-              }))
-            }
+            onChange={(event) => setIsShared(event.target.checked)}
           />
-          <span>启用独立总结器</span>
+          <span>分享到社区</span>
         </label>
-
-        <div className="row" style={{ gap: 16, flexWrap: "wrap" }}>
-          <label className="row" style={{ alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={workflowSummarizer.perTurn}
-              disabled={!detail.canEdit || !workflowSummarizer.enabled}
-              onChange={(event) =>
-                setWorkflowSummarizer((current) => ({ ...current, perTurn: event.target.checked }))
-              }
-            />
-            <span>每回摘要</span>
-          </label>
-          <label className="row" style={{ alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={workflowSummarizer.perRound}
-              disabled={!detail.canEdit || !workflowSummarizer.enabled}
-              onChange={(event) =>
-                setWorkflowSummarizer((current) => ({ ...current, perRound: event.target.checked }))
-              }
-            />
-            <span>每轮摘要</span>
-          </label>
-          <label className="row" style={{ alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={workflowSummarizer.factsBoard}
-              disabled={!detail.canEdit || !workflowSummarizer.enabled}
-              onChange={(event) =>
-                setWorkflowSummarizer((current) => ({ ...current, factsBoard: event.target.checked }))
-              }
-            />
-            <span>结构化事实板</span>
-          </label>
-        </div>
-
-        <div className="grid" style={{ gap: 12 }}>
-          <div className="field">
-            <label>回摘要 Prompt</label>
-            <textarea
-              value={workflowSummarizer.prompts.turnSummary}
-              disabled={!detail.canEdit || !workflowSummarizer.enabled}
-              onChange={(event) =>
-                setWorkflowSummarizer((current) => ({
-                  ...current,
-                  prompts: { ...current.prompts, turnSummary: event.target.value }
-                }))
-              }
-            />
-          </div>
-          <div className="field">
-            <label>轮摘要 Prompt</label>
-            <textarea
-              value={workflowSummarizer.prompts.roundSummary}
-              disabled={!detail.canEdit || !workflowSummarizer.enabled}
-              onChange={(event) =>
-                setWorkflowSummarizer((current) => ({
-                  ...current,
-                  prompts: { ...current.prompts, roundSummary: event.target.value }
-                }))
-              }
-            />
-          </div>
-          <div className="field">
-            <label>事实板 Prompt</label>
-            <textarea
-              value={workflowSummarizer.prompts.factsBoard}
-              disabled={!detail.canEdit || !workflowSummarizer.enabled}
-              onChange={(event) =>
-                setWorkflowSummarizer((current) => ({
-                  ...current,
-                  prompts: { ...current.prompts, factsBoard: event.target.value }
-                }))
-              }
-            />
-          </div>
-        </div>
-
-        <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
-          <div className="field" style={{ flex: 1, minWidth: 220 }}>
-            <label>回摘要目录</label>
-            <input
-              value={workflowSummarizer.outputPaths.turnSummaryDir}
-              disabled={!detail.canEdit || !workflowSummarizer.enabled}
-              onChange={(event) =>
-                setWorkflowSummarizer((current) => ({
-                  ...current,
-                  outputPaths: { ...current.outputPaths, turnSummaryDir: event.target.value }
-                }))
-              }
-            />
-          </div>
-          <div className="field" style={{ flex: 1, minWidth: 220 }}>
-            <label>轮摘要目录</label>
-            <input
-              value={workflowSummarizer.outputPaths.roundSummaryDir}
-              disabled={!detail.canEdit || !workflowSummarizer.enabled}
-              onChange={(event) =>
-                setWorkflowSummarizer((current) => ({
-                  ...current,
-                  outputPaths: { ...current.outputPaths, roundSummaryDir: event.target.value }
-                }))
-              }
-            />
-          </div>
-          <div className="field" style={{ flex: 1, minWidth: 220 }}>
-            <label>事实板路径</label>
-            <input
-              value={workflowSummarizer.outputPaths.factsBoardPath}
-              disabled={!detail.canEdit || !workflowSummarizer.enabled}
-              onChange={(event) =>
-                setWorkflowSummarizer((current) => ({
-                  ...current,
-                  outputPaths: { ...current.outputPaths, factsBoardPath: event.target.value }
-                }))
-              }
-            />
-          </div>
-        </div>
       </section>
 
-      <section className="panel stack">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <div>
-            <strong>讨论增强提示词（可选）</strong>
-            <div className="muted">默认不需要复杂 workflow；只有当你希望某些讨论阶段带特殊规则时，才需要在这里补充开局提示词或阶段提示词。</div>
+      <details className="panel" open>
+        <summary
+          className="row"
+          style={{ cursor: "pointer", justifyContent: "space-between", alignItems: "center", gap: 12 }}
+        >
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <strong>Workflow 规则</strong>
+            <span className="muted">{workflowSummary}</span>
           </div>
-        </div>
+          <span className="muted">{detail.canEdit ? "查看 / 编辑" : "查看"}</span>
+        </summary>
+        <div className="stack" style={{ marginTop: 12 }}>
+          <details className="softBox">
+            <summary className="row" style={{ cursor: "pointer", justifyContent: "space-between", alignItems: "center" }}>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <strong>独立总结器</strong>
+                <span className="muted">{summarizerSummary}</span>
+              </div>
+              <span className="muted">{detail.canEdit ? "查看 / 编辑" : "查看"}</span>
+            </summary>
+            <div className="stack" style={{ marginTop: 12 }}>
+              <div className="muted">声明摘要能力与输出位置。</div>
+              <label className="row" style={{ alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={workflowSummarizer.enabled}
+                  disabled={!detail.canEdit}
+                  onChange={(event) =>
+                    setWorkflowSummarizer((current) => ({
+                      ...current,
+                      enabled: event.target.checked
+                    }))
+                  }
+                />
+                <span>启用独立总结器</span>
+              </label>
 
-        {workflowPhasePromptsLoading ? (
-          <div className="muted">加载中...</div>
-        ) : (
-          <div className="grid" style={{ gap: 12 }}>
-            {workflowPhasePrompts.length <= 0 ? (
-              <div className="muted">当前策略没有额外流程阶段，默认直接按普通讨论方式运行。</div>
-            ) : null}
-            {workflowPhasePrompts.map((phase, index) => (
-              <div key={phase.id} className="softBox stack">
-                <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-                  <strong>{phase.title}</strong>
-                  <span className="muted">
-                    {phase.kind}
-                    {phase.minRounds ? ` · minRounds=${phase.minRounds}` : ""}
-                  </span>
-                </div>
-                {phase.description ? <div className="muted">{phase.description}</div> : null}
-                <div className="softBox" style={{ whiteSpace: "pre-wrap" }}>
-                  {summarizePrompt(phase.injectedPrompt)}
-                </div>
-                <div className="row" style={{ justifyContent: "flex-end" }}>
-                  <button
-                    className="btn"
-                    type="button"
-                    onClick={() =>
-                      openWorkflowPromptDialog({
-                        type: "phase",
-                        title: `${phase.title} · 阶段提示词`,
-                        description: phase.description ?? "只有当 workflow 进入该阶段时，系统才会自动把这里的提示词注入到运行时 Prompt 中。",
-                        value: phase.injectedPrompt,
-                        phaseIndex: index
-                      })
+              <div className="row" style={{ gap: 16, flexWrap: "wrap" }}>
+                <label className="row" style={{ alignItems: "center", gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={workflowSummarizer.perTurn}
+                    disabled={!detail.canEdit || !workflowSummarizer.enabled}
+                    onChange={(event) =>
+                      setWorkflowSummarizer((current) => ({ ...current, perTurn: event.target.checked }))
                     }
-                  >
-                    {detail.canEdit ? "查看 / 编辑" : "查看"}
-                  </button>
+                  />
+                  <span>每回摘要</span>
+                </label>
+                <label className="row" style={{ alignItems: "center", gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={workflowSummarizer.perRound}
+                    disabled={!detail.canEdit || !workflowSummarizer.enabled}
+                    onChange={(event) =>
+                      setWorkflowSummarizer((current) => ({ ...current, perRound: event.target.checked }))
+                    }
+                  />
+                  <span>每轮摘要</span>
+                </label>
+                <label className="row" style={{ alignItems: "center", gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={workflowSummarizer.factsBoard}
+                    disabled={!detail.canEdit || !workflowSummarizer.enabled}
+                    onChange={(event) =>
+                      setWorkflowSummarizer((current) => ({ ...current, factsBoard: event.target.checked }))
+                    }
+                  />
+                  <span>结构化事实板</span>
+                </label>
+              </div>
+
+              <div className="grid" style={{ gap: 12 }}>
+                <div className="field">
+                  <label>回摘要 Prompt</label>
+                  <textarea
+                    value={workflowSummarizer.prompts.turnSummary}
+                    disabled={!detail.canEdit || !workflowSummarizer.enabled}
+                    onChange={(event) =>
+                      setWorkflowSummarizer((current) => ({
+                        ...current,
+                        prompts: { ...current.prompts, turnSummary: event.target.value }
+                      }))
+                    }
+                  />
+                </div>
+                <div className="field">
+                  <label>轮摘要 Prompt</label>
+                  <textarea
+                    value={workflowSummarizer.prompts.roundSummary}
+                    disabled={!detail.canEdit || !workflowSummarizer.enabled}
+                    onChange={(event) =>
+                      setWorkflowSummarizer((current) => ({
+                        ...current,
+                        prompts: { ...current.prompts, roundSummary: event.target.value }
+                      }))
+                    }
+                  />
+                </div>
+                <div className="field">
+                  <label>事实板 Prompt</label>
+                  <textarea
+                    value={workflowSummarizer.prompts.factsBoard}
+                    disabled={!detail.canEdit || !workflowSummarizer.enabled}
+                    onChange={(event) =>
+                      setWorkflowSummarizer((current) => ({
+                        ...current,
+                        prompts: { ...current.prompts, factsBoard: event.target.value }
+                      }))
+                    }
+                  />
                 </div>
               </div>
-            ))}
-          </div>
-        )}
-      </section>
 
-      <section className="panel stack">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <div>
-            <strong>上下文读取规则（可选）</strong>
-            <div className="muted">默认可以完全不配。只有当某些目录需要“每次都读 / 按需读 / 到特定阶段再解锁”时，才需要在这里加规则。</div>
-          </div>
+              <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+                <div className="field" style={{ flex: 1, minWidth: 220 }}>
+                  <label>回摘要目录</label>
+                  <input
+                    value={workflowSummarizer.outputPaths.turnSummaryDir}
+                    disabled={!detail.canEdit || !workflowSummarizer.enabled}
+                    onChange={(event) =>
+                      setWorkflowSummarizer((current) => ({
+                        ...current,
+                        outputPaths: { ...current.outputPaths, turnSummaryDir: event.target.value }
+                      }))
+                    }
+                  />
+                </div>
+                <div className="field" style={{ flex: 1, minWidth: 220 }}>
+                  <label>轮摘要目录</label>
+                  <input
+                    value={workflowSummarizer.outputPaths.roundSummaryDir}
+                    disabled={!detail.canEdit || !workflowSummarizer.enabled}
+                    onChange={(event) =>
+                      setWorkflowSummarizer((current) => ({
+                        ...current,
+                        outputPaths: { ...current.outputPaths, roundSummaryDir: event.target.value }
+                      }))
+                    }
+                  />
+                </div>
+                <div className="field" style={{ flex: 1, minWidth: 220 }}>
+                  <label>事实板路径</label>
+                  <input
+                    value={workflowSummarizer.outputPaths.factsBoardPath}
+                    disabled={!detail.canEdit || !workflowSummarizer.enabled}
+                    onChange={(event) =>
+                      setWorkflowSummarizer((current) => ({
+                        ...current,
+                        outputPaths: { ...current.outputPaths, factsBoardPath: event.target.value }
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <details className="softBox">
+            <summary className="row" style={{ cursor: "pointer", justifyContent: "space-between", alignItems: "center" }}>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <strong>阶段机 / 投票 / 共识 / 交付</strong>
+                <span className="muted">{phaseSummary}</span>
+              </div>
+              <span className="muted">{detail.canEdit ? "查看 / 编辑" : "查看"}</span>
+            </summary>
+            <div className="stack" style={{ marginTop: 12 }}>
+              <div className="muted">按阶段补充提示词。</div>
+              {workflowPhasePromptsLoading ? (
+                <div className="muted">加载中...</div>
+              ) : (
+                <div className="grid" style={{ gap: 12 }}>
+                  {workflowPhasePrompts.length <= 0 ? (
+                    <div className="muted">当前策略没有额外流程阶段，默认直接按普通讨论方式运行。</div>
+                  ) : null}
+                  {workflowPhasePrompts.map((phase, index) => (
+                    <div key={phase.id} className="softBox stack">
+                      <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                        <strong>{phase.title}</strong>
+                        <span className="muted">
+                          {phase.kind}
+                          {phase.minRounds ? ` · minRounds=${phase.minRounds}` : ""}
+                        </span>
+                      </div>
+                      {phase.description ? <div className="muted">{phase.description}</div> : null}
+                      <div className="softBox" style={{ whiteSpace: "pre-wrap" }}>
+                        {summarizePrompt(phase.injectedPrompt)}
+                      </div>
+                      <div className="row" style={{ justifyContent: "flex-end" }}>
+                        <button
+                          className="btn"
+                          type="button"
+                          onClick={() =>
+                            openWorkflowPromptDialog({
+                              type: "phase",
+                              title: `${phase.title} · 阶段提示词`,
+                              description:
+                                phase.description ?? "只有当 workflow 进入该阶段时，系统才会自动把这里的提示词注入到运行时 Prompt 中。",
+                              value: phase.injectedPrompt,
+                              phaseIndex: index
+                            })
+                          }
+                        >
+                          {detail.canEdit ? "查看 / 编辑" : "查看"}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </details>
+
+          <details className="softBox">
+            <summary className="row" style={{ cursor: "pointer", justifyContent: "space-between", alignItems: "center" }}>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <strong>上下文读取规则</strong>
+                <span className="muted">{contextSummary}</span>
+              </div>
+              <span className="muted">{detail.canEdit ? "查看 / 编辑" : "查看"}</span>
+            </summary>
+            <div className="stack" style={{ marginTop: 12 }}>
+              <div className="muted">上下文读取规则已迁移到文件管理打标。请在“共享文件 / 角色文件”里直接对文件或文件夹右键标记为每会话必读、按需可读或阶段解锁。</div>
+              <div className="softBox stack">
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <strong>当前规则概览</strong>
+                  <span className="muted">{contextSummary}</span>
+                </div>
+                <div className="muted">运行时仍会保留内部预算与裁剪逻辑，但不再需要手动维护 pathPrefix、maxFiles、maxCharsPerFile。</div>
+              </div>
+            </div>
+          </details>
         </div>
+      </details>
 
-        {workflowContextAccessLoading ? (
-          <div className="muted">加载中...</div>
-        ) : (
-          <div className="grid" style={{ gap: 16 }}>
-            <div className="softBox stack">
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <strong>每会话必读目录</strong>
-                {detail.canEdit ? (
-                  <button className="btn" type="button" onClick={() => addContextAccessRule("alwaysRead")}>
-                    新增目录
-                  </button>
-                ) : null}
-              </div>
-              <div className="muted">这些目录会在每次生成时自动注入，所以切新会话后模型也能重新看到。</div>
-              {workflowContextAccess.alwaysRead.length <= 0 ? <div className="muted">未配置</div> : null}
-              {workflowContextAccess.alwaysRead.map((rule, index) => (
-                <div key={`always-${index}`} className="softBox stack">
-                  <div className="row" style={{ justifyContent: "space-between" }}>
-                    <strong>目录 #{index + 1}</strong>
-                    {detail.canEdit ? (
-                      <button className="btn btn-danger" type="button" onClick={() => removeContextAccessRule("alwaysRead", index)}>
-                        删除
-                      </button>
-                    ) : null}
-                  </div>
-                  <div className="grid grid-2" style={{ gap: 12 }}>
-                    <div className="field">
-                      <label>范围</label>
-                      <select value={rule.scope} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { scope: event.target.value === "seat" ? "seat" : "shared" })}>
-                        <option value="shared">shared</option>
-                        <option value="seat">seat</option>
-                      </select>
-                    </div>
-                    <div className="field">
-                      <label>目录前缀</label>
-                      <input value={rule.pathPrefix} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { pathPrefix: event.target.value })} placeholder="例如 prompts/ 或 final/" />
-                    </div>
-                    <div className="field">
-                      <label>单目录最多自动读几个文件</label>
-                      <input type="number" min={1} value={rule.maxFiles} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { maxFiles: Number(event.target.value) || 1 })} />
-                    </div>
-                    <div className="field">
-                      <label>单文件最大字符</label>
-                      <input type="number" min={200} value={rule.maxCharsPerFile} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { maxCharsPerFile: Number(event.target.value) || 200 })} />
-                    </div>
-                    <label className="row" style={{ alignItems: "center", gap: 8, marginTop: 22 }}>
-                      <input type="checkbox" checked={rule.recursive} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("alwaysRead", index, { recursive: event.target.checked })} />
-                      <span>递归子目录</span>
-                    </label>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="softBox stack">
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <strong>按需可读目录</strong>
-                {detail.canEdit ? (
-                  <button className="btn" type="button" onClick={() => addContextAccessRule("readWhenNeeded")}>
-                    新增目录
-                  </button>
-                ) : null}
-              </div>
-              <div className="muted">这些目录不会自动进 prompt，但模型可以通过 `agent_files_read` / `debate_files_read` 在需要时读取。</div>
-              {workflowContextAccess.readWhenNeeded.length <= 0 ? <div className="muted">未配置</div> : null}
-              {workflowContextAccess.readWhenNeeded.map((rule, index) => (
-                <div key={`optional-${index}`} className="softBox stack">
-                  <div className="row" style={{ justifyContent: "space-between" }}>
-                    <strong>目录 #{index + 1}</strong>
-                    {detail.canEdit ? (
-                      <button className="btn btn-danger" type="button" onClick={() => removeContextAccessRule("readWhenNeeded", index)}>
-                        删除
-                      </button>
-                    ) : null}
-                  </div>
-                  <div className="grid grid-2" style={{ gap: 12 }}>
-                    <div className="field">
-                      <label>范围</label>
-                      <select value={rule.scope} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { scope: event.target.value === "seat" ? "seat" : "shared" })}>
-                        <option value="shared">shared</option>
-                        <option value="seat">seat</option>
-                      </select>
-                    </div>
-                    <div className="field">
-                      <label>目录前缀</label>
-                      <input value={rule.pathPrefix} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { pathPrefix: event.target.value })} placeholder="例如 references/ 或 facts/" />
-                    </div>
-                    <div className="field">
-                      <label>单目录最多自动读几个文件</label>
-                      <input type="number" min={1} value={rule.maxFiles} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { maxFiles: Number(event.target.value) || 1 })} />
-                    </div>
-                    <div className="field">
-                      <label>单文件最大字符</label>
-                      <input type="number" min={200} value={rule.maxCharsPerFile} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { maxCharsPerFile: Number(event.target.value) || 200 })} />
-                    </div>
-                    <label className="row" style={{ alignItems: "center", gap: 8, marginTop: 22 }}>
-                      <input type="checkbox" checked={rule.recursive} disabled={!detail.canEdit} onChange={(event) => updateContextAccessRule("readWhenNeeded", index, { recursive: event.target.checked })} />
-                      <span>递归子目录</span>
-                    </label>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="softBox stack">
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <strong>阶段后解锁目录</strong>
-                {detail.canEdit ? (
-                  <button className="btn" type="button" onClick={addPhaseGateRule}>
-                    新增目录
-                  </button>
-                ) : null}
-              </div>
-              <div className="muted">这些目录在指定阶段之前既不会自动注入，也不允许工具读取；一旦到达该阶段，就会自动解锁并自动注入。</div>
-              {workflowContextAccess.unlockAfterPhase.length <= 0 ? <div className="muted">未配置</div> : null}
-              {workflowContextAccess.unlockAfterPhase.map((rule, index) => (
-                <div key={`gate-${index}`} className="softBox stack">
-                  <div className="row" style={{ justifyContent: "space-between" }}>
-                    <strong>目录 #{index + 1}</strong>
-                    {detail.canEdit ? (
-                      <button className="btn btn-danger" type="button" onClick={() => removePhaseGateRule(index)}>
-                        删除
-                      </button>
-                    ) : null}
-                  </div>
-                  <div className="grid grid-2" style={{ gap: 12 }}>
-                    <div className="field">
-                      <label>解锁阶段</label>
-                      <select value={rule.phaseKind} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { phaseKind: event.target.value as WorkflowPhasePrompt["kind"] })}>
-                        <option value="analysis">analysis</option>
-                        <option value="deliberation">deliberation</option>
-                        <option value="finalization_vote">finalization_vote</option>
-                        <option value="finalization">finalization</option>
-                      </select>
-                    </div>
-                    <div className="field">
-                      <label>范围</label>
-                      <select value={rule.scope} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { scope: event.target.value === "seat" ? "seat" : "shared" })}>
-                        <option value="shared">shared</option>
-                        <option value="seat">seat</option>
-                      </select>
-                    </div>
-                    <div className="field">
-                      <label>目录前缀</label>
-                      <input value={rule.pathPrefix} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { pathPrefix: event.target.value })} placeholder="例如 final/ 或 playbook/" />
-                    </div>
-                    <div className="field">
-                      <label>单目录最多自动读几个文件</label>
-                      <input type="number" min={1} value={rule.maxFiles} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { maxFiles: Number(event.target.value) || 1 })} />
-                    </div>
-                    <div className="field">
-                      <label>单文件最大字符</label>
-                      <input type="number" min={200} value={rule.maxCharsPerFile} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { maxCharsPerFile: Number(event.target.value) || 200 })} />
-                    </div>
-                    <label className="row" style={{ alignItems: "center", gap: 8, marginTop: 22 }}>
-                      <input type="checkbox" checked={rule.recursive} disabled={!detail.canEdit} onChange={(event) => updatePhaseGateRule(index, { recursive: event.target.checked })} />
-                      <span>递归子目录</span>
-                    </label>
-                  </div>
-                </div>
-              ))}
-            </div>
+      <details className="panel">
+        <summary
+          className="row"
+          style={{ cursor: "pointer", justifyContent: "space-between", alignItems: "center", gap: 12 }}
+        >
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <strong>角色管理</strong>
+            <span className="muted">{roleSummary}</span>
           </div>
-        )}
-      </section>
-
-      <div className="grid" style={{ gap: 16, alignItems: "start" }}>
-        <section className="panel stack">
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <strong>角色（{roles.length}）</strong>
-            {detail.canEdit ? (
-              <div className="row">
-                <button className="btn" type="button" disabled={selectedCount === 0} onClick={clearRoleSelection}>
-                  清空选择
+          <span className="muted">{detail.canEdit ? "查看 / 编辑" : "查看"}</span>
+        </summary>
+        <div className="strategySplit" style={{ marginTop: 12 }}>
+          <aside className="panel strategySidebar">
+            <div className="stack">
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                <strong>角色导航</strong>
+                <span className="muted">{roles.length} 个</span>
+              </div>
+              <div className="muted">切换角色会同步右侧文件视图。</div>
+              <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                <button
+                  className={`btn strategyTab ${strategyPanel === "shared" ? "btn-primary strategyTabActive" : "btn-muted"}`}
+                  type="button"
+                  onClick={() => startTransition(() => setStrategyPanel("shared"))}
+                >
+                  <span className="strategyTabLabel">共享文件</span>
                 </button>
-                <button className="btn" type="button" onClick={selectAllRoles}>
-                  全选
+                <button
+                  className={`btn strategyTab ${strategyPanel === "roleFiles" ? "btn-primary strategyTabActive" : "btn-muted"}`}
+                  type="button"
+                  onClick={() => startTransition(() => setStrategyPanel("roleFiles"))}
+                >
+                  <span className="strategyTabLabel">角色文件</span>
                 </button>
-                <button className="btn btn-danger" type="button" disabled={!canDeleteSelected} onClick={deleteSelectedRoles}>
-                  删除选中
+                <button
+                  className={`btn strategyTab ${strategyPanel === "roleEditor" ? "btn-primary strategyTabActive" : "btn-muted"}`}
+                  type="button"
+                  onClick={() => startTransition(() => setStrategyPanel("roleEditor"))}
+                >
+                  <span className="strategyTabLabel">角色编辑</span>
                 </button>
-                <button className="btn btn-primary" type="button" onClick={addRole}>
-                  新增角色
+                <button
+                  className={`btn strategyTab ${strategyPanel === "phaseUnlock" ? "btn-primary strategyTabActive" : "btn-muted"}`}
+                  type="button"
+                  onClick={() => startTransition(() => setStrategyPanel("phaseUnlock"))}
+                >
+                  <span className="strategyTabLabel">阶段解锁</span>
                 </button>
               </div>
-            ) : (
-              <button className="btn btn-primary" disabled={!detail.canEdit} onClick={addRole}>
-                新增角色
-              </button>
-            )}
-          </div>
 
-          <div className="roleList">
-            {roles.map((role, index) => {
-              const selected = selectedRoleIds.has(role.clientId);
-              return (
-                <div key={role.clientId} className="row" style={{ gap: 8 }}>
+              <div className="roleList">
+                {roles.map((role, index) => {
+                  const selected = selectedRoleIds.has(role.clientId);
+                  return (
+                    <div key={role.clientId} className="row" style={{ gap: 8 }}>
+                      <button
+                        className={`btn roleButton ${index === activeRoleIndex ? "btn-primary" : ""}`}
+                        onClick={(event) => {
+                          if (!detail.canEdit) {
+                            roleSelectionAnchorIndexRef.current = index;
+                            setActiveRoleIndex(index);
+                            return;
+                          }
+                          if (event.ctrlKey || event.shiftKey) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            onRoleSelect(index, { ctrlKey: event.ctrlKey, shiftKey: event.shiftKey });
+                            return;
+                          }
+                          roleSelectionAnchorIndexRef.current = index;
+                          setSelectedRoleIds(new Set([role.clientId]));
+                          setActiveRoleIndex(index);
+                        }}
+                        type="button"
+                        style={{
+                          flex: 1,
+                          textAlign: "left",
+                          boxShadow: selected ? "0 0 0 2px rgba(59, 130, 246, 0.55) inset" : undefined
+                        }}
+                      >
+                        #{index + 1} {role.name || "(未命名)"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {detail.canEdit ? (
+                <div className="row" style={{ flexWrap: "wrap" }}>
+                  <button className="btn" type="button" disabled={selectedCount === 0} onClick={clearRoleSelection}>
+                    清空选择
+                  </button>
+                  <button className="btn" type="button" onClick={selectAllRoles}>
+                    全选
+                  </button>
                   <button
-                    className={`btn roleButton ${index === activeRoleIndex ? "btn-primary" : ""}`}
-                    onClick={(event) => {
-                      if (!detail.canEdit) {
-                        roleSelectionAnchorIndexRef.current = index;
-                        setActiveRoleIndex(index);
-                        return;
-                      }
-                      if (event.ctrlKey || event.shiftKey) {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        onRoleSelect(index, { ctrlKey: event.ctrlKey, shiftKey: event.shiftKey });
-                        return;
-                      }
-                      roleSelectionAnchorIndexRef.current = index;
-                      setSelectedRoleIds(new Set([role.clientId]));
-                      setActiveRoleIndex(index);
-                    }}
+                    className="btn btn-danger"
                     type="button"
-                    style={{
-                      flex: 1,
-                      textAlign: "left",
-                      boxShadow: selected ? "0 0 0 2px rgba(59, 130, 246, 0.55) inset" : undefined
-                    }}
+                    disabled={!canDeleteSelected}
+                    onClick={deleteSelectedRoles}
                   >
-                    #{index + 1} {role.name || "(未命名)"}
+                    删除选中
+                  </button>
+                  <button className="btn btn-primary" type="button" onClick={addRole}>
+                    新增角色
                   </button>
                 </div>
-              );
-            })}
-          </div>
-
-          {activeRole ? (
-            <div className="softBox stack">
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <strong>编辑角色 #{activeRoleIndex + 1}</strong>
-                {detail.canEdit ? (
-                  <div className="row">
-                    <button className="btn" disabled={activeRoleIndex === 0} onClick={() => moveRole(activeRoleIndex, -1)}>
-                      上移
-                    </button>
-                    <button className="btn" disabled={activeRoleIndex === roles.length - 1} onClick={() => moveRole(activeRoleIndex, 1)}>
-                      下移
-                    </button>
-                    <button className="btn" disabled={isDuplicatingRole} onClick={() => void duplicateActiveRole()}>
-                      {isDuplicatingRole ? "复制中..." : "复制"}
-                    </button>
-                    <button className="btn btn-danger" disabled={roles.length <= 2} onClick={() => removeRole(activeRoleIndex)}>
-                      删除
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="field">
-                <label>角色名称</label>
-                <input value={activeRole.name} disabled={!detail.canEdit} onChange={(event) => updateRole(activeRoleIndex, { name: event.target.value })} />
-              </div>
-
-              <div className="field">
-                <label>System Prompt</label>
-                <textarea className="strategyPrompt" value={activeRole.systemPrompt} disabled={!detail.canEdit} onChange={(event) => updateRole(activeRoleIndex, { systemPrompt: event.target.value })} />
-              </div>
-
-              {!activeRole.id ? <div className="muted">新角色需要先点击保存后，才能编辑文件。</div> : null}
+              ) : null}
             </div>
-          ) : (
-            <div className="muted">请选择一个角色</div>
-          )}
-        </section>
+          </aside>
 
-        <div className="grid grid-2" style={{ gap: 16, alignItems: "start" }}>
-          {activeRole?.id ? (
-            <RoleFilesManagerColumns
-              strategyId={detail.id}
-              roleId={activeRole.id}
-              readOnly={!detail.canEdit}
-            />
-          ) : (
-            <>
-              <section className="panel stack">
-                <div className="muted">新角色需先保存后才能编辑文件。</div>
-              </section>
-              <section className="panel stack">
-                <div className="muted">新角色需先保存后才能编辑文件。</div>
-              </section>
-            </>
-          )}
+          <section className="strategyMain stack">
+            <div className="strategyPanelStack">
+              {mountedPanels.shared ? (
+                <section
+                  id="strategy-shared-files"
+                  className={`softBox stack strategyPanelBox strategyPanelLayer ${strategyPanel === "shared" ? "isActive" : ""}`}
+                  aria-hidden={strategyPanel !== "shared"}
+                >
+                <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                  <strong>共享文件</strong>
+                  <span className="muted">{detail.canEdit ? "查看 / 编辑" : "查看"}</span>
+                </div>
+                <div className="grid grid-2 strategyPanelFill" style={{ gap: 16, alignItems: "start" }}>
+                  <StrategySharedFilesManagerColumns
+                    strategyId={detail.id}
+                    readOnly={!detail.canEdit}
+                    onRulesChange={() => void refreshFileAccessRules()}
+                  />
+                </div>
+                </section>
+              ) : null}
+
+              {mountedPanels.roleFiles ? (
+                <section
+                  id="strategy-role-files"
+                  className={`softBox stack strategyPanelBox strategyPanelLayer ${strategyPanel === "roleFiles" ? "isActive" : ""}`}
+                  aria-hidden={strategyPanel !== "roleFiles"}
+                >
+                <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
+                  <div>
+                    <strong>当前角色文件</strong>
+                    <div className="muted">切换角色同步视图。</div>
+                  </div>
+                  <div className="field" style={{ minWidth: 220 }}>
+                    <label>选择角色</label>
+                    <select
+                      value={activeRoleIndex}
+                      onChange={(event) => {
+                        const nextIndex = Number(event.target.value);
+                        if (!Number.isFinite(nextIndex)) return;
+                        roleSelectionAnchorIndexRef.current = nextIndex;
+                        const target = roles[nextIndex];
+                        if (target) setSelectedRoleIds(new Set([target.clientId]));
+                        setActiveRoleIndex(nextIndex);
+                      }}
+                      disabled={roles.length <= 0}
+                    >
+                      {roles.map((role, index) => (
+                        <option key={role.id} value={index}>
+                          #{index + 1} {role.name || "(未命名)"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {activeRole?.id ? (
+                  <div className="grid grid-2 strategyPanelFill" style={{ gap: 16, alignItems: "start" }}>
+                    <RoleFilesManagerColumns
+                      strategyId={detail.id}
+                      roleId={activeRole.id}
+                      readOnly={!detail.canEdit}
+                      onRulesChange={() => void refreshFileAccessRules()}
+                    />
+                  </div>
+                ) : (
+                  <section className="panel stack">
+                    <div className="muted">新角色先保存后才能编辑文件。</div>
+                  </section>
+                )}
+                </section>
+              ) : null}
+
+              {mountedPanels.roleEditor ? (
+                <section
+                  id="strategy-role-editor"
+                  className={`softBox stack strategyPanelBox strategyPanelLayer strategyRoleEditorPanel ${strategyPanel === "roleEditor" ? "isActive" : ""}`}
+                  aria-hidden={strategyPanel !== "roleEditor"}
+                >
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <strong>角色编辑</strong>
+                  <span className="muted">{detail.canEdit ? "查看 / 编辑" : "查看"}</span>
+                </div>
+
+                  {activeRole ? (
+                    <div className="stack strategyRoleEditorBody">
+                      <div className="row" style={{ justifyContent: "space-between" }}>
+                        <strong>编辑角色 #{activeRoleIndex + 1}</strong>
+                        {detail.canEdit ? (
+                          <div className="row">
+                            <button className="btn" disabled={activeRoleIndex === 0} onClick={() => moveRole(activeRoleIndex, -1)}>
+                              上移
+                            </button>
+                            <button className="btn" disabled={activeRoleIndex === roles.length - 1} onClick={() => moveRole(activeRoleIndex, 1)}>
+                              下移
+                            </button>
+                            <button className="btn" disabled={isDuplicatingRole} onClick={() => void duplicateActiveRole()}>
+                              {isDuplicatingRole ? "复制中..." : "复制"}
+                            </button>
+                            <button className="btn btn-danger" disabled={roles.length <= 2} onClick={() => removeRole(activeRoleIndex)}>
+                              删除
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div className="field">
+                        <label>角色名称</label>
+                        <input
+                          value={activeRole.name}
+                          disabled={!detail.canEdit}
+                          onChange={(event) => updateRole(activeRoleIndex, { name: event.target.value })}
+                        />
+                      </div>
+
+                    <div className="field strategyPromptField">
+                      <label>System Prompt</label>
+                      <textarea
+                        className="strategyPrompt"
+                          value={activeRole.systemPrompt}
+                          disabled={!detail.canEdit}
+                          onChange={(event) => updateRole(activeRoleIndex, { systemPrompt: event.target.value })}
+                        />
+                      </div>
+
+                      {!activeRole.id ? <div className="muted">新角色先保存后才能编辑文件。</div> : null}
+                    </div>
+                ) : (
+                  <div className="muted">请选择一个角色</div>
+                )}
+                </section>
+              ) : null}
+
+              {mountedPanels.phaseUnlock ? (
+                <section
+                  id="strategy-phase-unlock"
+                  className={`softBox stack strategyPanelBox strategyPanelLayer ${strategyPanel === "phaseUnlock" ? "isActive" : ""}`}
+                  aria-hidden={strategyPanel !== "phaseUnlock"}
+                >
+                  <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                    <strong>阶段解锁（共享）</strong>
+                    <span className="muted">只展示 shared 规则</span>
+                  </div>
+                  <div className="muted">这些文件或文件夹会在进入对应阶段后自动解锁并注入上下文。首版仅支持共享文件。</div>
+                  {fileAccessRulesLoading ? (
+                    <div className="muted">加载中...</div>
+                  ) : fileAccessRules.filter((rule) => rule.scope === "shared" && rule.accessMode === "unlock_after_phase").length <= 0 ? (
+                    <div className="softBox muted">未配置阶段解锁规则</div>
+                  ) : (
+                    <div className="stack">
+                      {fileAccessRules
+                        .filter((rule) => rule.scope === "shared" && rule.accessMode === "unlock_after_phase")
+                        .sort((left, right) => left.targetPath.localeCompare(right.targetPath))
+                        .map((rule) => (
+                          <div key={rule.id} className="softBox row" style={{ justifyContent: "space-between", gap: 16, alignItems: "center" }}>
+                            <div className="stack" style={{ gap: 4 }}>
+                              <strong>{rule.targetPath}</strong>
+                              <span className="muted">{rule.targetType === "file" ? "文件" : "文件夹"}</span>
+                            </div>
+                            <span className="tag">{rule.phaseKind ?? "未配置阶段"}</span>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </section>
+              ) : null}
+            </div>
+          </section>
         </div>
-      </div>
+      </details>
+
+      <details className="panel">
+        <summary
+          className="row"
+          style={{ cursor: "pointer", justifyContent: "space-between", alignItems: "center", gap: 12 }}
+        >
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <strong>导入 / 导出 / 高级操作</strong>
+            <span className="muted">备份与覆盖</span>
+          </div>
+          <span className="muted">{detail.canEdit ? "查看 / 编辑" : "查看"}</span>
+        </summary>
+        <div className="stack" style={{ marginTop: 12 }}>
+          <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+            <button className="btn" disabled={isExportingFolder} onClick={() => void downloadStrategyFolder()}>
+              {isExportingFolder ? "导出中..." : "下载文件夹"}
+            </button>
+            {detail.canEdit ? (
+              <button className="btn" disabled={isImportingFolder} onClick={openStrategyFolderImport}>
+                {isImportingFolder ? "导入中..." : "上传文件夹覆盖"}
+              </button>
+            ) : null}
+            {detail.canEdit ? (
+              <button className="btn btn-danger" disabled={isDeleting} onClick={() => void deleteOne()}>
+                {isDeleting ? "删除中..." : "删除策略"}
+              </button>
+            ) : null}
+          </div>
+          <div className="muted">覆盖前先备份。</div>
+        </div>
+      </details>
     </div>
   );
 }

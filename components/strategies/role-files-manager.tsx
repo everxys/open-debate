@@ -17,6 +17,15 @@ type StrategyRoleFile = {
 };
 
 type StrategyRoleFileWithContent = StrategyRoleFile & { content: string };
+type StrategyFileAccessRule = {
+  id: string;
+  scope: "shared" | "seat";
+  targetType: "file" | "dir";
+  targetPath: string;
+  accessMode: "always_read" | "read_when_needed" | "unlock_after_phase";
+  phaseKind: "analysis" | "deliberation" | "finalization_vote" | "finalization" | null;
+  strategyRoleId: string | null;
+};
 
 type ContextTarget =
   | { type: "root" }
@@ -35,6 +44,11 @@ function isInternalDirMarker(path: string) {
   return isKeepMarkerPath(path);
 }
 
+function formatRuleBadge(rule: StrategyFileAccessRule | null | undefined) {
+  if (!rule) return null;
+  return rule.accessMode === "always_read" ? "必读" : rule.accessMode === "read_when_needed" ? "按需" : "阶段";
+}
+
 const TreeRow = memo(
   function TreeRow(props: {
     node: NodeApi<FsNode>;
@@ -47,13 +61,15 @@ const TreeRow = memo(
       openContextMenu: (event: ReactMouseEvent<HTMLElement>, target: ContextTarget) => void;
       moveFile: (fromPath: string, toPath: string) => void;
     }>;
+    ruleByPath: Record<string, StrategyFileAccessRule | undefined>;
     setDragOverDir: (next: string | null | ((current: string | null) => string | null)) => void;
   }) {
-    const { node, style, activePath, dragOverDir, readOnly, actionsRef, setDragOverDir } = props;
+    const { node, style, activePath, dragOverDir, readOnly, actionsRef, ruleByPath, setDragOverDir } = props;
     const data = node.data;
     const isDir = data.type === "dir";
     const isActive = data.type === "file" && data.path === activePath;
     const dropActive = isDir && dragOverDir === data.path;
+    const ruleBadge = formatRuleBadge(ruleByPath[data.path]);
 
     return (
       <div
@@ -113,6 +129,7 @@ const TreeRow = memo(
           <span className="treeIcon treeIconFile" aria-hidden="true" />
         )}
         <span className={`treeLabel ${isDir ? "treeDirLabel" : ""}`}>{isDir ? `${data.name}/` : data.name}</span>
+        {ruleBadge ? <span className="tag" style={{ marginLeft: "auto" }}>{ruleBadge}</span> : null}
       </div>
     );
   },
@@ -122,6 +139,9 @@ const TreeRow = memo(
     if (a.dragOverDir !== b.dragOverDir) return false;
     if (a.node.id !== b.node.id) return false;
     if (a.node.isOpen !== b.node.isOpen) return false;
+    const aRule = a.ruleByPath[a.node.data.path]?.id ?? "";
+    const bRule = b.ruleByPath[b.node.data.path]?.id ?? "";
+    if (aRule !== bRule) return false;
     const at = a.style.transform ?? a.style.top;
     const bt = b.style.transform ?? b.style.top;
     return at === bt;
@@ -131,11 +151,13 @@ const TreeRow = memo(
 export function RoleFilesManagerColumns({
   strategyId,
   roleId,
-  readOnly
+  readOnly,
+  onRulesChange
 }: {
   strategyId: string;
   roleId: string;
   readOnly?: boolean;
+  onRulesChange?: () => void;
 }) {
   const [files, setFiles] = useState<StrategyRoleFile[]>([]);
   const [contentByPath, setContentByPath] = useState<Record<string, string>>({});
@@ -151,11 +173,16 @@ export function RoleFilesManagerColumns({
     target: ContextTarget;
   } | null>(null);
   const [dragOverDir, setDragOverDir] = useState<string | null>(null);
+  const [rules, setRules] = useState<StrategyFileAccessRule[]>([]);
   const { toast, showToast } = useAutoDismissToast(1200);
   const { treeData, reset: resetTree, upsertPath, deletePath, deletePaths, movePath } = useFsTree({
     normalizePath: normalizeInputPath,
     isDirMarker: isInternalDirMarker
   });
+  const treeRootRef = useRef<HTMLDivElement | null>(null);
+  const editorBoxRef = useRef<HTMLDivElement | null>(null);
+  const [treeHeight, setTreeHeight] = useState(520);
+  const [editorHeight, setEditorHeight] = useState(520);
   const actionsRef = useRef<{
     openFile: (path: string) => void;
     openContextMenu: (event: ReactMouseEvent<HTMLElement>, target: ContextTarget) => void;
@@ -180,16 +207,57 @@ export function RoleFilesManagerColumns({
     resetTree(nextFiles.map((file) => file.path));
   }
 
+  async function refreshRules() {
+    if (!strategyId || !roleId) return;
+    const response = await fetch(`/api/strategies/${strategyId}/file-access-rules`, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      showToast("error", payload.error?.message ?? "加载读取规则失败");
+      return;
+    }
+    const items = Array.isArray(payload.data) ? payload.data : [];
+    setRules(
+      items
+        .filter((item: any) => item.scope === "seat" && String(item.strategyRoleId ?? "") === roleId)
+        .map((item: any) => ({
+          id: String(item.id ?? ""),
+          scope: "seat" as const,
+          targetType: item.targetType === "file" ? "file" : "dir",
+          targetPath: String(item.targetPath ?? ""),
+          accessMode:
+            item.accessMode === "unlock_after_phase"
+              ? "unlock_after_phase"
+              : item.accessMode === "read_when_needed"
+                ? "read_when_needed"
+                : "always_read",
+          phaseKind:
+            item.phaseKind === "analysis" ||
+            item.phaseKind === "deliberation" ||
+            item.phaseKind === "finalization_vote" ||
+            item.phaseKind === "finalization"
+              ? item.phaseKind
+              : null,
+          strategyRoleId: String(item.strategyRoleId ?? "")
+        }))
+    );
+  }
+
   useEffect(() => {
     setTabs([]);
     setActivePath("");
     void load();
+    void refreshRules();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [strategyId, roleId]);
 
   const displayFiles = useMemo(() => files.filter((file) => !isInternalDirMarker(file.path)), [files]);
 
   const filesByPath = useMemo(() => new Set(files.map((f) => f.path)), [files]);
+  const ruleByPath = useMemo(() => {
+    const next: Record<string, StrategyFileAccessRule | undefined> = {};
+    for (const rule of rules) next[rule.targetPath] = rule;
+    return next;
+  }, [rules]);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.path === activePath) ?? null,
@@ -208,6 +276,32 @@ export function RoleFilesManagerColumns({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [contextMenu]);
+
+  useEffect(() => {
+    const treeNode = treeRootRef.current;
+    if (!treeNode) return;
+    const observer = new ResizeObserver(() => {
+      const next = Math.max(treeNode.clientHeight, 220);
+      setTreeHeight(next);
+    });
+    observer.observe(treeNode);
+    const next = Math.max(treeNode.clientHeight, 220);
+    setTreeHeight(next);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const editorNode = editorBoxRef.current;
+    if (!editorNode) return;
+    const observer = new ResizeObserver(() => {
+      const next = Math.max(editorNode.clientHeight, 260);
+      setEditorHeight(next);
+    });
+    observer.observe(editorNode);
+    const next = Math.max(editorNode.clientHeight, 260);
+    setEditorHeight(next);
+    return () => observer.disconnect();
+  }, []);
 
   const dirtyPaths = useMemo(() => {
     const dirty = new Set<string>();
@@ -598,6 +692,47 @@ export function RoleFilesManagerColumns({
   actionsRef.current.openContextMenu = openContextMenu;
   actionsRef.current.moveFile = (fromPath: string, toPath: string) => void moveFile(fromPath, toPath);
 
+  async function applyRule(target: ContextTarget, accessMode: "always_read" | "read_when_needed") {
+    if (readOnly || target.type === "root") return;
+    const response = await fetch(`/api/strategies/${strategyId}/file-access-rules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scope: "seat",
+        strategyRoleId: roleId,
+        targetType: target.type === "file" ? "file" : "dir",
+        targetPath: target.path,
+        accessMode
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      showToast("error", payload.error?.message ?? "设置读取规则失败");
+      return;
+    }
+    await refreshRules();
+    onRulesChange?.();
+    showToast("success", "读取规则已更新");
+  }
+
+  async function clearRule(target: ContextTarget) {
+    if (readOnly || target.type === "root") return;
+    const existing = ruleByPath[target.path];
+    if (!existing) {
+      showToast("success", "当前未设置读取规则");
+      return;
+    }
+    const response = await fetch(`/api/strategies/${strategyId}/file-access-rules/${existing.id}`, { method: "DELETE" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      showToast("error", payload.error?.message ?? "清除读取规则失败");
+      return;
+    }
+    await refreshRules();
+    onRulesChange?.();
+    showToast("success", "读取规则已清除");
+  }
+
   return (
     <>
       {toast ? (
@@ -644,11 +779,11 @@ export function RoleFilesManagerColumns({
           </div>
 
           {files.length > 0 ? (
-            <div className={`treeRoot ${dragOverDir === "" ? "treeDropActive" : ""}`}>
+            <div ref={treeRootRef} className={`treeRoot ${dragOverDir === "" ? "treeDropActive" : ""}`}>
               <Tree<FsNode>
                 data={treeData}
                 width="100%"
-                height={620}
+                height={treeHeight}
                 indent={18}
                 rowHeight={34}
                 openByDefault={false}
@@ -661,6 +796,7 @@ export function RoleFilesManagerColumns({
                     dragOverDir={dragOverDir}
                     readOnly={Boolean(readOnly)}
                     actionsRef={actionsRef}
+                    ruleByPath={ruleByPath}
                     setDragOverDir={setDragOverDir}
                   />
                 )}
@@ -723,7 +859,7 @@ export function RoleFilesManagerColumns({
           })}
         </div>
 
-        <div className="editorBox">
+        <div ref={editorBoxRef} className="editorBox">
           <MonacoEditor
             language="markdown"
             theme="vs"
@@ -744,7 +880,7 @@ export function RoleFilesManagerColumns({
               tabSize: 2,
               folding: true
             }}
-            height={520}
+            height={editorHeight}
           />
         </div>
 
@@ -805,6 +941,44 @@ export function RoleFilesManagerColumns({
               >
                 {creatingPath ? "新建中..." : "新建文件"}
               </button>
+
+              {contextMenu.target.type !== "root" ? (
+                <>
+                  <button
+                    className="contextMenuItem"
+                    disabled={Boolean(readOnly)}
+                    onClick={() => {
+                      const target = contextMenu.target;
+                      setContextMenu(null);
+                      void applyRule(target, "always_read");
+                    }}
+                  >
+                    标记为每会话必读
+                  </button>
+                  <button
+                    className="contextMenuItem"
+                    disabled={Boolean(readOnly)}
+                    onClick={() => {
+                      const target = contextMenu.target;
+                      setContextMenu(null);
+                      void applyRule(target, "read_when_needed");
+                    }}
+                  >
+                    标记为按需可读
+                  </button>
+                  <button
+                    className="contextMenuItem"
+                    disabled={Boolean(readOnly)}
+                    onClick={() => {
+                      const target = contextMenu.target;
+                      setContextMenu(null);
+                      void clearRule(target);
+                    }}
+                  >
+                    清除规则
+                  </button>
+                </>
+              ) : null}
 
               {contextMenu.target.type === "file" ? (
                 <button

@@ -3,14 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev-with-summary-worker.cjs",
     "build": "next build",
-    "start": "next start",
+    "start": "node scripts/ensure-next-build.cjs && next start",
+    "worker:summary": "tsx scripts/summary-worker.ts",
+    "test": "node --import tsx --test tests/**/*.test.ts",
     "lint": "next lint",
     "migrate:workflow-phase-1-5": "node scripts/migrate-workflow-phase-1-5.cjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "@next/env": "^15.5.15",
+    "framer-motion": "^11.2.10",
     "jose": "5.9.6",
     "kysely": "^0.28.16",
     "monaco-editor": "^0.55.1",
@@ -29,6 +33,7 @@
     "@types/react-dom": "19.0.4",
     "eslint": "^8.57.1",
     "eslint-config-next": "^15.5.15",
+    "tsx": "^4.21.0",
     "typescript": "5.8.2"
   },
   "overrides": {

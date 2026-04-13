@@ -5,6 +5,9 @@ import { sql } from "kysely";
 import { ensureDb } from "@/lib/db";
 
 export type DebateSummaryJobKind = "turn_summary" | "round_summary" | "facts_board";
+export const FACTS_BOARD_JOB_KEY = "facts:board";
+export const FACTS_BOARD_DEBOUNCE_MS = 8_000;
+export const SUMMARY_WORKER_NOTIFY_CHANNEL = "open_debate_summary_jobs";
 
 export type DebateSummaryJobStatus =
   | "queued"
@@ -25,6 +28,8 @@ export type DebateSummaryJobRecord = {
   roundNumber: number | null;
   dependsOnKeys: string[];
   payload: Record<string, unknown>;
+  priority: number;
+  runAfter: string | null;
   attemptCount: number;
   lastError: string | null;
   nextRetryAt: string | null;
@@ -61,6 +66,8 @@ type SummaryJobRow = {
   round_number: number | null;
   depends_on_keys: unknown;
   payload_json: unknown;
+  priority: number;
+  run_after: string | null;
   attempt_count: number;
   last_error: string | null;
   next_retry_at: string | null;
@@ -69,6 +76,43 @@ type SummaryJobRow = {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+};
+
+type SummaryWorkerRow = {
+  id: string;
+  mode: string;
+  status: string;
+  started_at: string;
+  last_heartbeat_at: string;
+  current_job_id: string | null;
+  current_debate_id: string | null;
+  current_job_key: string | null;
+  claimed_count: number;
+  completed_count: number;
+  failed_count: number;
+  updated_at: string;
+};
+
+export type DebateSummaryWorkerHealth = {
+  id: string;
+  mode: string;
+  status: string;
+  startedAt: string;
+  lastHeartbeatAt: string;
+  currentJobId: string | null;
+  currentDebateId: string | null;
+  currentJobKey: string | null;
+  claimedCount: number;
+  completedCount: number;
+  failedCount: number;
+  updatedAt: string;
+  stale: boolean;
+};
+
+export type DebateSummaryQueueStat = {
+  kind: DebateSummaryJobKind;
+  status: DebateSummaryJobStatus;
+  count: number;
 };
 
 function normalizeStringArray(value: unknown) {
@@ -92,6 +136,8 @@ function normalizeSummaryJobRow(row: SummaryJobRow): DebateSummaryJobRecord {
     roundNumber: row.round_number === null ? null : Number(row.round_number),
     dependsOnKeys: normalizeStringArray(row.depends_on_keys),
     payload: normalizePayload(row.payload_json),
+    priority: Number(row.priority ?? 100),
+    runAfter: row.run_after ? String(row.run_after) : null,
     attemptCount: Number(row.attempt_count ?? 0),
     lastError: row.last_error ? String(row.last_error) : null,
     nextRetryAt: row.next_retry_at ? String(row.next_retry_at) : null,
@@ -103,12 +149,42 @@ function normalizeSummaryJobRow(row: SummaryJobRow): DebateSummaryJobRecord {
   };
 }
 
+function normalizeSummaryWorkerRow(row: SummaryWorkerRow): DebateSummaryWorkerHealth {
+  const lastHeartbeatMs = new Date(row.last_heartbeat_at).getTime();
+  const stale = !Number.isFinite(lastHeartbeatMs) || Date.now() - lastHeartbeatMs > 30_000;
+  return {
+    id: String(row.id),
+    mode: String(row.mode),
+    status: String(row.status),
+    startedAt: String(row.started_at),
+    lastHeartbeatAt: String(row.last_heartbeat_at),
+    currentJobId: row.current_job_id ? String(row.current_job_id) : null,
+    currentDebateId: row.current_debate_id ? String(row.current_debate_id) : null,
+    currentJobKey: row.current_job_key ? String(row.current_job_key) : null,
+    claimedCount: Number(row.claimed_count ?? 0),
+    completedCount: Number(row.completed_count ?? 0),
+    failedCount: Number(row.failed_count ?? 0),
+    updatedAt: String(row.updated_at),
+    stale
+  };
+}
+
 export function getSummaryJobRetryDelayMs(attemptCount: number) {
   if (attemptCount <= 1) return 30_000;
   if (attemptCount === 2) return 2 * 60_000;
   if (attemptCount === 3) return 10 * 60_000;
   if (attemptCount === 4) return 30 * 60_000;
   return 2 * 60 * 60_000;
+}
+
+async function notifySummaryWorkerQueueChanged(debateId: string) {
+  const db = await ensureDb();
+  await db.executeQuery(sql`
+    select pg_notify(
+      ${SUMMARY_WORKER_NOTIFY_CHANNEL},
+      json_build_object('debateId', ${debateId}, 'at', now())::text
+    )
+  `.compile(db));
 }
 
 export async function listDebateSummaryJobs(debateId: string) {
@@ -195,12 +271,16 @@ export async function enqueueDebateSummaryJob(input: {
   dependsOnKeys?: string[];
   payload?: Record<string, unknown>;
   status?: Extract<DebateSummaryJobStatus, "queued" | "blocked">;
+  priority?: number;
+  runAfter?: string | null;
   force?: boolean;
 }) {
   const now = new Date().toISOString();
   const payloadJson = JSON.stringify(input.payload ?? {});
   const dependsOnJson = JSON.stringify(input.dependsOnKeys ?? []);
   const status = input.status ?? "queued";
+  const priority = Number.isFinite(input.priority) ? Math.trunc(Number(input.priority)) : 100;
+  const runAfter = typeof input.runAfter === "string" && input.runAfter.trim() ? input.runAfter : null;
 
   const db = await ensureDb();
   const result = await db.executeQuery<SummaryJobRow>(sql`
@@ -214,6 +294,8 @@ export async function enqueueDebateSummaryJob(input: {
       round_number,
       depends_on_keys,
       payload_json,
+      priority,
+      run_after,
       attempt_count,
       last_error,
       next_retry_at,
@@ -233,6 +315,8 @@ export async function enqueueDebateSummaryJob(input: {
       ${input.roundNumber ?? null},
       ${dependsOnJson}::jsonb,
       ${payloadJson}::jsonb,
+      ${priority},
+      ${runAfter}::timestamptz,
       0,
       null,
       null,
@@ -251,8 +335,21 @@ export async function enqueueDebateSummaryJob(input: {
       payload_json = case
         when ${Boolean(input.force)} then excluded.payload_json
         when debate_summary_jobs.kind = 'facts_board'
+             and debate_summary_jobs.status = 'running'
+          then excluded.payload_json || jsonb_build_object('rerunRequestedAt', ${now}::text)
+        when debate_summary_jobs.kind = 'facts_board'
           then excluded.payload_json
         else debate_summary_jobs.payload_json
+      end,
+      priority = case
+        when ${Boolean(input.force)} then excluded.priority
+        when debate_summary_jobs.kind = 'facts_board' then least(debate_summary_jobs.priority, excluded.priority)
+        else debate_summary_jobs.priority
+      end,
+      run_after = case
+        when ${Boolean(input.force)} then excluded.run_after
+        when debate_summary_jobs.kind = 'facts_board' then excluded.run_after
+        else debate_summary_jobs.run_after
       end,
       status = case
         when ${Boolean(input.force)} then excluded.status
@@ -297,7 +394,9 @@ export async function enqueueDebateSummaryJob(input: {
       updated_at = ${now}
     returning *
   `.compile(db));
-  return normalizeSummaryJobRow(result.rows[0]);
+  const record = normalizeSummaryJobRow(result.rows[0]);
+  await notifySummaryWorkerQueueChanged(input.debateId).catch(() => null);
+  return record;
 }
 
 export async function scheduleDebateSummaryJobRetry(input: {
@@ -331,12 +430,22 @@ export async function completeDebateSummaryJob(id: string) {
   const db = await ensureDb();
   const result = await db.executeQuery<SummaryJobRow>(sql`
     update debate_summary_jobs
-       set status = 'completed',
+       set status = case
+             when kind = 'facts_board' and payload_json ? 'rerunRequestedAt' then 'queued'
+             else 'completed'
+           end,
            locked_by = null,
            locked_at = null,
            next_retry_at = null,
+           payload_json = case
+             when kind = 'facts_board' and payload_json ? 'rerunRequestedAt' then payload_json - 'rerunRequestedAt'
+             else payload_json
+           end,
            updated_at = ${now},
-           completed_at = ${now}
+           completed_at = case
+             when kind = 'facts_board' and payload_json ? 'rerunRequestedAt' then null
+             else ${now}::timestamptz
+           end
      where id = ${id}
      returning *
   `.compile(db));
@@ -376,6 +485,20 @@ export async function recoverStaleDebateSummaryJobs() {
      returning *
   `.compile(db));
   return result.rows.map(normalizeSummaryJobRow);
+}
+
+export async function heartbeatRunningSummaryJobLock(input: { jobId: string; workerId: string }) {
+  const db = await ensureDb();
+  const result = await db.executeQuery<{ id: string }>(sql`
+    update debate_summary_jobs
+       set locked_at = now(),
+           updated_at = now()
+     where id = ${input.jobId}
+       and locked_by = ${input.workerId}
+       and status = 'running'
+     returning id
+  `.compile(db));
+  return result.rows.length > 0;
 }
 
 export async function markBlockedDebateSummaryJob(id: string, reason: string) {
@@ -422,10 +545,11 @@ export async function claimRunnableDebateSummaryJobs(input: {
       with candidates as (
         select j.id
           from debate_summary_jobs j
+          left join debates d on d.id = j.debate_id
          where (
-           j.status = 'queued'
+           (j.status = 'queued' and (j.run_after is null or j.run_after <= now()))
            or (j.status = 'retry_wait' and (j.next_retry_at is null or j.next_retry_at <= now()))
-           or (j.status = 'blocked')
+           or (j.status = 'blocked' and j.updated_at < now() - interval '30 seconds')
            or (j.status = 'running' and j.locked_at is not null and j.locked_at < now() - interval '5 minutes')
          )
            and not exists (
@@ -445,6 +569,19 @@ export async function claimRunnableDebateSummaryJobs(input: {
                 and (r.locked_at is null or r.locked_at >= now() - interval '5 minutes')
            ) < ${Math.max(1, input.maxConcurrentPerDebate ?? 1)}
          order by
+           case
+             when d.status = 'running' then 0
+             when d.status = 'paused' then 1
+             when d.status = 'pending' then 2
+             else 3
+           end,
+           case j.status
+             when 'queued' then 0
+             when 'retry_wait' then 1
+             when 'running' then 2
+             else 3
+           end,
+           j.priority asc,
            case j.kind
              when 'turn_summary' then 1
              when 'round_summary' then 2
@@ -454,7 +591,7 @@ export async function claimRunnableDebateSummaryJobs(input: {
            coalesce(j.turn_number, 0) asc,
            j.created_at asc
          limit ${Math.max(1, input.limit)}
-         for update skip locked
+         for update of j skip locked
       )
       update debate_summary_jobs j
          set status = 'running',
@@ -467,4 +604,148 @@ export async function claimRunnableDebateSummaryJobs(input: {
     `.compile(trx));
     return result.rows.map(normalizeSummaryJobRow);
   });
+}
+
+export async function coalesceActiveFactsBoardJobs(debateId?: string | null) {
+  const db = await ensureDb();
+  const legacy = await db.executeQuery<SummaryJobRow>(sql`
+    select *
+      from debate_summary_jobs
+     where kind = 'facts_board'
+       and job_key <> ${FACTS_BOARD_JOB_KEY}
+       and status in ('queued', 'retry_wait', 'blocked')
+       and (${debateId ?? null}::uuid is null or debate_id = ${debateId ?? null}::uuid)
+     order by debate_id asc, updated_at desc, created_at desc
+  `.compile(db));
+
+  const latestByDebateId = new Map<string, DebateSummaryJobRecord>();
+  for (const row of legacy.rows.map(normalizeSummaryJobRow)) {
+    if (!latestByDebateId.has(row.debateId)) latestByDebateId.set(row.debateId, row);
+  }
+
+  for (const latest of latestByDebateId.values()) {
+    // eslint-disable-next-line no-await-in-loop
+    await enqueueDebateSummaryJob({
+      debateId: latest.debateId,
+      kind: "facts_board",
+      jobKey: FACTS_BOARD_JOB_KEY,
+      turnNumber: latest.turnNumber,
+      roundNumber: latest.roundNumber,
+      payload: {
+        ...latest.payload,
+        coalescedFromJobKey: latest.jobKey,
+        coalescedAt: new Date().toISOString()
+      },
+      priority: latest.priority,
+      runAfter: new Date().toISOString()
+    });
+  }
+
+  if (legacy.rows.length > 0) {
+    await db.executeQuery(sql`
+      delete from debate_summary_jobs
+       where kind = 'facts_board'
+         and job_key <> ${FACTS_BOARD_JOB_KEY}
+         and status in ('queued', 'retry_wait', 'blocked')
+         and (${debateId ?? null}::uuid is null or debate_id = ${debateId ?? null}::uuid)
+    `.compile(db));
+  }
+
+  return { debates: latestByDebateId.size, removed: legacy.rows.length };
+}
+
+export async function upsertSummaryWorkerHeartbeat(input: {
+  workerId: string;
+  mode: string;
+  status?: "running" | "idle" | "stopped";
+  currentJob?: Pick<DebateSummaryJobRecord, "id" | "debateId" | "jobKey"> | null;
+  claimedDelta?: number;
+  completedDelta?: number;
+  failedDelta?: number;
+}) {
+  const now = new Date().toISOString();
+  const db = await ensureDb();
+  const result = await db.executeQuery<SummaryWorkerRow>(sql`
+    insert into debate_summary_workers (
+      id,
+      mode,
+      status,
+      started_at,
+      last_heartbeat_at,
+      current_job_id,
+      current_debate_id,
+      current_job_key,
+      claimed_count,
+      completed_count,
+      failed_count,
+      updated_at
+    )
+    values (
+      ${input.workerId},
+      ${input.mode},
+      ${input.status ?? "running"},
+      ${now},
+      ${now},
+      ${input.currentJob?.id ?? null},
+      ${input.currentJob?.debateId ?? null},
+      ${input.currentJob?.jobKey ?? null},
+      ${input.claimedDelta ?? 0},
+      ${input.completedDelta ?? 0},
+      ${input.failedDelta ?? 0},
+      ${now}
+    )
+    on conflict (id) do update
+    set mode = excluded.mode,
+        status = excluded.status,
+        last_heartbeat_at = excluded.last_heartbeat_at,
+        current_job_id = excluded.current_job_id,
+        current_debate_id = excluded.current_debate_id,
+        current_job_key = excluded.current_job_key,
+        claimed_count = debate_summary_workers.claimed_count + excluded.claimed_count,
+        completed_count = debate_summary_workers.completed_count + excluded.completed_count,
+        failed_count = debate_summary_workers.failed_count + excluded.failed_count,
+        updated_at = excluded.updated_at
+    returning *
+  `.compile(db));
+  return normalizeSummaryWorkerRow(result.rows[0]);
+}
+
+export async function markSummaryWorkerStopped(workerId: string) {
+  const now = new Date().toISOString();
+  const db = await ensureDb();
+  const result = await db.executeQuery<SummaryWorkerRow>(sql`
+    update debate_summary_workers
+       set status = 'stopped',
+           current_job_id = null,
+           current_debate_id = null,
+           current_job_key = null,
+           updated_at = ${now}
+     where id = ${workerId}
+     returning *
+  `.compile(db));
+  return result.rows[0] ? normalizeSummaryWorkerRow(result.rows[0]) : null;
+}
+
+export async function getSummaryWorkerHealthSnapshot() {
+  const db = await ensureDb();
+  const workersResult = await db.executeQuery<SummaryWorkerRow>(sql`
+    select *
+      from debate_summary_workers
+     order by last_heartbeat_at desc
+     limit 10
+  `.compile(db));
+  const statsResult = await db.executeQuery<{ kind: DebateSummaryJobKind; status: DebateSummaryJobStatus; count: number }>(sql`
+    select kind, status, count(*)::int as count
+      from debate_summary_jobs
+     group by kind, status
+     order by kind asc, status asc
+  `.compile(db));
+  return {
+    workers: workersResult.rows.map(normalizeSummaryWorkerRow),
+    queue: statsResult.rows.map((row) => ({
+      kind: row.kind,
+      status: row.status,
+      count: Number(row.count ?? 0)
+    } satisfies DebateSummaryQueueStat))
+  };
 }

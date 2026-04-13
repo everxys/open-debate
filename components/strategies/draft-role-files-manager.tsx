@@ -152,6 +152,10 @@ export function DraftRoleFilesManagerColumns({
     normalizePath: normalizeInputPath,
     isDirMarker: isInternalDirMarker
   });
+  const treeRootRef = useRef<HTMLDivElement | null>(null);
+  const editorBoxRef = useRef<HTMLDivElement | null>(null);
+  const [treeHeight, setTreeHeight] = useState(520);
+  const [editorHeight, setEditorHeight] = useState(520);
   const skipNextFilesSyncRef = useRef(false);
   const actionsRef = useRef<{
     openFile: (path: string) => void;
@@ -196,6 +200,32 @@ export function DraftRoleFilesManagerColumns({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [contextMenu]);
+
+  useEffect(() => {
+    const treeNode = treeRootRef.current;
+    if (!treeNode) return;
+    const observer = new ResizeObserver(() => {
+      const next = Math.max(treeNode.clientHeight, 220);
+      setTreeHeight(next);
+    });
+    observer.observe(treeNode);
+    const next = Math.max(treeNode.clientHeight, 220);
+    setTreeHeight(next);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const editorNode = editorBoxRef.current;
+    if (!editorNode) return;
+    const observer = new ResizeObserver(() => {
+      const next = Math.max(editorNode.clientHeight, 260);
+      setEditorHeight(next);
+    });
+    observer.observe(editorNode);
+    const next = Math.max(editorNode.clientHeight, 260);
+    setEditorHeight(next);
+    return () => observer.disconnect();
+  }, []);
 
   const dirtyPaths = useMemo(() => {
     const dirty = new Set<string>();
@@ -514,11 +544,11 @@ export function DraftRoleFilesManagerColumns({
           </div>
 
           {files.length > 0 ? (
-            <div className={`treeRoot ${dragOverDir === "" ? "treeDropActive" : ""}`}>
+            <div ref={treeRootRef} className={`treeRoot ${dragOverDir === "" ? "treeDropActive" : ""}`}>
               <Tree<FsNode>
                 data={treeData}
                 width="100%"
-                height={620}
+                height={treeHeight}
                 indent={18}
                 rowHeight={34}
                 openByDefault={false}
@@ -593,7 +623,7 @@ export function DraftRoleFilesManagerColumns({
           })}
         </div>
 
-        <div className="editorBox">
+        <div ref={editorBoxRef} className="editorBox">
           <MonacoEditor
             language="markdown"
             theme="vs"
@@ -614,7 +644,7 @@ export function DraftRoleFilesManagerColumns({
               tabSize: 2,
               folding: true
             }}
-            height={520}
+            height={editorHeight}
           />
         </div>
 

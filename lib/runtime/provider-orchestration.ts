@@ -35,7 +35,6 @@ import {
 import {
   buildAnthropicTools,
   buildBaseSystemPrompt,
-  buildDemoResponse,
   buildFileToolInstructions,
   buildOpenAiTools,
   buildResponseFormatInstructions,
@@ -135,6 +134,38 @@ type ProviderPromptContext = ProviderCallInput & {
   prompt: string;
   implicitReadAudit: DebateFileActivityAudit;
 };
+
+type ProviderTextAssertionContext = {
+  provider: string;
+  model: string;
+  stage: string;
+  finishReason?: string | null;
+  toolCallsCount?: number;
+};
+
+export function assertProviderApiKeyEnabled(apiKey: string) {
+  if (apiKey.startsWith("demo-")) {
+    throw new AppError("AI_DEMO_KEY_DISABLED", 400, "Demo API keys are disabled for runtime generation.");
+  }
+}
+
+export function assertNonEmptyProviderText(
+  text: string | null | undefined,
+  context: ProviderTextAssertionContext
+) {
+  const normalized = String(text ?? "").trim();
+  if (normalized) return normalized;
+  const finishReason = context.finishReason?.trim() ? ` finish_reason=${context.finishReason}.` : "";
+  const toolCallsCount =
+    typeof context.toolCallsCount === "number" && Number.isFinite(context.toolCallsCount)
+      ? ` tool_calls=${context.toolCallsCount}.`
+      : "";
+  throw new AppError(
+    "AI_EMPTY_RESPONSE",
+    502,
+    `Provider returned empty content during ${context.stage}. provider=${context.provider} model=${context.model}.${finishReason}${toolCallsCount}`.trim()
+  );
+}
 
 function createLiveStageUpdater(input: ProviderCallInput) {
   return (stage: "calling_model" | "running_tools" | "parsing" | "saving", message: string) => {
@@ -669,7 +700,7 @@ async function runOpenAiProviderLoop(
     let streamed:
       | {
           content: string;
-          toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>;
+          toolCalls: Array<{ id: string; type?: string; function: { name: string; arguments: string } }>;
           usage: unknown;
           finishReason?: string | null;
         }
@@ -726,9 +757,16 @@ async function runOpenAiProviderLoop(
         )
       }).catch(() => null);
       const retryText = String(noToolRetry?.content ?? "").trim();
-      if (retryText) {
+      const fallbackText = retryText || assistantContent;
+      if (fallbackText.trim()) {
         return {
-          raw: retryText.length >= assistantContent.length ? retryText : assistantContent,
+          raw: assertNonEmptyProviderText(fallbackText, {
+            provider: context.agent.provider,
+            model: context.agent.model,
+            stage: "openai.tool_calls_without_payload_retry",
+            finishReason: noToolRetry?.finishReason ?? streamed.finishReason ?? null,
+            toolCallsCount: totalToolCalls
+          }),
           usage: normalizeOpenAiUsage(noToolRetry?.usage) ?? usage,
           promptChars,
           estimatedPromptTokens,
@@ -745,7 +783,13 @@ async function runOpenAiProviderLoop(
 
     if (!toolCalls || toolCalls.length === 0) {
       return {
-        raw: assistantContent || buildDemoResponse(context.debate, context.agent, context.messageNumber),
+        raw: assertNonEmptyProviderText(assistantContent, {
+          provider: context.agent.provider,
+          model: context.agent.model,
+          stage: "openai.final_text_response",
+          finishReason: streamed.finishReason ?? null,
+          toolCallsCount: totalToolCalls
+        }),
         usage,
         promptChars,
         estimatedPromptTokens,
@@ -753,14 +797,22 @@ async function runOpenAiProviderLoop(
           provider: context.agent.provider,
           model: context.agent.model,
           requestedMaxTokens: context.requestedMaxTokens,
-          finishReason: streamed.finishReason ?? (assistantContent ? null : "demo_fallback"),
+          finishReason: streamed.finishReason ?? null,
           toolCallsCount: totalToolCalls
         }
       };
     }
 
     totalToolCalls += toolCalls.length;
-    messages.push({ role: "assistant", tool_calls: toolCalls, content: assistantContent });
+    messages.push({
+      role: "assistant",
+      tool_calls: toolCalls.map((call) => ({
+        id: call.id,
+        type: "function",
+        function: call.function
+      })),
+      content: assistantContent
+    });
 
     for (const call of toolCalls) {
       let parsedArgs: unknown = {};
@@ -801,7 +853,13 @@ async function runOpenAiProviderLoop(
       }).catch(() => null)
     );
   return {
-    raw: fallback.content || buildDemoResponse(context.debate, context.agent, context.messageNumber),
+    raw: assertNonEmptyProviderText(fallback.content, {
+      provider: context.agent.provider,
+      model: context.agent.model,
+      stage: "openai.no_tools_fallback",
+      finishReason: fallback.finishReason ?? null,
+      toolCallsCount: totalToolCalls
+    }),
     usage,
     promptChars,
     estimatedPromptTokens,
@@ -809,7 +867,7 @@ async function runOpenAiProviderLoop(
       provider: context.agent.provider,
       model: context.agent.model,
       requestedMaxTokens: context.requestedMaxTokens,
-      finishReason: fallback.finishReason ?? (fallback.content ? null : "demo_fallback"),
+      finishReason: fallback.finishReason ?? null,
       toolCallsCount: totalToolCalls
     }
   };
@@ -875,7 +933,13 @@ async function runAnthropicProviderLoop(
 
     if (toolUses.length === 0) {
       const textBlock = contentBlocks.find((block) => block.type === "text") as { text?: string } | undefined;
-      const content = textBlock?.text ?? buildDemoResponse(context.debate, context.agent, context.messageNumber);
+      const content = assertNonEmptyProviderText(textBlock?.text, {
+        provider: context.agent.provider,
+        model: context.agent.model,
+        stage: "anthropic.final_text_response",
+        finishReason: typeof payload?.stop_reason === "string" ? payload.stop_reason : null,
+        toolCallsCount: totalToolCalls
+      });
       await emitChunks(context.debate.id, context.messageNumber, context.eventAgentName, context.baseRoleName, content);
       return {
         raw: content,
@@ -932,7 +996,13 @@ async function runAnthropicProviderLoop(
   if (!fallbackResponse.ok) {
     throw new AppError("AI_API_ERROR", 502, JSON.stringify(fallbackPayload).slice(0, 400));
   }
-  const content = fallbackPayload.content?.[0]?.text ?? buildDemoResponse(context.debate, context.agent, context.messageNumber);
+  const content = assertNonEmptyProviderText(fallbackPayload.content?.[0]?.text, {
+    provider: context.agent.provider,
+    model: context.agent.model,
+    stage: "anthropic.no_tools_fallback",
+    finishReason: typeof fallbackPayload?.stop_reason === "string" ? fallbackPayload.stop_reason : null,
+    toolCallsCount: totalToolCalls
+  });
   await emitChunks(context.debate.id, context.messageNumber, context.eventAgentName, context.baseRoleName, content);
   return {
     raw: content,
@@ -974,23 +1044,7 @@ export async function callProvider(
   const promptContext = await buildProviderPromptContext(input);
   const overrideSystemPrompt = await loadDebateAgentSystemPrompt(userId, debateAgentId);
   const updateLiveStage = createLiveStageUpdater(input);
-
-  if (process.env.NODE_ENV !== "production" && promptContext.apiKey.startsWith("demo-")) {
-    const estimatedPromptTokens = estimatePromptTokensFromChars(promptContext.prompt.length);
-    return {
-      raw: buildDemoResponse(debate, agent, messageNumber),
-      usage: null,
-      promptChars: promptContext.prompt.length,
-      estimatedPromptTokens,
-      diagnostics: {
-        provider: agent.provider,
-        model: agent.model,
-        requestedMaxTokens: promptContext.requestedMaxTokens,
-        finishReason: "demo_fallback",
-        toolCallsCount: 0
-      }
-    };
-  }
+  assertProviderApiKeyEnabled(promptContext.apiKey);
 
   if (agent.provider === "openai") {
     return runOpenAiProviderLoop(promptContext, updateLiveStage, overrideSystemPrompt);

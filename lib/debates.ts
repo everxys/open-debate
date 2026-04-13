@@ -7,10 +7,12 @@ import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
 import { runDebate } from "@/lib/runtime";
+import { listStrategyFileAccessRules, mergeWorkflowConfigWithFileAccessRules } from "@/lib/strategies";
 import type { DebateRecord } from "@/lib/types";
 import { createDebateSchema, updateDebateQuestionSchema, updateDebateSharingSchema } from "@/lib/validation";
 import {
   createDefaultDebateWorkflowConfig,
+  type DebateWorkflowConfig,
   formatRequiredDeliverableSummary,
   normalizeDebateWorkflow,
   toCanonicalWorkflowConfig
@@ -460,6 +462,7 @@ async function loadStrategyRolesMap(strategyId: string, roleIds: string[]) {
 }
 
 async function copyStrategyDebateFiles(
+  strategyId: string,
   debateId: string,
   roleIds: string[],
   now: string,
@@ -474,11 +477,13 @@ async function copyStrategyDebateFiles(
     .limit(1)
     .executeTakeFirst();
   const workflowContent = workflow ? String(workflow.content ?? "").trim() : "";
+  const strategyFileAccessRules = await listStrategyFileAccessRules(strategyId);
   const canonicalWorkflowContent = (() => {
-    if (!workflowContent) return DEFAULT_WORKFLOW_JSON;
     try {
-      const parsed = JSON.parse(workflowContent) as unknown;
-      const canonical = (toCanonicalWorkflowConfig(parsed) ?? parsed) as Record<string, unknown>;
+      const parsed = workflowContent ? (JSON.parse(workflowContent) as unknown) : createDefaultDebateWorkflowConfig();
+      const baseCanonical = (toCanonicalWorkflowConfig(parsed) ?? parsed) as DebateWorkflowConfig;
+      const mergedCanonical = mergeWorkflowConfigWithFileAccessRules(baseCanonical, strategyFileAccessRules);
+      const canonical = mergedCanonical as Record<string, unknown>;
       const summaryAgentId = typeof options?.summaryAgentId === "string" ? options.summaryAgentId.trim() : "";
       if (
         canonical &&
@@ -493,7 +498,11 @@ async function copyStrategyDebateFiles(
       }
       return JSON.stringify(canonical, null, 2);
     } catch {
-      return DEFAULT_WORKFLOW_JSON;
+      return JSON.stringify(
+        mergeWorkflowConfigWithFileAccessRules(createDefaultDebateWorkflowConfig(), strategyFileAccessRules),
+        null,
+        2
+      );
     }
   })();
   await db
@@ -744,7 +753,7 @@ export async function createDebateFromStrategyBindings(
   try {
     const db = await ensureDb();
     const usedDisplayNames = new Set<string>();
-    await copyStrategyDebateFiles(debate.id, uniqueRoleIds, now, {
+    await copyStrategyDebateFiles(data.strategyId, debate.id, uniqueRoleIds, now, {
       summaryAgentId: data.summaryAgentId ?? null
     });
     if (Array.isArray(data.workspaceFiles) && data.workspaceFiles.length > 0) {
@@ -1570,6 +1579,9 @@ export async function listDebateFileActivity(
   options?: {
     action?: DebateFileActivityFilter;
     path?: string;
+    debateAgentId?: string;
+    roundNumber?: number;
+    turnNumber?: number;
     limit?: number;
     beforeId?: string;
   }
@@ -1585,6 +1597,9 @@ export async function listDebateFileActivity(
   const action =
     options?.action === "read" || options?.action === "write" || options?.action === "summarizer_write" ? options.action : null;
   const path = typeof options?.path === "string" && options.path.trim() ? options.path.trim() : null;
+  const debateAgentId = typeof options?.debateAgentId === "string" && options.debateAgentId.trim() ? options.debateAgentId.trim() : null;
+  const roundNumber = typeof options?.roundNumber === "number" && Number.isFinite(options.roundNumber) ? Math.floor(options.roundNumber) : null;
+  const turnNumber = typeof options?.turnNumber === "number" && Number.isFinite(options.turnNumber) ? Math.floor(options.turnNumber) : null;
   const beforeId = typeof options?.beforeId === "string" && options.beforeId.trim() ? options.beforeId.trim() : null;
 
   try {
@@ -1648,6 +1663,9 @@ export async function listDebateFileActivity(
           or (${action}::text = 'read' and l.action <> 'write')
         )
         and (${path}::text is null or l.path = ${path}::text)
+        and (${debateAgentId}::uuid is null or l.debate_agent_id = ${debateAgentId}::uuid)
+        and (${roundNumber}::int is null or l.round_number = ${roundNumber}::int)
+        and (${turnNumber}::int is null or l.turn_number = ${turnNumber}::int)
         and (
           ${beforeId}::uuid is null
           or exists (
@@ -1733,6 +1751,155 @@ export async function listDebateFileActivity(
       hasMore,
       counts
     };
+  } catch (error) {
+    if (isMissingTableError(error, "debate_file_activity_logs")) {
+      throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_file_activity_logs table");
+    }
+    throw error;
+  }
+}
+
+export async function listDebateFileActivityNav(debateId: string, options?: { action?: DebateFileActivityFilter }) {
+  const session = await requireSessionUser();
+  const { isOwner } = await getDebateForView(debateId, session.userId);
+  if (!isOwner) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+
+  const action =
+    options?.action === "read" || options?.action === "write" || options?.action === "summarizer_write" ? options.action : null;
+
+  try {
+    const db = await ensureDb();
+    const result = await db.executeQuery<{
+      debate_agent_id: string;
+      round_number: number;
+      turn_number: number;
+      count: number;
+      reason: string | null;
+      actor_name: string | null;
+      actor_seat_name: string | null;
+    }>(sql`
+      select
+        l.debate_agent_id,
+        l.round_number,
+        l.turn_number,
+        count(*)::int as count,
+        max(l.reason) as reason,
+        max(a.name) as actor_name,
+        max(da.display_name) as actor_seat_name
+      from debate_file_activity_logs l
+      join debate_agents da on da.id = l.debate_agent_id
+      join ai_agents a on a.id = da.ai_agent_id
+      where l.debate_id = ${debateId}
+        and (
+          ${action}::text is null
+          or (${action}::text = 'write' and l.action = 'write' and (l.reason is null or l.reason not like 'summarizer:%'))
+          or (${action}::text = 'summarizer_write' and l.action = 'write' and l.reason like 'summarizer:%')
+          or (${action}::text = 'read' and l.action <> 'write')
+        )
+      group by l.debate_agent_id, l.round_number, l.turn_number
+      order by max(da.display_name) asc, l.round_number desc, l.turn_number desc
+    `.compile(db));
+    const countsResult = await db.executeQuery<{ action: string; count: number }>(sql`
+      select
+        case
+          when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
+          when action = 'write' then 'write'
+          else 'read'
+        end as action,
+        count(*)::int as count
+        from debate_file_activity_logs
+       where debate_id = ${debateId}
+       group by
+        case
+          when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
+          when action = 'write' then 'write'
+          else 'read'
+        end
+    `.compile(db));
+
+    const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debateId);
+    const counts = { read: 0, write: 0, summarizerWrite: 0 };
+    for (const row of countsResult.rows) {
+      if (row.action === "read") counts.read = Number(row.count ?? 0);
+      if (row.action === "write") counts.write = Number(row.count ?? 0);
+      if (row.action === "summarizer_write") counts.summarizerWrite = Number(row.count ?? 0);
+    }
+    const agentMap = new Map<
+      string,
+      {
+        key: string;
+        debateAgentId: string;
+        agentName: string;
+        actorRoleType: string;
+        count: number;
+        rounds: Map<number, { key: string; roundNumber: number; count: number; turns: Map<number, { key: string; turnNumber: number; count: number; entries: never[] }> }>;
+      }
+    >();
+
+    for (const row of result.rows) {
+      const debateAgentId = String(row.debate_agent_id);
+      const isSummarizer = isSummarizerActivityReason(row.reason ? String(row.reason) : null);
+      const agentName = isSummarizer ? "独立总结器" : row.actor_seat_name ? String(row.actor_seat_name) : String(row.actor_name ?? "Unknown");
+      const actorRoleType = isSummarizer ? "Summarizer" : getDebateParticipantRoleType(roleAssignments, debateAgentId);
+      const agentKey = `${debateAgentId || "unknown"}:${agentName || "Unknown AI"}`;
+      const roundNumber = Number(row.round_number);
+      const turnNumber = Number(row.turn_number);
+      const count = Number(row.count ?? 0);
+
+      let agent = agentMap.get(agentKey);
+      if (!agent) {
+        agent = {
+          key: agentKey,
+          debateAgentId,
+          agentName,
+          actorRoleType,
+          count: 0,
+          rounds: new Map()
+        };
+        agentMap.set(agentKey, agent);
+      }
+      agent.count += count;
+
+      let round = agent.rounds.get(roundNumber);
+      if (!round) {
+        round = {
+          key: `${agentKey}:round:${roundNumber}`,
+          roundNumber,
+          count: 0,
+          turns: new Map()
+        };
+        agent.rounds.set(roundNumber, round);
+      }
+      round.count += count;
+
+      round.turns.set(turnNumber, {
+        key: `${agentKey}:round:${roundNumber}:turn:${turnNumber}`,
+        turnNumber,
+        count,
+        entries: []
+      });
+    }
+
+    const groups = Array.from(agentMap.values())
+      .sort((a, b) => a.agentName.localeCompare(b.agentName, undefined, { numeric: true, sensitivity: "base" }))
+      .map((agent) => ({
+        key: agent.key,
+        debateAgentId: agent.debateAgentId,
+        agentName: agent.agentName,
+        actorRoleType: agent.actorRoleType,
+        count: agent.count,
+        rounds: Array.from(agent.rounds.values())
+          .sort((a, b) => b.roundNumber - a.roundNumber)
+          .map((round) => ({
+            key: round.key,
+            roundNumber: round.roundNumber,
+            count: round.count,
+            turns: Array.from(round.turns.values()).sort((a, b) => b.turnNumber - a.turnNumber)
+          }))
+      }));
+    return { groups, counts };
   } catch (error) {
     if (isMissingTableError(error, "debate_file_activity_logs")) {
       throw new AppError("MIGRATION_REQUIRED", 500, "Missing debate_file_activity_logs table");
@@ -2059,6 +2226,8 @@ export async function startDebate(id: string) {
       runtime_notice_kind: null,
       runtime_notice_message: null,
       runtime_notice_at: null,
+      last_error_code: null,
+      last_error_message: null,
       updated_at: now
     })
     .where("id", "=", id)

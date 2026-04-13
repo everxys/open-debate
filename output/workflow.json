@@ -1,0 +1,200 @@
+{
+    "voting": {
+        "custom": {
+            "maxOptions": null,
+            "minOptions": 2
+        },
+        "governance": {
+            "tieBreaker": "revote",
+            "maxTieRounds": 2
+        }
+    },
+    "enabled": true,
+    "consensus": {
+        "enabled": true,
+        "minAvgScore": 8,
+        "requireAllSeats": true
+    },
+    "completion": {
+        "mode": "workflow_gate"
+    },
+    "summarizer": {
+        "enabled": true,
+        "perTurn": true,
+        "prompts": {
+            "factsBoard": "你是这场辩论的独立总结器。你的任务是把现有 facts/board.md 重写成“结构化工作板”，不是把新内容附在最后面。\n\n要求：\n1. 必须做去重、合并、替换，不要保留逐 Turn 摘录。\n2. 既要记录讨论形成的稳定内容，也要记录投票、公告、文件收束等流程动作带来的关键状态变化。\n3. 优先保留对后续推进最有用的信息，并删除已被推翻或失效的旧条目。\n4. 必须显式记录当前最弱一笔和下一轮必须继续打磨的点。\n5. 表达要短、硬、清楚，适合后续 AI 快速续跑。\n\n输出必须严格使用以下结构：\n## 已确认共识\n## 候选方案\n## 未决问题\n## 高风险漏洞\n## 当前最弱一笔\n## 下一轮必须继续打磨的点",
+            "turnSummary": "你是这场辩论的独立总结器。你的任务不是继续辩论，而是把“刚刚结束的这一回”压缩成一份高信息密度的回摘要。\n\n要求：\n1. 只保留本回真正有用的信息，不要为了凑格式硬编“新增主张”或“新增方案”。\n2. 先判断本回是否真的推进了当前阶段的当前子任务；如果没有推进，必须明确指出它是绕题、重复、空泛，还是主要在做流程动作。\n3. 如果这一回主要是在投票、公告、收束、文件落库、检查点确认或其他流程动作，就重点总结“做了什么动作、状态发生了什么变化、这会怎样影响后续辩论”。\n4. 如果本回涉及点子筛选，尽量指出它主要是在处理大点子 / 中点子 / 小点子哪一层。\n5. 如果本回推进了事件、角色、终局或章节，尽量指出本回最容易翻车的风险是什么。\n6. 额外判断：本回是否出现“看似很强、其实二刷站不住”的内容；并区分当前最危险的是结构性弱点，还是表达性弱点。\n7. 不要大段摘抄原文，不要空泛夸赞，不要写场面话。\n\n输出必须严格使用以下结构：\n## 当前子任务是否被推进\n## 本回关键信息\n## 本回动作/状态更新\n## 本回最弱一笔 / 风险\n## 当前最危险的是结构问题还是表达问题\n## 下一轮最该继续推进的点",
+            "roundSummary": "你是独立总结器。你的任务是基于“本轮已有的逐回摘要”，生成一份更详细、可直接阅读的轮摘要。\n\n要求：\n1. 只基于本轮的 turn summaries 工作，不要回顾整场长历史。\n2. 轮摘要不仅要说明本轮说了什么，还要判断本轮到底把当前阶段推进到了哪个子任务、哪些推进是真实的、哪些只是重复讨论。\n3. 如果本轮主要是投票、公告、文件落库、检查点或流程推进，不要硬写成“新增主张”；应明确写出发生了什么动作、状态如何变化、对后续有什么影响。\n4. 尽量指出本轮讨论主要打的是大点子 / 中点子 / 小点子哪一层，以及有没有把不同层级混在一起导致失焦。\n5. 需要指出本轮的最强一笔、最弱一笔，以及当前最危险的质量风险：伪高智商、伪伏笔、伪人物成长、空泛堆字、只靠解释成立的高潮。\n6. 额外判断：本轮是否出现“看似很强、其实二刷站不住”的内容，并区分当前最危险的是结构性弱点，还是表达性弱点。\n8. 不要大段摘抄原文，不要空泛赞美，不要写漂亮废话。\n\n请严格输出以下 Markdown 结构：\n## 本轮推进到的阶段 / 子任务\n## 本轮关键推进\n## 本轮主要处理的点子层级\n## 本轮关键动作 / 状态变化\n## 本轮最强一笔\n## 本轮最弱一笔\n## 当前最危险的是结构问题还是表达问题\n## 本轮遗留风险\n## Host 的流程主持是否有效\n## 下一轮最该继续推进的点"
+        },
+        "perRound": true,
+        "aiAgentId": null,
+        "factsBoard": true,
+        "outputPaths": {
+            "factsBoardPath": "facts/board.md",
+            "turnSummaryDir": "debate/turn_summaries/",
+            "roundSummaryDir": "debate/round_summaries/"
+        }
+    },
+    "deliverables": {
+        "allowedPaths": [
+            "final/",
+            "outputs/"
+        ],
+        "requiredFiles": [
+            {
+                "path": "final/01-core-premise.md",
+                "minChars": 6000,
+                "minMarkdownHeadings": 10
+            },
+            {
+                "path": "final/02-world-rules.md",
+                "minChars": 15000,
+                "minMarkdownHeadings": 18
+            },
+            {
+                "path": "final/03-era-history.md",
+                "minChars": 12000,
+                "minMarkdownHeadings": 14
+            },
+            {
+                "path": "final/04-factions-and-order.md",
+                "minChars": 12000,
+                "minMarkdownHeadings": 14
+            },
+            {
+                "path": "final/05-core-cast.md",
+                "minChars": 18000,
+                "minMarkdownHeadings": 22
+            },
+            {
+                "path": "final/06-pressure-cast-and-rivals.md",
+                "minChars": 22000,
+                "minMarkdownHeadings": 24
+            },
+            {
+                "path": "final/07-main-plot-spine.md",
+                "minChars": 15000,
+                "minMarkdownHeadings": 16
+            },
+            {
+                "path": "final/08-major-events.md",
+                "minChars": 25000,
+                "minMarkdownHeadings": 30
+            },
+            {
+                "path": "final/09-core-schemes.md",
+                "minChars": 30000,
+                "minMarkdownHeadings": 32
+            },
+            {
+                "path": "final/10-relationship-arcs-and-tensions.md",
+                "minChars": 12000,
+                "minMarkdownHeadings": 16
+            },
+            {
+                "path": "final/11-volume-architecture.md",
+                "minChars": 18000,
+                "minMarkdownHeadings": 18
+            },
+            {
+                "path": "final/12-volume-1-outline.md",
+                "minChars": 25000,
+                "minMarkdownHeadings": 28
+            },
+            {
+                "path": "final/13-volume-2-outline.md",
+                "minChars": 25000,
+                "minMarkdownHeadings": 28
+            },
+            {
+                "path": "final/14-volume-3-outline.md",
+                "minChars": 25000,
+                "minMarkdownHeadings": 28
+            },
+            {
+                "path": "final/15-foreshadowing-ledger.md",
+                "minChars": 20000,
+                "minMarkdownHeadings": 20
+            },
+            {
+                "path": "final/16-key-scenes-and-lines.md",
+                "minChars": 12000,
+                "minMarkdownHeadings": 16
+            },
+            {
+                "path": "final/novel_bible.md",
+                "minChars": 40000,
+                "minMarkdownHeadings": 24
+            }
+        ]
+    },
+    "phaseMachine": {
+        "phases": [
+            {
+                "id": "phase-1",
+                "kind": "analysis",
+                "title": "Phase 1 · 议题定向与风险暴露",
+                "minRounds": 1,
+                "description": "只解决作品命题、世界边界、底层规则、关键失败风险和阶段优先级，不提前进入大规模点子筛选与终稿整合。",
+                "injectedPrompt": "【Phase 1】当前阶段只负责把题目打透，而不是提前写创作圣经细节。固定 Host 负责控流程和限定本轮唯一问题；内容席位要围绕作品承诺、底层规则、主要风险、成功标准和当前最值得优先推进的方向来辩论。此阶段不要提前读未解锁文件，不要急着写角色表、章节表或终稿，也不要把局部小点子伪装成全书方向。此阶段的成功，不是提出很多点子，而是明确核心命题、底层约束方向、失败风险，以及下一阶段先推进哪一个块。最常见的伪推进，是看起来说了很多，实际上既没有明确命题，也没有明确失败风险。"
+            },
+            {
+                "id": "phase-2",
+                "kind": "deliberation",
+                "title": "Phase 2 · 子任务推进与方案成形",
+                "minRounds": null,
+                "description": "按子任务逐块推进：点子筛选、主线骨架、人物系统、核心事件、关系弧线、终局伏笔、分卷结构、章节展开。",
+                "injectedPrompt": "【Phase 2】当前阶段由固定 Host 宣布本轮唯一子任务，其他席位围绕该子任务推进。若工作台已经提供 debate/ideas/ 下的私有素材，进入本阶段后应先读取并消化 raw-idea-bank、selected-s-tier、selected-a-tier、event-mappings 等相关文件，再据此做筛选、合并、替换和重组，不能脱离现有素材凭空泛谈。优先顺序通常是：点子筛选与重组 -> 主线骨架与终局真相 -> 人物系统 -> 五大核心事件 -> 关系弧线 -> 伏笔回收 -> 分卷结构 -> 章节级展开。单轮只打一个块，不要同时平铺人物、终局、章节、事件。最常见的伪推进，是讨论热闹但没有形成稳定候选结论，也没有把好点子压成可写文件。"
+            },
+            {
+                "id": "phase-2-5",
+                "kind": "finalization_vote",
+                "title": "Phase 2.5 · 收束前表决",
+                "minRounds": null,
+                "description": "进入最终收束前，判断关键子任务和关键文件是否已经成熟到可以整合。",
+                "injectedPrompt": "【Phase 2.5】当前阶段要判断：关键子任务是否已有稳定候选结论、关键文件是否具备整合前提、是否还存在明显伪强内容、结构性漏洞或无法复盘的硬伤。如果支持进入最终收束，必须说明为什么现在适合整合；如果反对，也必须指出仍未解决的最硬缺口。最常见的伪推进，是把局部漂亮片段误判成已经可以整体收束。"
+            },
+            {
+                "id": "phase-3",
+                "kind": "finalization",
+                "title": "Phase 3 · 收束、补洞与最终交付",
+                "minRounds": null,
+                "description": "收敛、审查、补洞、回收、交付；重点不再是自由发散，而是清理最弱一笔并确保二刷成立。",
+                "injectedPrompt": "【Phase 3】当前阶段重点是交付文件总检查、当前最弱一笔清除、伏笔与终局回收自检、逻辑闭环与二刷成立性检查、最终总汇总稿整合。Host 负责维持流程和提醒缺口，但不负责替所有人创作内容。不要重新开大规模新坑，不要用临时新设定掩盖旧漏洞。最常见的伪推进，是把“文件数量变多”误当成“质量已经过关”。"
+            }
+        ],
+        "transitionRules": {
+            "finalization": {
+                "autoOpenVote": true,
+                "reopenUntilPassed": true,
+                "requireUnanimousVote": true,
+                "requirePhaseForCompletion": true,
+                "discussionRoundsBetweenVotes": 1
+            }
+        }
+    },
+    "contextAccess": {
+        "readWhenNeeded": [
+            {
+                "scope": "shared",
+                "recursive": true,
+                "pathPrefix": "debate/"
+            }
+        ],
+        "unlockAfterPhase": [
+            {
+                "scope": "shared",
+                "phaseKind": "analysis",
+                "recursive": true,
+                "pathPrefix": "debate/ideas/"
+            }
+        ]
+    },
+    "promptPolicies": {
+        "outputBudget": {
+            "writingMaxTokens": null,
+            "discussionMaxTokens": null
+        }
+    },
+    "workflowVersion": 1
+}

@@ -2,7 +2,7 @@ import { query } from "@/lib/db";
 import { subscribeDebateLiveEvents, getDebateLiveProgress } from "@/lib/debate-live";
 import { toErrorResponse } from "@/lib/http";
 import { readSession } from "@/lib/session";
-import { listActiveDebateSummaryJobs, toDebateSummaryJobLiveView } from "@/lib/summary-jobs";
+import { getSummaryWorkerHealthSnapshot, listActiveDebateSummaryJobs, toDebateSummaryJobLiveView } from "@/lib/summary-jobs";
 
 export const runtime = "nodejs";
 
@@ -61,6 +61,8 @@ export async function GET(
         for (const job of mergedJobs.values()) {
           controller.enqueue(encoder.encode(sseEvent("summary_job", { debateId: id, job })));
         }
+        const workerHealth = await getSummaryWorkerHealthSnapshot().catch(() => ({ workers: [], queue: [] }));
+        controller.enqueue(encoder.encode(sseEvent("summary_worker_health", { workerHealth })));
         controller.enqueue(encoder.encode(sseEvent("hello", { at: new Date().toISOString() })));
 
         unsubscribe = subscribeDebateLiveEvents(id, (evt) => {

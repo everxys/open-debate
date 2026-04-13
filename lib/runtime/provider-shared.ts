@@ -2,7 +2,7 @@ import { type DebateParticipantRoleType } from "@/lib/debate-role-types";
 import { emitDebateLiveEvent } from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
 import { appendServerLog } from "@/lib/server-log";
-import type { AgentRecord, DebateRecord } from "@/lib/types";
+import type { AgentRecord } from "@/lib/types";
 import {
   formatRequiredDeliverableSummary,
   type NormalizedWorkflowRequiredFile
@@ -136,26 +136,6 @@ export function clipMessagesToInputLimit(
 export function looksLikeToolsUnsupported(errorText: string) {
   const lower = errorText.toLowerCase();
   return errorText.includes("tools") && (lower.includes("unknown") || lower.includes("unrecognized"));
-}
-
-export function buildDemoResponse(debate: DebateRecord, agent: AgentRecord, turnNumber: number) {
-  const position = turnNumber % 2 === 0 ? "倾向方案 A" : "倾向方案 B";
-  const excerpt = debate.question.slice(0, 28).replace(/\s+/g, " ").trim();
-  return [
-    `# ${agent.name} · Round ${turnNumber}`,
-    "",
-    `**立场**：${position}`,
-    "",
-    `**基于问题**：${excerpt}${debate.question.length > excerpt.length ? "..." : ""}`,
-    "",
-    "## 观点",
-    "- 给出一个可执行的合并思路",
-    "- 指出一个潜在风险点",
-    "",
-    "## 下一步建议",
-    "- 需要补充的关键前提/事实",
-    "- 需要进一步澄清的问题"
-  ].join("\n");
 }
 
 export function buildBaseSystemPrompt(_agent: AgentRecord, overrideSystemPrompt?: string | null) {

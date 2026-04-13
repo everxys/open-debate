@@ -130,6 +130,21 @@ type SummaryJob = {
   updatedAt: string;
 };
 
+type SummaryWorkerHealth = {
+  id: string;
+  mode: string;
+  status: string;
+  startedAt: string;
+  lastHeartbeatAt: string;
+  currentJobId: string | null;
+  currentDebateId: string | null;
+  currentJobKey: string | null;
+  claimedCount: number;
+  completedCount: number;
+  failedCount: number;
+  stale: boolean;
+};
+
 function formatSummaryJobDetail(job: SummaryJob) {
   const parts: string[] = [];
   if (job.message) parts.push(job.message);
@@ -270,6 +285,43 @@ type FileActivityCounts = {
   summarizerWrite: number;
 };
 
+type FileActivityTurnGroup = {
+  key: string;
+  turnNumber: number;
+  count: number;
+  entries: FileActivityListItem[];
+};
+
+type FileActivityRoundGroup = {
+  key: string;
+  roundNumber: number;
+  count: number;
+  turns: FileActivityTurnGroup[];
+};
+
+type FileActivityAgentGroup = {
+  key: string;
+  debateAgentId: string;
+  agentName: string;
+  actorRoleType: string;
+  count: number;
+  rounds: FileActivityRoundGroup[];
+};
+
+type FileActivitySelection =
+  | { level: "agent"; agentKey: string }
+  | { level: "round"; agentKey: string; roundNumber: number }
+  | { level: "turn"; agentKey: string; roundNumber: number; turnNumber: number };
+
+type FileActivityNodeFilter = {
+  debateAgentId?: string;
+  roundNumber?: number;
+  turnNumber?: number;
+};
+
+type FileActivityRequestFilter = FileActivityNodeFilter & { beforeId?: string };
+type FileActivityLoadMoreFilter = FileActivityNodeFilter & { beforeId: string };
+
 function formatFileActivityEntryAction(action: FileActivityEntryAction) {
   if (action === "write") return "写入";
   if (action === "search") return "搜索";
@@ -281,6 +333,249 @@ function formatFileActivityEntryAction(action: FileActivityEntryAction) {
 function formatFileActivityRoleType(roleType: FileActivityListItem["actorRoleType"]) {
   const normalized = String(roleType ?? "").trim();
   return normalized || "Contributor";
+}
+
+function compareFileActivityAgentGroups(a: { agentName: string }, b: { agentName: string }) {
+  return a.agentName.localeCompare(b.agentName, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function buildFileActivityGroups(items: FileActivityListItem[]) {
+  const agentMap = new Map<
+    string,
+    {
+      key: string;
+      debateAgentId: string;
+      agentName: string;
+      actorRoleType: string;
+      count: number;
+      rounds: Map<number, { key: string; roundNumber: number; count: number; turns: Map<number, FileActivityTurnGroup> }>;
+    }
+  >();
+
+  for (const item of items) {
+    const agentKey = `${item.debateAgentId || "unknown"}:${item.agentName || "Unknown AI"}`;
+    let agentGroup = agentMap.get(agentKey);
+    if (!agentGroup) {
+      agentGroup = {
+        key: agentKey,
+        debateAgentId: item.debateAgentId,
+        agentName: item.agentName || "Unknown AI",
+        actorRoleType: item.actorRoleType,
+        count: 0,
+        rounds: new Map()
+      };
+      agentMap.set(agentKey, agentGroup);
+    }
+    agentGroup.count += 1;
+
+    let roundGroup = agentGroup.rounds.get(item.roundNumber);
+    if (!roundGroup) {
+      roundGroup = {
+        key: `${agentKey}:round:${item.roundNumber}`,
+        roundNumber: item.roundNumber,
+        count: 0,
+        turns: new Map()
+      };
+      agentGroup.rounds.set(item.roundNumber, roundGroup);
+    }
+    roundGroup.count += 1;
+
+    let turnGroup = roundGroup.turns.get(item.turnNumber);
+    if (!turnGroup) {
+      turnGroup = {
+        key: `${agentKey}:round:${item.roundNumber}:turn:${item.turnNumber}`,
+        turnNumber: item.turnNumber,
+        count: 0,
+        entries: []
+      };
+      roundGroup.turns.set(item.turnNumber, turnGroup);
+    }
+    turnGroup.count += 1;
+    turnGroup.entries.push(item);
+  }
+
+  return Array.from(agentMap.values())
+    .sort(compareFileActivityAgentGroups)
+    .map<FileActivityAgentGroup>((agentGroup) => ({
+      key: agentGroup.key,
+      debateAgentId: agentGroup.debateAgentId,
+      agentName: agentGroup.agentName,
+      actorRoleType: agentGroup.actorRoleType,
+      count: agentGroup.count,
+      rounds: Array.from(agentGroup.rounds.values())
+        .sort((a, b) => b.roundNumber - a.roundNumber)
+        .map<FileActivityRoundGroup>((roundGroup) => ({
+          key: roundGroup.key,
+          roundNumber: roundGroup.roundNumber,
+          count: roundGroup.count,
+          turns: Array.from(roundGroup.turns.values())
+            .sort((a, b) => b.turnNumber - a.turnNumber)
+            .map<FileActivityTurnGroup>((turnGroup) => ({
+              key: turnGroup.key,
+              turnNumber: turnGroup.turnNumber,
+              count: turnGroup.count,
+              entries: turnGroup.entries
+            }))
+        }))
+    }));
+}
+
+function toggleKeyInSet(current: Set<string>, key: string) {
+  const next = new Set(current);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  return next;
+}
+
+function getDefaultFileActivitySelection(groups: FileActivityAgentGroup[]): FileActivitySelection | null {
+  const first = groups[0];
+  if (!first) return null;
+  const firstRound = first.rounds[0];
+  if (firstRound) {
+    return { level: "round", agentKey: first.key, roundNumber: firstRound.roundNumber };
+  }
+  return { level: "agent", agentKey: first.key };
+}
+
+function isFileActivitySelectionValid(selection: FileActivitySelection | null, groups: FileActivityAgentGroup[]) {
+  if (!selection) return false;
+  const agent = groups.find((group) => group.key === selection.agentKey);
+  if (!agent) return false;
+  if (selection.level === "agent") return true;
+  const round = agent.rounds.find((item) => item.roundNumber === selection.roundNumber);
+  if (!round) return false;
+  if (selection.level === "round") return true;
+  return round.turns.some((item) => item.turnNumber === selection.turnNumber);
+}
+
+function getFileActivitySelectedEntries(groups: FileActivityAgentGroup[], selection: FileActivitySelection | null) {
+  if (!selection) return [];
+  const agent = groups.find((group) => group.key === selection.agentKey);
+  if (!agent) return [];
+  if (selection.level === "agent") {
+    return agent.rounds.flatMap((round) => round.turns.flatMap((turn) => turn.entries));
+  }
+  const round = agent.rounds.find((item) => item.roundNumber === selection.roundNumber);
+  if (!round) return [];
+  if (selection.level === "round") {
+    return round.turns.flatMap((turn) => turn.entries);
+  }
+  const turn = round.turns.find((item) => item.turnNumber === selection.turnNumber);
+  return turn?.entries ?? [];
+}
+
+function getFileActivityBreadcrumb(groups: FileActivityAgentGroup[], selection: FileActivitySelection | null) {
+  if (!selection) return "暂无选择";
+  const agent = groups.find((group) => group.key === selection.agentKey);
+  if (!agent) return "暂无选择";
+  if (selection.level === "agent") return agent.agentName;
+  if (selection.level === "round") return `${agent.agentName} / Round ${selection.roundNumber}`;
+  return `${agent.agentName} / Round ${selection.roundNumber} / Turn ${selection.turnNumber}`;
+}
+
+function getFileActivityNodeFilter(groups: FileActivityAgentGroup[], selection: FileActivitySelection | null): FileActivityNodeFilter | null {
+  if (!selection) return null;
+  const agent = groups.find((group) => group.key === selection.agentKey);
+  if (!agent?.debateAgentId) return null;
+  if (selection.level === "agent") {
+    return { debateAgentId: agent.debateAgentId };
+  }
+  if (selection.level === "round") {
+    return { debateAgentId: agent.debateAgentId, roundNumber: selection.roundNumber };
+  }
+  return { debateAgentId: agent.debateAgentId, roundNumber: selection.roundNumber, turnNumber: selection.turnNumber };
+}
+
+function getFileActivityLoadMoreFilter(
+  groups: FileActivityAgentGroup[],
+  selection: FileActivitySelection | null,
+  entries: FileActivityListItem[]
+): FileActivityLoadMoreFilter | null {
+  const beforeId = entries.at(-1)?.id ?? "";
+  const nodeFilter = getFileActivityNodeFilter(groups, selection);
+  if (!beforeId || !nodeFilter) return null;
+  return { beforeId, ...nodeFilter };
+}
+
+function FileActivityEntryCard(props: {
+  action: FileActivityAction;
+  item: FileActivityListItem;
+  onSelectEntry: (entryId: string) => void;
+}) {
+  const { action, item, onSelectEntry } = props;
+  return (
+    <button
+      type="button"
+      className="debateFileActivityEntry"
+      onClick={() => onSelectEntry(item.id)}
+    >
+      <div className="debateFileActivityEntryTop">
+        <strong className="debateFileActivityEntryPath">{item.path}</strong>
+        <span
+          className="softBox debateFileActivityActionTag"
+          style={{
+            background:
+              action !== "read"
+                ? "rgba(15, 23, 42, 0.05)"
+                : item.action === "read"
+                  ? "rgba(37, 99, 235, 0.1)"
+                  : item.action === "search"
+                    ? "rgba(217, 119, 6, 0.12)"
+                    : item.action === "list"
+                      ? "rgba(107, 114, 128, 0.12)"
+                      : "rgba(20, 184, 166, 0.12)"
+          }}
+        >
+          {action === "write" ? "AI写入" : action === "summarizer_write" ? "总结器写入" : formatFileActivityEntryAction(item.action)}
+        </span>
+      </div>
+      <div className="debateFileActivityEntryMeta">
+        <span className="muted">{item.agentName}</span>
+        <span
+          className="softBox debateFileActivityRoleTag"
+          style={{
+            background:
+              item.actorRoleType === "Summarizer"
+                ? "rgba(124, 58, 237, 0.14)"
+                : item.actorRoleType === "Host"
+                  ? "rgba(37, 99, 235, 0.1)"
+                  : item.actorRoleType === "Specialist" || item.actorRoleType === "Contributor"
+                    ? "rgba(22, 163, 74, 0.12)"
+                    : "rgba(100, 116, 139, 0.14)"
+          }}
+        >
+          {formatFileActivityRoleType(item.actorRoleType)}
+        </span>
+        <span className="muted">{`Round ${item.roundNumber}`}</span>
+        <span className="muted">{`Turn ${item.turnNumber}`}</span>
+        <span className="muted">{item.scope === "agent" ? `seat file${item.targetSeatName ? ` · ${item.targetSeatName}` : ""}` : "shared file"}</span>
+        <span className="muted">{item.createdAt ? new Date(item.createdAt).toLocaleString() : ""}</span>
+      </div>
+      {action === "read" ? <div className="muted debateFileActivityEntryHint">点击查看详细信息</div> : null}
+      {action !== "read" ? (
+        <div className="debateFileActivityEntryStats">
+          <span className="muted">
+            {(item.beforeVersion ?? 0) > 0 || (item.afterVersion ?? 0) > 0
+              ? `v${item.beforeVersion ?? 0} -> v${item.afterVersion ?? 0}`
+              : item.writeMode ?? "AI write"}
+            {item.writeMode ? ` · ${item.writeMode}` : ""}
+          </span>
+          <span style={{ color: "rgb(22, 163, 74)", fontWeight: 600 }}>{`+${item.summary.added}`}</span>
+          <span style={{ color: "rgb(220, 38, 38)", fontWeight: 600 }}>{`-${item.summary.deleted}`}</span>
+          <span style={{ color: "rgb(37, 99, 235)", fontWeight: 600 }}>{`~${item.summary.changed}`}</span>
+          {item.diagnosticLabels.map((label) => (
+            <span
+              key={`${item.id}:${label}`}
+              className="softBox debateFileActivityDiagTag"
+              style={{ background: "rgba(15, 23, 42, 0.06)" }}
+            >
+              {label}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </button>
+  );
 }
 
 const WORKFLOW_RULES_DISABLED_MARKDOWN = [
@@ -510,6 +805,26 @@ function formatWorkflowRulesMarkdown(raw: string) {
     }`
   );
   return rules.join("\n");
+}
+
+function summarizeRuntimeError(code: string | null | undefined, message: string | null | undefined) {
+  const raw = [code, message].filter(Boolean).join(" · ");
+  if (!raw) return null;
+  let messageText = String(message ?? "").trim();
+  try {
+    const parsed = JSON.parse(messageText) as { error?: { message?: unknown; code?: unknown } };
+    const parsedCode = typeof parsed.error?.code === "string" ? parsed.error.code : "";
+    const parsedMessage = typeof parsed.error?.message === "string" ? parsed.error.message : "";
+    messageText = [parsedCode, parsedMessage].filter(Boolean).join(": ") || messageText;
+  } catch {
+  }
+  const summary = [code, messageText].filter(Boolean).join(" · ");
+  return {
+    code: code || "运行时错误",
+    message: messageText || summary,
+    summary: summary.length > 180 ? `${summary.slice(0, 180)}...` : summary,
+    raw
+  };
 }
 
 async function fetchWorkflowRulesMarkdown(debateId: string) {
@@ -975,6 +1290,42 @@ async function fetchAllFileInfoPayload(input: {
   return { response, payload };
 }
 
+async function postJsonWithFetchFallback(url: string) {
+  try {
+    const response = await fetch(url, { method: "POST", credentials: "same-origin" });
+    const payload = await response.json().catch(() => ({}));
+    return { ok: response.ok, status: response.status, payload };
+  } catch (fetchError) {
+    try {
+      return await new Promise<{ ok: boolean; status: number; payload: any }>((resolve, reject) => {
+        if (typeof XMLHttpRequest === "undefined") {
+          reject(fetchError);
+          return;
+        }
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", url, true);
+        xhr.withCredentials = true;
+        xhr.timeout = 30000;
+        xhr.setRequestHeader("Accept", "application/json");
+        xhr.onload = () => {
+          let payload: any = {};
+          try {
+            payload = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+          } catch {
+            payload = {};
+          }
+          resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, payload });
+        };
+        xhr.onerror = () => reject(fetchError);
+        xhr.ontimeout = () => reject(fetchError);
+        xhr.send();
+      });
+    } catch {
+      throw fetchError;
+    }
+  }
+}
+
 function buildAllFilesMetaByVirtualPath(items: unknown[]) {
   const next: Record<string, AllFilesMeta> = {};
 
@@ -1277,20 +1628,27 @@ function DebateFilesToolbar(props: {
   onDownload: () => void;
   onRefresh: () => void;
 }) {
+  const downloadLabel = props.downloading
+    ? "下载中..."
+    : `下载选中${props.selectedCount > 0 ? `（${props.selectedCount}）` : ""}`;
   return (
     <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
       <strong>辩论文件</strong>
       <div className="row" style={{ gap: 8 }}>
         <button
-          className="btn"
+          className="btn debateFilesAction"
           type="button"
           disabled={props.selectedCount === 0 || props.downloading}
           onClick={props.onDownload}
         >
-          {props.downloading ? "下载中..." : `下载选中${props.selectedCount > 0 ? `（${props.selectedCount}）` : ""}`}
+          <span className="debateFilesActionLabel" data-label={downloadLabel}>
+            {downloadLabel}
+          </span>
         </button>
-        <button className="btn" type="button" disabled={props.loading} onClick={props.onRefresh}>
-          刷新
+        <button className="btn debateFilesAction" type="button" disabled={props.loading} onClick={props.onRefresh}>
+          <span className="debateFilesActionLabel" data-label="刷新">
+            刷新
+          </span>
         </button>
       </div>
     </div>
@@ -1379,7 +1737,17 @@ function DebateFilesPanel(props: {
   }, []);
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateRows: "auto 1fr", gap: 12, overflow: "hidden" }}>
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        height: "100%",
+        display: "grid",
+        gridTemplateRows: "auto 1fr",
+        gap: 12,
+        overflow: "hidden"
+      }}
+    >
       <div className="softBox">
         <DebateFilesToolbar
           selectedCount={props.selectedCount}
@@ -1401,7 +1769,7 @@ function DebateFilesPanel(props: {
         <div
           ref={treeRootRef}
           className="softBox treeRoot"
-          style={{ minHeight: 0, maxHeight: "none", overflow: "hidden", padding: 0 }}
+          style={{ minHeight: 0, height: "100%", maxHeight: "none", overflow: "hidden", padding: 0 }}
           onContextMenu={props.onRootContextMenu}
         >
           <Tree<FsNode> data={props.tree} width="100%" height={treeHeight} indent={18} rowHeight={34} openByDefault={false}>
@@ -1613,6 +1981,7 @@ function StatusSummaryPanel(props: {
   liveStatus: string;
   showWorkflowPhaseUi: boolean;
   summaryJobs: SummaryJob[];
+  summaryWorkerHealth: SummaryWorkerHealth | null;
   summaryActionBusy: boolean;
   onRetryFailedSummaryJobs: () => void;
   onRebuildFactsBoard: () => void;
@@ -1647,6 +2016,12 @@ function StatusSummaryPanel(props: {
     },
     { turn: 0, round: 0, facts: 0, running: 0, pending: 0, failed: 0 }
   );
+  const runtimeError = summarizeRuntimeError(props.debate.lastErrorCode, props.debate.lastErrorMessage);
+  const workerStatus = props.summaryWorkerHealth
+    ? props.summaryWorkerHealth.stale
+      ? "worker 离线"
+      : `${props.summaryWorkerHealth.mode} worker ${props.summaryWorkerHealth.status}`
+    : "worker 未上报";
   return (
     <Fragment>
       {props.debate.status === "running" ? (
@@ -1693,23 +2068,36 @@ function StatusSummaryPanel(props: {
         </div>
       ) : null}
       {props.debate.stoppedReason ? <div className="muted">停止原因: {props.debate.stoppedReason}</div> : null}
-      {props.debate.lastErrorCode || props.debate.lastErrorMessage ? (
-        <div className="muted">
-          失败原因: {[props.debate.lastErrorCode, props.debate.lastErrorMessage].filter(Boolean).join(" · ")}
-        </div>
+      {runtimeError ? (
+        <details className="runtimeErrorBox">
+          <summary>
+            <strong>失败原因</strong>
+            <span>{runtimeError.code}</span>
+            <small>点击展开详情</small>
+          </summary>
+          <div className="runtimeErrorMessage">{runtimeError.message}</div>
+          <pre>{runtimeError.raw}</pre>
+        </details>
       ) : null}
       {props.summaryJobs.length > 0 ? (
-        <div className="panel stack" style={{ gap: 8 }}>
-          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+        <details className="summaryJobsBox">
+          <summary>
             <strong>总结任务</strong>
-            <span className="muted">
-              回摘要 {summaryCounts.turn} · 轮摘要 {summaryCounts.round} · 事实板 {summaryCounts.facts}
+            <span>
+              回 {summaryCounts.turn} · 轮 {summaryCounts.round} · 事实板 {summaryCounts.facts}
             </span>
-          </div>
-          <div className="muted">
-            运行中 {summaryCounts.running} · 待补 {summaryCounts.pending} · 失败 {summaryCounts.failed}
-          </div>
-          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <small>
+              运行中 {summaryCounts.running} · 待补 {summaryCounts.pending} · 失败 {summaryCounts.failed} · {workerStatus}
+            </small>
+          </summary>
+          {props.summaryWorkerHealth ? (
+            <div className="muted">
+              worker heartbeat: {new Date(props.summaryWorkerHealth.lastHeartbeatAt).toLocaleString()}
+              {props.summaryWorkerHealth.currentJobKey ? ` · 当前 ${props.summaryWorkerHealth.currentJobKey}` : ""}
+              {` · 完成 ${props.summaryWorkerHealth.completedCount} · 失败 ${props.summaryWorkerHealth.failedCount}`}
+            </div>
+          ) : null}
+          <div className="summaryJobsActions">
             <button className="btn" type="button" disabled={props.summaryActionBusy} onClick={props.onRetryFailedSummaryJobs}>
               {props.summaryActionBusy ? "处理中..." : "重试失败总结"}
             </button>
@@ -1717,7 +2105,7 @@ function StatusSummaryPanel(props: {
               {props.summaryActionBusy ? "处理中..." : "重建 facts board"}
             </button>
           </div>
-          <div className="stack" style={{ gap: 6, maxHeight: 220, overflowY: "auto" }}>
+          <div className="summaryJobsList">
             {props.summaryJobs.slice(0, 24).map((job) => (
               <div key={job.key} className="softBox" style={{ padding: "8px 10px" }}>
                 <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
@@ -1728,7 +2116,7 @@ function StatusSummaryPanel(props: {
               </div>
             ))}
           </div>
-        </div>
+        </details>
       ) : null}
     </Fragment>
   );
@@ -2522,17 +2910,131 @@ function FileActivityPanel(props: {
   loading: boolean;
   error: string;
   items: FileActivityListItem[];
+  navigationGroups: FileActivityAgentGroup[];
   hasMore: boolean;
   loadingMore: boolean;
   onChangeAction: (action: FileActivityAction) => void;
   onRefresh: () => void;
-  onLoadMore: () => void;
+  onSelectScope: (filter: FileActivityNodeFilter) => void;
+  onLoadMore: (filter: FileActivityLoadMoreFilter) => void;
   onSelectEntry: (entryId: string) => void;
 }) {
+  const { onSelectScope } = props;
+  const groups = props.navigationGroups;
+  const contentGroups = useMemo(() => buildFileActivityGroups(props.items), [props.items]);
+  const [expandedAgentsByAction, setExpandedAgentsByAction] = useState<Record<FileActivityAction, Set<string>>>(() => ({
+    read: new Set(),
+    write: new Set(),
+    summarizer_write: new Set()
+  }));
+  const [expandedRoundsByAction, setExpandedRoundsByAction] = useState<Record<FileActivityAction, Set<string>>>(() => ({
+    read: new Set(),
+    write: new Set(),
+    summarizer_write: new Set()
+  }));
+  const [selectionByAction, setSelectionByAction] = useState<Record<FileActivityAction, FileActivitySelection | null>>(() => ({
+    read: null,
+    write: null,
+    summarizer_write: null
+  }));
+  const expandedAgents = expandedAgentsByAction[props.action];
+  const expandedRounds = expandedRoundsByAction[props.action];
+  const selectedNode = selectionByAction[props.action];
+  const selectedEntries = useMemo(() => getFileActivitySelectedEntries(contentGroups, selectedNode), [contentGroups, selectedNode]);
+  const breadcrumb = useMemo(() => getFileActivityBreadcrumb(groups, selectedNode), [groups, selectedNode]);
+  const loadMoreFilter = useMemo(
+    () => getFileActivityLoadMoreFilter(groups, selectedNode, selectedEntries),
+    [groups, selectedEntries, selectedNode]
+  );
+
+  useEffect(() => {
+    const allAgentKeys = groups.map((group) => group.key);
+    setExpandedAgentsByAction((current) => {
+      const existing = current[props.action];
+      const next = new Set<string>();
+      for (const key of allAgentKeys) next.add(key);
+      if (existing.size === next.size && allAgentKeys.every((key) => existing.has(key))) {
+        return current;
+      }
+      return { ...current, [props.action]: next };
+    });
+    setExpandedRoundsByAction((current) => {
+      const existing = current[props.action];
+      const validKeys = new Set(groups.flatMap((group) => group.rounds.map((round) => round.key)));
+      const next = new Set(Array.from(existing).filter((key) => validKeys.has(key)));
+      if (next.size === existing.size && Array.from(next).every((key) => existing.has(key))) return current;
+      return { ...current, [props.action]: next };
+    });
+    if (!isFileActivitySelectionValid(selectedNode, groups)) {
+      const nextSelection = getDefaultFileActivitySelection(groups);
+      if (!nextSelection) {
+        if (selectedNode !== null) setSelectionByAction((current) => ({ ...current, [props.action]: null }));
+        return;
+      }
+      setSelectionByAction((current) => ({ ...current, [props.action]: nextSelection }));
+      const filter = getFileActivityNodeFilter(groups, nextSelection);
+      if (filter) onSelectScope(filter);
+    }
+  }, [groups, onSelectScope, props.action, selectedNode]);
+
+  const setSelection = useCallback(
+    (selection: FileActivitySelection) => {
+      setSelectionByAction((current) => ({ ...current, [props.action]: selection }));
+      const filter = getFileActivityNodeFilter(groups, selection);
+      if (filter) onSelectScope(filter);
+    },
+    [groups, onSelectScope, props.action]
+  );
+
+  const toggleAgent = useCallback(
+    (agentKey: string) => {
+      setExpandedAgentsByAction((current) => ({ ...current, [props.action]: toggleKeyInSet(current[props.action], agentKey) }));
+    },
+    [props.action]
+  );
+
+  const toggleRound = useCallback(
+    (roundKey: string) => {
+      setExpandedRoundsByAction((current) => ({ ...current, [props.action]: toggleKeyInSet(current[props.action], roundKey) }));
+    },
+    [props.action]
+  );
+
+  const actionEmptyText =
+    props.action === "read"
+      ? props.counts.write > 0 || props.counts.summarizerWrite > 0
+        ? "当前还没有读取记录，但已有写入记录；可切到“AI写入”或“总结器写入”查看。"
+        : "尚未开始记录文件读取历史（仅统计功能上线后的操作）。"
+      : props.action === "write"
+        ? props.counts.read > 0 || props.counts.summarizerWrite > 0
+          ? "当前还没有普通 AI 写入记录；可切到“读取”或“总结器写入”查看。"
+          : "尚未开始记录普通 AI 写入历史（仅统计功能上线后的操作）。"
+        : props.counts.read > 0 || props.counts.write > 0
+          ? "当前还没有总结器写入记录；可切到“读取”或“AI写入”查看。"
+          : "尚未开始记录总结器写入历史（仅统计功能上线后的操作）。";
+
+  const listEmptyText =
+    selectedNode?.level === "turn"
+      ? "当前回合暂无文件记录。"
+      : selectedNode?.level === "round"
+        ? "当前轮次暂无文件记录。"
+        : selectedNode?.level === "agent"
+          ? "当前 AI 暂无文件记录。"
+          : "请先从左侧选择一个 AI。";
+
   return (
     <div className="panel stack" style={{ minHeight: 0, height: "100%", overflow: "hidden" }}>
       <div className="row" style={{ justifyContent: "flex-start", gap: 8 }}>
-        <button className="btn" type="button" disabled={props.loading} onClick={props.onRefresh}>
+        <button
+          className="btn"
+          type="button"
+          disabled={props.loading}
+          onClick={() => {
+            props.onRefresh();
+            const filter = getFileActivityNodeFilter(groups, selectedNode);
+            if (filter) props.onSelectScope(filter);
+          }}
+        >
           刷新
         </button>
       </div>
@@ -2567,125 +3069,133 @@ function FileActivityPanel(props: {
       {props.loading ? <div className="muted">加载中...</div> : null}
       {!props.loading && props.error ? <div className="muted">{props.error}</div> : null}
       {!props.loading && !props.error ? (
-        <div className="stack" style={{ gap: 8, flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
-          {props.items.length === 0 ? (
-            <div className="muted">
-              {props.action === "read"
-                ? props.counts.write > 0 || props.counts.summarizerWrite > 0
-                  ? `当前还没有读取记录，但已有写入记录；可切到“AI写入”或“总结器写入”查看。`
-                  : "尚未开始记录文件读取历史（仅统计功能上线后的操作）。"
-                : props.action === "write"
-                  ? props.counts.read > 0 || props.counts.summarizerWrite > 0
-                    ? `当前还没有普通 AI 写入记录；可切到“读取”或“总结器写入”查看。`
-                    : "尚未开始记录普通 AI 写入历史（仅统计功能上线后的操作）。"
-                  : props.counts.read > 0 || props.counts.write > 0
-                    ? `当前还没有总结器写入记录；可切到“读取”或“AI写入”查看。`
-                    : "尚未开始记录总结器写入历史（仅统计功能上线后的操作）。"}
-            </div>
-          ) : null}
-          {props.items.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className="btn"
-              style={{
-                textAlign: "left",
-                padding: "12px 14px",
-                borderColor:
-                  props.action === "read"
-                    ? "rgba(59, 130, 246, 0.18)"
-                    : props.action === "summarizer_write"
-                      ? "rgba(124, 58, 237, 0.24)"
-                      : "rgba(148, 163, 184, 0.3)",
-                background:
-                  props.action === "read"
-                    ? "rgba(239, 246, 255, 0.55)"
-                    : props.action === "summarizer_write"
-                      ? "rgba(245, 243, 255, 0.92)"
-                      : "rgba(248, 250, 252, 0.96)"
-              }}
-              onClick={() => props.onSelectEntry(item.id)}
-            >
-              <div className="row" style={{ justifyContent: "space-between", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
-                <div style={{ wordBreak: "break-all", flex: 1, minWidth: 0 }}>
-                  <strong>{item.path}</strong>
-                </div>
-                <span
-                  className="softBox"
-                  style={{
-                    padding: "2px 8px",
-                    fontSize: 12,
-                    background:
-                      props.action !== "read"
-                        ? "rgba(15, 23, 42, 0.05)"
-                        : item.action === "read"
-                          ? "rgba(37, 99, 235, 0.1)"
-                          : item.action === "search"
-                            ? "rgba(217, 119, 6, 0.12)"
-                            : item.action === "list"
-                              ? "rgba(107, 114, 128, 0.12)"
-                              : "rgba(20, 184, 166, 0.12)"
-                  }}
-                >
-                  {props.action === "write" ? "AI写入" : props.action === "summarizer_write" ? "总结器写入" : formatFileActivityEntryAction(item.action)}
-                </span>
-              </div>
-              <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 6 }}>
-                <span className="muted">{item.agentName}</span>
-                <span
-                  className="softBox"
-                  style={{
-                    padding: "2px 8px",
-                    fontSize: 12,
-                    background:
-                      item.actorRoleType === "Summarizer"
-                        ? "rgba(124, 58, 237, 0.14)"
-                        : item.actorRoleType === "Host"
-                          ? "rgba(37, 99, 235, 0.1)"
-                          : item.actorRoleType === "Specialist" || item.actorRoleType === "Contributor"
-                            ? "rgba(22, 163, 74, 0.12)"
-                            : "rgba(100, 116, 139, 0.14)"
-                  }}
-                >
-                  {formatFileActivityRoleType(item.actorRoleType)}
-                </span>
-                <span className="muted">{`Round ${item.roundNumber}`}</span>
-                <span className="muted">{`Turn ${item.turnNumber}`}</span>
-              </div>
-              <div className="muted" style={{ marginTop: 4 }}>
-                {item.createdAt ? new Date(item.createdAt).toLocaleString() : ""}
-                {item.scope === "agent" ? ` · seat file${item.targetSeatName ? ` · ${item.targetSeatName}` : ""}` : " · shared file"}
-              </div>
-              {props.action === "read" ? <div className="muted" style={{ marginTop: 6 }}>点击查看详细信息</div> : null}
-              {props.action !== "read" ? (
-                <div className="row" style={{ gap: 10, flexWrap: "wrap", marginTop: 8, alignItems: "center" }}>
-                  <span className="muted">
-                    {(item.beforeVersion ?? 0) > 0 || (item.afterVersion ?? 0) > 0
-                      ? `v${item.beforeVersion ?? 0} -> v${item.afterVersion ?? 0}`
-                      : item.writeMode ?? "AI write"}
-                    {item.writeMode ? ` · ${item.writeMode}` : ""}
-                  </span>
-                  <span style={{ color: "rgb(22, 163, 74)", fontWeight: 600 }}>{`+${item.summary.added}`}</span>
-                  <span style={{ color: "rgb(220, 38, 38)", fontWeight: 600 }}>{`-${item.summary.deleted}`}</span>
-                  <span style={{ color: "rgb(37, 99, 235)", fontWeight: 600 }}>{`~${item.summary.changed}`}</span>
-                  {item.diagnosticLabels.map((label) => (
-                    <span
-                      key={`${item.id}:${label}`}
-                      className="softBox"
-                      style={{ padding: "2px 8px", fontSize: 12, background: "rgba(15, 23, 42, 0.06)" }}
+        <div className="debateFileActivityExplorer">
+          <div className="debateFileActivitySidebar">
+            {groups.length === 0 ? <div className="muted">{actionEmptyText}</div> : null}
+            {groups.map((group) => {
+              const agentExpanded = expandedAgents.has(group.key);
+              const agentSelected = selectedNode?.level === "agent" && selectedNode.agentKey === group.key;
+              return (
+                <div key={group.key} className="debateFileActivityTreeGroup">
+                  <div className={`debateFileActivityTreeRow ${agentSelected ? "is-selected" : ""}`}>
+                    <button
+                      type="button"
+                      className="debateFileActivityToggle"
+                      aria-label={agentExpanded ? "收起 AI" : "展开 AI"}
+                      onClick={() => toggleAgent(group.key)}
                     >
-                      {label}
-                    </span>
-                  ))}
+                      {agentExpanded ? "▾" : "▸"}
+                    </button>
+                    <button
+                      type="button"
+                      className="debateFileActivityTreeButton"
+                      onClick={() => setSelection({ level: "agent", agentKey: group.key })}
+                    >
+                      <span className="debateFileActivityTreeLabel">{group.agentName}</span>
+                      <span className="softBox debateFileActivityRoleTag">{formatFileActivityRoleType(group.actorRoleType)}</span>
+                      <span className="debateFileActivityTreeCount">{group.count}</span>
+                    </button>
+                  </div>
+                  {agentExpanded ? (
+                    <div className="debateFileActivityTreeChildren">
+                      {group.rounds.map((round) => {
+                        const hasMultipleTurns = round.turns.length > 1;
+                        const roundExpanded = expandedRounds.has(round.key);
+                        const roundSelected =
+                          selectedNode?.agentKey === group.key && selectedNode.level === "round" && selectedNode.roundNumber === round.roundNumber;
+                        return (
+                          <div key={round.key}>
+                            <div className={`debateFileActivityTreeRow is-round ${roundSelected ? "is-selected" : ""}`}>
+                              {hasMultipleTurns ? (
+                                <button
+                                  type="button"
+                                  className="debateFileActivityToggle"
+                                  aria-label={roundExpanded ? "收起轮次" : "展开轮次"}
+                                  onClick={() => toggleRound(round.key)}
+                                >
+                                  {roundExpanded ? "▾" : "▸"}
+                                </button>
+                              ) : (
+                                <span className="debateFileActivityTreeSpacer" />
+                              )}
+                              <button
+                                type="button"
+                                className="debateFileActivityTreeButton"
+                                onClick={() => setSelection({ level: "round", agentKey: group.key, roundNumber: round.roundNumber })}
+                              >
+                                <span className="debateFileActivityTreeLabel">{`Round ${round.roundNumber}`}</span>
+                                <span className="debateFileActivityTreeCount">{round.count}</span>
+                              </button>
+                            </div>
+                            {hasMultipleTurns && roundExpanded ? (
+                              <div className="debateFileActivityTreeChildren">
+                                {round.turns.map((turn) => {
+                                  const turnSelected =
+                                    selectedNode?.agentKey === group.key &&
+                                    selectedNode.level === "turn" &&
+                                    selectedNode.roundNumber === round.roundNumber &&
+                                    selectedNode.turnNumber === turn.turnNumber;
+                                  return (
+                                    <div key={turn.key} className={`debateFileActivityTreeRow is-turn ${turnSelected ? "is-selected" : ""}`}>
+                                      <span className="debateFileActivityTreeSpacer" />
+                                      <button
+                                        type="button"
+                                        className="debateFileActivityTreeButton"
+                                        onClick={() =>
+                                          setSelection({
+                                            level: "turn",
+                                            agentKey: group.key,
+                                            roundNumber: round.roundNumber,
+                                            turnNumber: turn.turnNumber
+                                          })
+                                        }
+                                      >
+                                        <span className="debateFileActivityTreeLabel">{`Turn ${turn.turnNumber}`}</span>
+                                        <span className="debateFileActivityTreeCount">{turn.count}</span>
+                                      </button>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
+              );
+            })}
+          </div>
+          <div className="debateFileActivityMain">
+            <div className="debateFileActivityMainHeader">
+              <div>
+                <div className="muted">当前视图</div>
+                <strong>{breadcrumb}</strong>
+              </div>
+              <div className="muted">
+                {selectedEntries.length > 0 ? `${selectedEntries.length} 条记录` : groups.length > 0 ? "当前筛选下暂无记录" : "暂无记录"}
+              </div>
+            </div>
+            <div className="debateFileActivityMainBody">
+              {selectedEntries.length === 0 ? <div className="muted">{groups.length === 0 ? actionEmptyText : listEmptyText}</div> : null}
+              {selectedEntries.map((item) => (
+                <FileActivityEntryCard key={item.id} action={props.action} item={item} onSelectEntry={props.onSelectEntry} />
+              ))}
+              {props.hasMore ? (
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={props.loadingMore || !loadMoreFilter}
+                  onClick={() => {
+                    if (loadMoreFilter) props.onLoadMore(loadMoreFilter);
+                  }}
+                >
+                  {props.loadingMore ? "加载中..." : "加载更多"}
+                </button>
               ) : null}
-            </button>
-          ))}
-          {props.hasMore ? (
-            <button className="btn" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>
-              {props.loadingMore ? "加载中..." : "加载更多"}
-            </button>
-          ) : null}
+            </div>
+          </div>
         </div>
       ) : null}
     </div>
@@ -3136,6 +3646,7 @@ export default function DebateDetailPage() {
   const [fileActivityLoadingMore, setFileActivityLoadingMore] = useState(false);
   const [fileActivityError, setFileActivityError] = useState("");
   const [fileActivityItems, setFileActivityItems] = useState<FileActivityListItem[]>([]);
+  const [fileActivityNavGroups, setFileActivityNavGroups] = useState<FileActivityAgentGroup[]>([]);
   const [fileActivityHasMore, setFileActivityHasMore] = useState(false);
   const [selectedFileActivityId, setSelectedFileActivityId] = useState("");
   const [fileActivityDetailLoading, setFileActivityDetailLoading] = useState(false);
@@ -3187,6 +3698,7 @@ export default function DebateDetailPage() {
   const [liveAgentName, setLiveAgentName] = useState<string>("");
   const [liveStatus, setLiveStatus] = useState<string>("");
   const [summaryJobsByKey, setSummaryJobsByKey] = useState<Record<string, SummaryJob>>({});
+  const [summaryWorkerHealth, setSummaryWorkerHealth] = useState<SummaryWorkerHealth | null>(null);
   const [summaryActionBusy, setSummaryActionBusy] = useState(false);
   const [liveText, setLiveText] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -3572,6 +4084,7 @@ export default function DebateDetailPage() {
     setLiveAgentName("");
     setLiveStatus("");
     setSummaryJobsByKey({});
+    setSummaryWorkerHealth(null);
     setLiveText("");
     setActiveLive(false);
     setActiveTurnId("");
@@ -3942,12 +4455,14 @@ export default function DebateDetailPage() {
   }, [diffFromVersion, diffToVersion, id, questionHistory]);
 
   const loadFileActivity = useCallback(
-    async (mode: "reset" | "more" = "reset") => {
+    async (mode: "reset" | "more" = "reset", filter?: FileActivityRequestFilter) => {
       if (!id) return;
-      const beforeId = mode === "more" ? fileActivityItemsRef.current.at(-1)?.id ?? "" : "";
+      const isScopedReset = mode === "reset" && Boolean(filter);
+      const beforeId = mode === "more" ? filter?.beforeId ?? fileActivityItemsRef.current.at(-1)?.id ?? "" : "";
       if (mode === "more" && !beforeId) return;
       if (mode === "reset") {
-        setFileActivityLoading(true);
+        if (isScopedReset) setFileActivityLoadingMore(true);
+        else setFileActivityLoading(true);
         setFileActivityError("");
       } else {
         setFileActivityLoadingMore(true);
@@ -3958,12 +4473,15 @@ export default function DebateDetailPage() {
           limit: "40"
         });
         if (beforeId) query.set("beforeId", beforeId);
+        if (filter?.debateAgentId) query.set("debateAgentId", filter.debateAgentId);
+        if (typeof filter?.roundNumber === "number") query.set("roundNumber", String(filter.roundNumber));
+        if (typeof filter?.turnNumber === "number") query.set("turnNumber", String(filter.turnNumber));
         const response = await fetch(`/api/debates/${id}/file-activity?${query.toString()}`, { cache: "no-store" });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
           if (mode === "reset") {
-            setFileActivityError(payload.error?.message ?? "加载失败");
-            setFileActivityItems([]);
+            if (!isScopedReset) setFileActivityError(payload.error?.message ?? "加载失败");
+            if (!isScopedReset) setFileActivityItems([]);
             setFileActivityHasMore(false);
             setSelectedFileActivityId("");
             setFileActivityDetail(null);
@@ -3988,12 +4506,39 @@ export default function DebateDetailPage() {
           setFileActivityDetailLoading(false);
         }
       } finally {
-        if (mode === "reset") setFileActivityLoading(false);
+        if (mode === "reset" && !isScopedReset) setFileActivityLoading(false);
+        if (mode === "reset" && isScopedReset) setFileActivityLoadingMore(false);
         if (mode === "more") setFileActivityLoadingMore(false);
       }
     },
     [fileActivityAction, id]
   );
+
+  const loadFileActivityNav = useCallback(async () => {
+    if (!id) return;
+    try {
+      const query = new URLSearchParams({
+        action: fileActivityAction,
+        mode: "nav"
+      });
+      const response = await fetch(`/api/debates/${id}/file-activity?${query.toString()}`, { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setFileActivityNavGroups([]);
+        return;
+      }
+      setFileActivityNavGroups(Array.isArray(payload.data) ? (payload.data as FileActivityAgentGroup[]) : []);
+      if (payload.meta?.counts && typeof payload.meta.counts === "object") {
+        setFileActivityCounts({
+          read: Number(payload.meta.counts.read ?? 0) || 0,
+          write: Number(payload.meta.counts.write ?? 0) || 0,
+          summarizerWrite: Number(payload.meta.counts.summarizerWrite ?? 0) || 0
+        });
+      }
+    } catch {
+      setFileActivityNavGroups([]);
+    }
+  }, [fileActivityAction, id]);
 
   const loadFileActivityDetail = useCallback(
     async (entryId: string) => {
@@ -4019,8 +4564,8 @@ export default function DebateDetailPage() {
 
   useEffect(() => {
     if (leftTab !== "file_activity") return;
-    void loadFileActivity("reset");
-  }, [fileActivityAction, leftTab, loadFileActivity]);
+    void loadFileActivityNav();
+  }, [fileActivityAction, leftTab, loadFileActivityNav]);
 
   useEffect(() => {
     if (leftTab !== "file_activity") return;
@@ -4118,6 +4663,15 @@ export default function DebateDetailPage() {
       } catch {
       }
     });
+    source.addEventListener("summary_worker_health", (event) => {
+      try {
+        lastSseEventAtRef.current = Date.now();
+        const payload = JSON.parse((event as MessageEvent).data) as { workerHealth?: { workers?: SummaryWorkerHealth[] } };
+        const workers = Array.isArray(payload.workerHealth?.workers) ? payload.workerHealth.workers : [];
+        setSummaryWorkerHealth(workers[0] ?? null);
+      } catch {
+      }
+    });
     source.addEventListener("chunk", (event) => {
       try {
         lastSseEventAtRef.current = Date.now();
@@ -4211,9 +4765,9 @@ export default function DebateDetailPage() {
         const ok = window.confirm("确定将这场 failed 辩论修复为 paused 吗？修复后你可以手动点击恢复继续运行。");
         if (!ok) return;
       }
-      const response = await fetch(`/api/debates/${id}/${name}`, { method: "POST" });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
+      const result = await postJsonWithFetchFallback(`/api/debates/${id}/${name}`);
+      const payload = result.payload;
+      if (!result.ok) {
         showToast("error", payload.error?.message ?? "操作失败");
         return;
       }
@@ -5112,7 +5666,10 @@ export default function DebateDetailPage() {
         </div>
       </nav>
 
-      <section className="panel stack debateSidebarPanel debateViewportPanel" style={{ overflow: "hidden", minHeight: 0 }}>
+      <section
+        className="panel stack debateSidebarPanel debateViewportPanel debateFilesPanel"
+        style={{ overflow: "hidden", minHeight: 0, gridColumn: leftTab === "file_activity" ? "2 / -1" : undefined }}
+      >
         <div className="row" style={{ justifyContent: "space-between" }}>
           <strong style={{ fontSize: 14 }}>{leftTabTitle[leftTab]}</strong>
           <Link className="btn" href="/debates">
@@ -5152,6 +5709,7 @@ export default function DebateDetailPage() {
                 liveStatus={liveStatus}
                 showWorkflowPhaseUi={showWorkflowPhaseUi}
                 summaryJobs={liveSummaryJobs}
+                summaryWorkerHealth={summaryWorkerHealth}
                 summaryActionBusy={summaryActionBusy}
                 onRetryFailedSummaryJobs={handleRetryFailedSummaryJobs}
                 onRebuildFactsBoard={handleRebuildFactsBoard}
@@ -5187,6 +5745,7 @@ export default function DebateDetailPage() {
                 loading={fileActivityLoading}
                 error={fileActivityError}
                 items={fileActivityItems}
+                navigationGroups={fileActivityNavGroups}
                 hasMore={fileActivityHasMore}
                 loadingMore={fileActivityLoadingMore}
                 onChangeAction={(action) => {
@@ -5194,8 +5753,11 @@ export default function DebateDetailPage() {
                   setSelectedFileActivityId("");
                   setFileActivityDetail(null);
                 }}
-                onRefresh={() => void loadFileActivity("reset")}
-                onLoadMore={() => void loadFileActivity("more")}
+                onRefresh={() => {
+                  void loadFileActivityNav();
+                }}
+                onSelectScope={(filter) => void loadFileActivity("reset", filter)}
+                onLoadMore={(filter) => void loadFileActivity("more", filter)}
                 onSelectEntry={(entryId) => setSelectedFileActivityId(entryId)}
               />
             ) : (
@@ -5229,31 +5791,34 @@ export default function DebateDetailPage() {
         </div>
       </section>
 
-      <div className="debateViewerShell">
-        <DebateViewerPanel
-          viewer={viewer}
-          followLatest={followLatest}
-          activeTurnId={activeTurnId}
-          activeVoteRound={activeVoteRound}
-          agentCount={agentCount}
-          liveAgentName={liveAgentName}
-          liveDisplayRound={liveDisplayRound}
-          liveDisplayMessage={liveDisplayMessage}
-          liveStatus={liveStatus}
-          liveText={liveText}
-          viewerScrollRef={viewerScrollRef}
-          onToggleFollowLatest={() => setFollowLatest((current) => !current)}
-          onReturnToCurrent={() => {
-            setActiveLive(true);
-            setFollowLatest(true);
-            setActiveTurnId("");
-            setActiveVoteRound(null);
-          }}
-          onOpenDiagnostics={(turnNumber) => void openGenerationDiagnostics(turnNumber)}
-        />
-      </div>
+      {leftTab !== "file_activity" ? (
+        <div className="debateViewerShell">
+          <DebateViewerPanel
+            viewer={viewer}
+            followLatest={followLatest}
+            activeTurnId={activeTurnId}
+            activeVoteRound={activeVoteRound}
+            agentCount={agentCount}
+            liveAgentName={liveAgentName}
+            liveDisplayRound={liveDisplayRound}
+            liveDisplayMessage={liveDisplayMessage}
+            liveStatus={liveStatus}
+            liveText={liveText}
+            viewerScrollRef={viewerScrollRef}
+            onToggleFollowLatest={() => setFollowLatest((current) => !current)}
+            onReturnToCurrent={() => {
+              setActiveLive(true);
+              setFollowLatest(true);
+              setActiveTurnId("");
+              setActiveVoteRound(null);
+            }}
+            onOpenDiagnostics={(turnNumber) => void openGenerationDiagnostics(turnNumber)}
+          />
+        </div>
+      ) : null}
 
-      <section className="panel stack debateRoundsPanel debateViewportPanel" style={{ overflowY: "auto" }}>
+      {leftTab !== "file_activity" ? (
+        <section className="panel stack debateRoundsPanel debateViewportPanel" style={{ overflowY: "auto" }}>
         <div className="row" style={{ gap: 8 }}>
           {debate.isOwner && ["pending", "running", "paused"].includes(debate.status) ? (
             <button className="btn btn-primary" onClick={() => void toggleRun()}>
@@ -5343,7 +5908,8 @@ export default function DebateDetailPage() {
             );
           })}
         </div>
-      </section>
+        </section>
+      ) : null}
     </div>
   );
 }

@@ -99,7 +99,6 @@ import {
 import {
   buildAnthropicTools,
   buildBaseSystemPrompt,
-  buildDemoResponse,
   buildFileToolInstructions,
   buildOpenAiTools,
   buildResponseFormatInstructions,
@@ -115,6 +114,8 @@ import {
   completeDebateSummaryJob,
   enqueueDebateSummaryJob,
   failDebateSummaryJob,
+  FACTS_BOARD_DEBOUNCE_MS,
+  FACTS_BOARD_JOB_KEY,
   markBlockedDebateSummaryJob,
   scheduleDebateSummaryJobRetry,
   type DebateSummaryJobKind,
@@ -171,7 +172,6 @@ import {
 export {
   buildAnthropicTools,
   buildBaseSystemPrompt,
-  buildDemoResponse,
   buildFileToolInstructions,
   buildOpenAiTools,
   buildResponseFormatInstructions,
@@ -1518,13 +1518,13 @@ export function appendWorkflowSummaryLines(lines: string[], workflow: Normalized
     workflow.contextAccess.unlockAfterPhase.length > 0
   ) {
     lines.push(
-      `- contextAccess alwaysRead: ${workflow.contextAccess.alwaysRead.length ? workflow.contextAccess.alwaysRead.map((rule) => `[${rule.scope}] ${rule.pathPrefix}`).join(" / ") : "(none)"}`
+      `- contextAccess alwaysRead: ${workflow.contextAccess.alwaysRead.length ? workflow.contextAccess.alwaysRead.map((rule) => `[${rule.scope}] ${rule.targetType} ${rule.pathPrefix}`).join(" / ") : "(none)"}`
     );
     lines.push(
-      `- contextAccess readWhenNeeded: ${workflow.contextAccess.readWhenNeeded.length ? workflow.contextAccess.readWhenNeeded.map((rule) => `[${rule.scope}] ${rule.pathPrefix}`).join(" / ") : "(none)"}`
+      `- contextAccess readWhenNeeded: ${workflow.contextAccess.readWhenNeeded.length ? workflow.contextAccess.readWhenNeeded.map((rule) => `[${rule.scope}] ${rule.targetType} ${rule.pathPrefix}`).join(" / ") : "(none)"}`
     );
     lines.push(
-      `- contextAccess unlockAfterPhase: ${workflow.contextAccess.unlockAfterPhase.length ? workflow.contextAccess.unlockAfterPhase.map((rule) => `[${rule.scope}] ${rule.pathPrefix} @ ${rule.phaseKind}`).join(" / ") : "(none)"}`
+      `- contextAccess unlockAfterPhase: ${workflow.contextAccess.unlockAfterPhase.length ? workflow.contextAccess.unlockAfterPhase.map((rule) => `[${rule.scope}] ${rule.targetType} ${rule.pathPrefix} @ ${rule.phaseKind}`).join(" / ") : "(none)"}`
     );
   }
 }
@@ -1718,23 +1718,30 @@ export async function listSeatContextFilesForRule(
   agentId: string,
   rule: ResolvedContextAccessRule
 ) {
+  if (rule.targetType === "file") {
+    const rows = await listMergedSeatFiles(userId, debateAgentId, agentId);
+    return rows.filter((row) => normalizeContextPath(String(row.path ?? "")) === normalizeContextPath(rule.pathPrefix));
+  }
   const rows = await listMergedSeatFiles(userId, debateAgentId, agentId, rule.pathPrefix);
   return rows.filter((row) => (rule.recursive ? true : isDirectChildPath(rule.pathPrefix, String(row.path ?? ""))));
 }
 
 export async function listSharedContextFilesForRule(userId: string, debateId: string, rule: ResolvedContextAccessRule) {
-  const prefixLike = `${rule.pathPrefix}%`;
+  const db = await ensureDb();
   try {
-    const db = await ensureDb();
-    const result = await db
+    let query = db
       .selectFrom("debate_files as f")
       .innerJoin("debates as d", "d.id", "f.debate_id")
       .select(["f.path", "f.content"])
       .where("f.debate_id", "=", debateId)
       .where("d.user_id", "=", userId)
-      .where("f.path", "like", prefixLike)
-      .orderBy("f.path", "asc")
-      .execute();
+      .orderBy("f.path", "asc");
+    query =
+      rule.targetType === "file"
+        ? query.where("f.path", "=", rule.pathPrefix)
+        : query.where("f.path", "like", `${rule.pathPrefix}%`);
+    const result = await query.execute();
+    if (rule.targetType === "file") return result;
     return result.filter((row) => (rule.recursive ? true : isDirectChildPath(rule.pathPrefix, String(row.path ?? ""))));
   } catch (error) {
     if (isMissingTableError(error, "debate_files")) return [];
@@ -1785,7 +1792,7 @@ export async function loadContextAccessAutoReadInline(input: {
         targetDebateAgentId: null
       });
     }
-    blocks.push(`- [${rule.scope}] ${rule.pathPrefix}`);
+    blocks.push(`- [${rule.scope}] ${rule.targetType === "file" ? "file" : "dir"} ${rule.pathPrefix}`);
     for (const row of limitedRows) {
       const path = normalizeContextPath(String(row.path ?? ""));
       const content = clipPromptInlineContent(String(row.content ?? ""), Math.max(400, rule.maxCharsPerFile));
@@ -3870,15 +3877,24 @@ async function enqueueFactsBoardJob(input: {
   roundNumber?: number | null;
   payload: Record<string, unknown>;
 }) {
+  const sourceIsRound = input.sourceKey.startsWith("round:");
+  const runAfter = new Date(Date.now() + (sourceIsRound ? 0 : FACTS_BOARD_DEBOUNCE_MS)).toISOString();
   const record = await enqueueDebateSummaryJob({
     debateId: input.debateId,
     kind: "facts_board",
-    jobKey: `facts:${input.sourceKey}`,
+    jobKey: FACTS_BOARD_JOB_KEY,
     turnNumber: input.turnNumber ?? null,
     roundNumber: input.roundNumber ?? null,
-    payload: input.payload
+    payload: {
+      ...input.payload,
+      sourceKey: input.sourceKey,
+      sourcePriority: sourceIsRound ? "round" : "turn",
+      sourceUpdatedAt: new Date().toISOString()
+    },
+    priority: sourceIsRound ? 30 : 40,
+    runAfter
   });
-  await syncSummaryJobToLive(record, "AI 总结排队中...");
+  await syncSummaryJobToLive(record, sourceIsRound ? "事实板排队中..." : "事实板短暂合并等待中...");
   return record;
 }
 
@@ -4022,7 +4038,7 @@ export async function runSummaryJobByRecord(job: DebateSummaryJobRecord) {
       return retried;
     }
     const completed = await completeDebateSummaryJob(job.id);
-    await updateDbSummaryJobLive(completed, "事实板已完成");
+    await updateDbSummaryJobLive(completed, completed.status === "completed" ? "事实板已完成" : "事实板待整理最新变更");
     return completed;
   } catch (error) {
     const retried = await scheduleDebateSummaryJobRetry({
@@ -4264,8 +4280,59 @@ export async function runDebate(id: string, userId: string) {
               : null;
           break;
         } catch (error) {
+          const details = describeRuntimeError(error);
           retryCount += 1;
+          emitDebateLiveEvent(id, {
+            type: "status",
+            debateId: id,
+            message:
+              retryCount > 2
+                ? `当前席位生成失败，未写入本回合内容：${details.message}`
+                : `第 ${retryCount} 次请求失败，正在重试：${details.message}`,
+            at: new Date().toISOString()
+          });
           if (retryCount > 2) {
+            try {
+              await appendGenerationDiagnostics({
+                userId,
+                debateId: id,
+                now: new Date().toISOString(),
+                entry: {
+                  at: new Date().toISOString(),
+                  turnNumber: debate.currentTurn + 1,
+                  roundNumber,
+                  debateAgentId: String(currentParticipant.id),
+                  seatNumber:
+                    typeof (currentParticipant as any).turn_order === "number"
+                      ? Number((currentParticipant as any).turn_order)
+                      : typeof (currentParticipant as any).turnOrder === "number"
+                        ? Number((currentParticipant as any).turnOrder)
+                        : currentIndex + 1,
+                  agentName: eventAgentName,
+                  provider: agent.provider,
+                  model: agent.model,
+                  requestedMaxTokens: resolveRequestedMaxTokens(
+                    getWorkflowOutputMaxTokens(workflowBeforeTurn, phaseBeforeTurn?.kind ?? null, agent.maxOutputTokens)
+                  ),
+                  finishReason: null,
+                  toolCallsCount: 0,
+                  rawChars: 0,
+                  persistedChars: 0,
+                  parseStatus: null,
+                  structuredOutput: false,
+                  voteOnlyOverride: false,
+                  persisted: false,
+                  errorCode: details.code ?? "RUNTIME_ERROR",
+                  errorMessage: details.message,
+                  attemptCount: retryCount
+                }
+              });
+            } catch (diagnosticError) {
+              await logRuntimeEvent("warn", "generation diagnostics persistence failed after provider error", {
+                debateId: id,
+                error: describeRuntimeError(diagnosticError)
+              });
+            }
             throw error;
           }
           await sleep(500);
