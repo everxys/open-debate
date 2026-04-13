@@ -10,14 +10,25 @@ const tsxBin = path.join(rootDir, "node_modules", ".bin", `tsx${binExt}`);
 const children = new Set();
 let shuttingDown = false;
 
+function quoteWindowsArg(value) {
+  if (value.length === 0) return '""';
+  if (!/[\s"]/u.test(value)) return value;
+  return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, "$1$1")}"`;
+}
+
 function startProcess(label, command, args, env) {
   console.log(`[dev] starting ${label}: ${command} ${args.join(" ")}`);
-  const child = spawn(command, args, {
-    cwd: rootDir,
-    env,
-    stdio: "inherit",
-    shell: isWindows
-  });
+  const child = isWindows
+    ? spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `${quoteWindowsArg(command)} ${args.map(quoteWindowsArg).join(" ")}`], {
+        cwd: rootDir,
+        env,
+        stdio: "inherit"
+      })
+    : spawn(command, args, {
+        cwd: rootDir,
+        env,
+        stdio: "inherit"
+      });
 
   children.add(child);
 
