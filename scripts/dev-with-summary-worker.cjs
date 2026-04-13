@@ -15,7 +15,8 @@ function startProcess(label, command, args, env) {
   const child = spawn(command, args, {
     cwd: rootDir,
     env,
-    stdio: "inherit"
+    stdio: "inherit",
+    shell: isWindows
   });
 
   children.add(child);
