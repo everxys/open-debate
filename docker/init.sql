@@ -65,6 +65,9 @@ create table if not exists ai_agents (
   base_url text not null,
   api_key_encrypted text not null,
   api_key_masked text not null,
+  last_connectivity_check_status text null,
+  last_connectivity_check_at timestamptz null,
+  last_connectivity_check_message text null,
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -73,6 +76,9 @@ create table if not exists ai_agents (
 alter table ai_agents add column if not exists context_length integer null;
 alter table ai_agents add column if not exists max_input_tokens integer null;
 alter table ai_agents add column if not exists max_output_tokens integer null;
+alter table ai_agents add column if not exists last_connectivity_check_status text null;
+alter table ai_agents add column if not exists last_connectivity_check_at timestamptz null;
+alter table ai_agents add column if not exists last_connectivity_check_message text null;
 
 create table if not exists debates (
   id uuid primary key default gen_random_uuid(),

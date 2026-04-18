@@ -4,7 +4,7 @@ import { decryptSecret, encryptSecret, maskSecret } from "@/lib/crypto";
 import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { requireSessionUser } from "@/lib/auth";
-import type { AgentRecord, Provider } from "@/lib/types";
+import type { AgentConnectivityCheckStatus, AgentRecord, Provider } from "@/lib/types";
 import {
   agentFileDeleteSchema,
   agentFileMoveSchema,
@@ -28,6 +28,9 @@ function toAgentView(agent: AgentRecord) {
     maxOutputTokens: agent.maxOutputTokens,
     baseUrl: agent.baseUrl,
     apiKeyMasked: agent.apiKeyMasked,
+    lastConnectivityCheckStatus: agent.lastConnectivityCheckStatus,
+    lastConnectivityCheckAt: agent.lastConnectivityCheckAt,
+    lastConnectivityCheckMessage: agent.lastConnectivityCheckMessage,
     isActive: agent.isActive,
     createdAt: agent.createdAt,
     updatedAt: agent.updatedAt
@@ -39,6 +42,14 @@ function parseNullableInt(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   const num = Number(value);
   return num > 0 && Number.isFinite(num) ? Math.floor(num) : null;
+}
+
+function parseNullableString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function parseConnectivityCheckStatus(value: unknown): AgentConnectivityCheckStatus | null {
+  return value === "reachable" || value === "failed" ? value : null;
 }
 
 /** Normalize DB row to AgentRecord */
@@ -55,9 +66,46 @@ function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
     baseUrl: String(row.base_url),
     apiKeyEncrypted: String(row.api_key_encrypted),
     apiKeyMasked: String(row.api_key_masked),
+    lastConnectivityCheckStatus: parseConnectivityCheckStatus(
+      row.last_connectivity_check_status ?? row.lastConnectivityCheckStatus
+    ),
+    lastConnectivityCheckAt: parseNullableString(row.last_connectivity_check_at ?? row.lastConnectivityCheckAt),
+    lastConnectivityCheckMessage: parseNullableString(
+      row.last_connectivity_check_message ?? row.lastConnectivityCheckMessage
+    ),
     isActive: Boolean(row.is_active),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
+  };
+}
+
+async function recordAgentConnectivityCheck(
+  id: string,
+  input: {
+    status: AgentConnectivityCheckStatus;
+    checkedAt?: string;
+    message?: string | null;
+  }
+) {
+  const now = new Date().toISOString();
+  const db = await ensureDb();
+  await db
+    .updateTable("ai_agents")
+    .set({
+      last_connectivity_check_status: input.status,
+      last_connectivity_check_at: input.checkedAt ?? now,
+      last_connectivity_check_message: input.message ?? null,
+      updated_at: now
+    })
+    .where("id", "=", id)
+    .executeTakeFirst();
+}
+
+function resetConnectivityCheckFields() {
+  return {
+    last_connectivity_check_status: null,
+    last_connectivity_check_at: null,
+    last_connectivity_check_message: null
   };
 }
 
@@ -387,6 +435,7 @@ export async function importAgentsPack(input: unknown) {
           base_url: item.baseUrl,
           api_key_encrypted: encryptSecret(item.apiKey),
           api_key_masked: maskSecret(item.apiKey),
+          ...resetConnectivityCheckFields(),
           is_active: item.isActive ?? true,
           created_at: now,
           updated_at: now,
@@ -656,6 +705,7 @@ export async function duplicateAgent(id: string) {
         base_url: source.baseUrl,
         api_key_encrypted: source.apiKeyEncrypted,
         api_key_masked: source.apiKeyMasked,
+        ...resetConnectivityCheckFields(),
         is_active: source.isActive,
         created_at: now,
         updated_at: now,
@@ -701,6 +751,7 @@ export async function createAgent(input: unknown) {
       base_url: data.baseUrl,
       api_key_encrypted: encryptSecret(data.apiKey),
       api_key_masked: maskSecret(data.apiKey),
+      ...resetConnectivityCheckFields(),
       is_active: true,
       created_at: now,
       updated_at: now,
@@ -722,9 +773,18 @@ export async function updateAgent(id: string, input: unknown) {
   const hasContextLength = Object.prototype.hasOwnProperty.call(data, "contextLength");
   const hasMaxInputTokens = Object.prototype.hasOwnProperty.call(data, "maxInputTokens");
   const hasMaxOutputTokens = Object.prototype.hasOwnProperty.call(data, "maxOutputTokens");
+  const hasProvider = Object.prototype.hasOwnProperty.call(data, "provider");
+  const hasModel = Object.prototype.hasOwnProperty.call(data, "model");
+  const hasBaseUrl = Object.prototype.hasOwnProperty.call(data, "baseUrl");
+  const hasApiKey = Object.prototype.hasOwnProperty.call(data, "apiKey");
   const contextLengthRaw = (data as { contextLength?: unknown }).contextLength;
   const maxInputTokensRaw = (data as { maxInputTokens?: unknown }).maxInputTokens;
   const maxOutputTokensRaw = (data as { maxOutputTokens?: unknown }).maxOutputTokens;
+  const shouldResetConnectivityCheck =
+    (hasProvider && data.provider !== current.provider) ||
+    (hasModel && data.model !== current.model) ||
+    (hasBaseUrl && data.baseUrl !== current.baseUrl) ||
+    (hasApiKey && typeof data.apiKey === "string" && data.apiKey.trim().length > 0);
   const nextMaxInputTokens =
     hasMaxInputTokens
       ? typeof maxInputTokensRaw === "number"
@@ -763,6 +823,13 @@ export async function updateAgent(id: string, input: unknown) {
       base_url: data.baseUrl ?? current.baseUrl,
       api_key_encrypted: data.apiKey ? encryptSecret(data.apiKey) : current.apiKeyEncrypted,
       api_key_masked: data.apiKey ? maskSecret(data.apiKey) : current.apiKeyMasked,
+      ...(shouldResetConnectivityCheck
+        ? resetConnectivityCheckFields()
+        : {
+            last_connectivity_check_status: current.lastConnectivityCheckStatus,
+            last_connectivity_check_at: current.lastConnectivityCheckAt,
+            last_connectivity_check_message: current.lastConnectivityCheckMessage
+          }),
       is_active: nextIsActive,
       updated_at: new Date().toISOString()
     })
@@ -814,24 +881,39 @@ export async function deleteAgent(id: string) {
 
 export async function testAgentConnection(id: string) {
   const agent = await getAgentById(id);
-  const result = await callProviderHealthCheck({
-    provider: agent.provider,
-    baseUrl: agent.baseUrl,
-    apiKey: decryptSecret(agent.apiKeyEncrypted),
-    model: agent.model
-  });
-  return { ...result, message: `${agent.name} is reachable` };
+  try {
+    const result = await callProviderHealthCheck({
+      provider: agent.provider,
+      baseUrl: agent.baseUrl,
+      apiKey: decryptSecret(agent.apiKeyEncrypted),
+      model: agent.model
+    });
+    const message = `${agent.name} is reachable`;
+    await recordAgentConnectivityCheck(id, { status: "reachable", message });
+    return { ...result, message };
+  } catch (error) {
+    const message = error instanceof AppError ? error.message : "连接校验失败";
+    await recordAgentConnectivityCheck(id, { status: "failed", message });
+    throw error;
+  }
 }
 
 export async function testAgentConnectionDebug(id: string) {
   const agent = await getAgentById(id);
-  const result = await callProviderDebug({
-    provider: agent.provider,
-    baseUrl: agent.baseUrl,
-    apiKey: decryptSecret(agent.apiKeyEncrypted),
-    model: agent.model
-  });
-  return { ...result, agentId: agent.id, agentName: agent.name, model: agent.model };
+  try {
+    const result = await callProviderDebug({
+      provider: agent.provider,
+      baseUrl: agent.baseUrl,
+      apiKey: decryptSecret(agent.apiKeyEncrypted),
+      model: agent.model
+    });
+    await recordAgentConnectivityCheck(id, { status: "reachable", message: `${agent.name} debug check passed` });
+    return { ...result, agentId: agent.id, agentName: agent.name, model: agent.model };
+  } catch (error) {
+    const message = error instanceof AppError ? error.message : "连接校验失败";
+    await recordAgentConnectivityCheck(id, { status: "failed", message });
+    throw error;
+  }
 }
 
 export async function testAgentConfig(input: unknown) {

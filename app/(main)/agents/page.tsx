@@ -15,6 +15,9 @@ type Agent = {
   maxOutputTokens: number | null;
   baseUrl: string;
   apiKeyMasked: string;
+  lastConnectivityCheckStatus: "reachable" | "failed" | null;
+  lastConnectivityCheckAt: string | null;
+  lastConnectivityCheckMessage: string | null;
   isActive: boolean;
 };
 
@@ -180,11 +183,25 @@ export default function AgentsPage() {
 
   const enabledAgentsCount = agents.filter((agent) => agent.isActive).length;
   const disabledAgentsCount = agents.length - enabledAgentsCount;
+  const editingAgent = editingId ? agents.find((agent) => agent.id === editingId) ?? null : null;
   const filteredAgents = agents.filter((agent) => {
     if (filterTab === "enabled") return agent.isActive;
     if (filterTab === "disabled") return !agent.isActive;
     return true;
   });
+
+  function formatLocalTime(value: string | null) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString("zh-CN", { hour12: false });
+  }
+
+  function getConnectivityCheckText(agent: Agent) {
+    if (agent.lastConnectivityCheckStatus === "reachable") return "最近连通性校验：通过";
+    if (agent.lastConnectivityCheckStatus === "failed") return "最近连通性校验：失败";
+    return "最近连通性校验：未校验";
+  }
 
   const canTestDraft =
     form.model.trim().length > 0 &&
@@ -365,6 +382,7 @@ export default function AgentsPage() {
       payload.error?.message ??
       `${response.status} ${response.statusText}`.trim();
     showToast(response.ok ? "success" : "error", text);
+    await loadAgents();
     setTestingAgentId(null);
   }
 
@@ -795,6 +813,31 @@ export default function AgentsPage() {
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h2 style={{ margin: 0 }}>{editingId ? "编辑 AI 配置" : "新建 AI 配置"}</h2>
         </div>
+        {editingAgent ? (
+          <div
+            className="row"
+            style={{ justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}
+            title={editingAgent.lastConnectivityCheckMessage ?? undefined}
+          >
+            <span
+              className={`agentStatus ${
+                editingAgent.lastConnectivityCheckStatus === "reachable"
+                  ? "agentStatusEnabled"
+                  : editingAgent.lastConnectivityCheckStatus === "failed"
+                    ? "agentStatusDisabled"
+                    : ""
+              }`}
+              style={editingAgent.lastConnectivityCheckStatus ? undefined : { color: "var(--muted)" }}
+            >
+              {getConnectivityCheckText(editingAgent)}
+            </span>
+            <span className="muted">
+              {editingAgent.lastConnectivityCheckAt
+                ? `上次校验：${formatLocalTime(editingAgent.lastConnectivityCheckAt)}`
+                : "尚未记录校验时间"}
+            </span>
+          </div>
+        ) : null}
         <div className="field">
           <label>名称</label>
           <input
@@ -1143,6 +1186,27 @@ export default function AgentsPage() {
               </div>
               <div className="muted">{agent.provider}</div>
               <div className="muted">{agent.model}</div>
+              <div
+                className="row"
+                style={{ justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}
+              >
+                <span
+                  className={`agentStatus ${
+                    agent.lastConnectivityCheckStatus === "reachable"
+                      ? "agentStatusEnabled"
+                      : agent.lastConnectivityCheckStatus === "failed"
+                        ? "agentStatusDisabled"
+                        : ""
+                  }`}
+                  style={agent.lastConnectivityCheckStatus ? undefined : { color: "var(--muted)" }}
+                  title={agent.lastConnectivityCheckMessage ?? undefined}
+                >
+                  {getConnectivityCheckText(agent)}
+                </span>
+                {agent.lastConnectivityCheckAt ? (
+                  <span className="muted">{formatLocalTime(agent.lastConnectivityCheckAt)}</span>
+                ) : null}
+              </div>
               {agent.contextLength ? <div className="muted">Context: {agent.contextLength.toLocaleString()}</div> : null}
               {agent.maxInputTokens ? <div className="muted">Max input: {agent.maxInputTokens.toLocaleString()}</div> : null}
               {agent.maxOutputTokens ? (

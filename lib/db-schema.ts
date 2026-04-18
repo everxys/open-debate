@@ -108,6 +108,9 @@ export type AiAgentTable = {
   base_url: string;
   api_key_encrypted: string;
   api_key_masked: string;
+  last_connectivity_check_status: string | null;
+  last_connectivity_check_at: NullableTimestampString;
+  last_connectivity_check_message: string | null;
   is_active: boolean;
   created_at: TimestampString;
   updated_at: TimestampString;

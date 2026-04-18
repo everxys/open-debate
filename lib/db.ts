@@ -144,6 +144,9 @@ async function ensureSchema(pool: Pool) {
   await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists context_length int null");
   await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists max_input_tokens int null");
   await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists max_output_tokens int null");
+  await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists last_connectivity_check_status text null");
+  await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists last_connectivity_check_at timestamptz null");
+  await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists last_connectivity_check_message text null");
   await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists deleted_at timestamptz null");
   await alterTableIfExists("debates", "alter table debates add column if not exists workflow_phase_kind text null");
   await alterTableIfExists("debates", "alter table debates add column if not exists workflow_phase_title text null");

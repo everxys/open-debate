@@ -3,6 +3,7 @@ export type DebateStatus = "pending" | "running" | "paused" | "completed" | "sto
 
 /** AI provider type */
 export type Provider = "openai" | "anthropic";
+export type AgentConnectivityCheckStatus = "reachable" | "failed";
 
 /** Retrieval/embedding provider type */
 export type RetrievalProvider = "openai";
@@ -34,6 +35,9 @@ export type AgentRecord = {
   baseUrl: string;
   apiKeyEncrypted: string;
   apiKeyMasked: string;
+  lastConnectivityCheckStatus: AgentConnectivityCheckStatus | null;
+  lastConnectivityCheckAt: string | null;
+  lastConnectivityCheckMessage: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
