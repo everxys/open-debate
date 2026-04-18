@@ -64,6 +64,8 @@ export type DebateRecord = {
   runtimeNoticeAt: string | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
+  ignoredRuntimeErrorSignature: string | null;
+  ignoredRuntimeErrorAt: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   stoppedReason: string | null;

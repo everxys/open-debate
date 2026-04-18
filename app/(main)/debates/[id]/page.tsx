@@ -70,6 +70,8 @@ type Debate = {
   runtimeNoticeAt: string | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
+  ignoredRuntimeErrorSignature: string | null;
+  ignoredRuntimeErrorAt: string | null;
   stoppedReason: string | null;
   agents: DebateAgent[];
 };
@@ -127,6 +129,7 @@ type SummaryJob = {
   attemptCount?: number | null;
   blockedReason?: string | null;
   deadLetter?: boolean;
+  leaseState?: "active" | "stale" | "recovering" | null;
   updatedAt: string;
 };
 
@@ -155,8 +158,29 @@ function formatSummaryJobDetail(job: SummaryJob) {
   return parts.join(" · ");
 }
 
+function isStaleRunningSummaryJob(job: SummaryJob) {
+  return job.status === "running" && job.leaseState === "stale";
+}
+
+function isActiveRunningSummaryJob(job: SummaryJob) {
+  return job.status === "running" && job.leaseState !== "stale";
+}
+
 function isPendingSummaryJob(job: SummaryJob) {
-  return job.status === "queued" || job.status === "retry_wait" || job.status === "blocked";
+  return job.status === "queued" || job.status === "retry_wait" || job.status === "blocked" || job.leaseState === "recovering";
+}
+
+function formatSummaryJobStatus(job: SummaryJob) {
+  if (job.status === "running" && job.leaseState === "stale") return "异常中断";
+  if (job.leaseState === "recovering") return "等待恢复";
+  if (job.status === "retry_wait") return "等待重试";
+  if (job.status === "dead_letter") return "停止重试";
+  if (job.status === "blocked") return "等待依赖";
+  if (job.status === "queued") return "排队中";
+  if (job.status === "running") return "总结中";
+  if (job.status === "failed") return "失败";
+  if (job.status === "completed") return "完成";
+  return job.status;
 }
 
 type DebateRoundDirectoryItemProps = {
@@ -643,6 +667,42 @@ function trimTurnDetailsCacheByOrder(cache: Record<string, TurnDetail>, order: s
   return Object.fromEntries(Object.entries(cache).filter(([id]) => keep.has(id)));
 }
 
+function debateApiPath(debateId: string, suffix = "") {
+  return `/api/debates/${encodeURIComponent(debateId)}${suffix}`;
+}
+
+async function fetchJsonWithXhrFallback<T>(url: string, init?: RequestInit) {
+  try {
+    const response = await fetch(url, init);
+    const payload = (await response.json().catch(() => ({}))) as T;
+    return { response, payload };
+  } catch (fetchError) {
+    return new Promise<{ response: { ok: boolean; status: number }; payload: T }>((resolve, reject) => {
+      if (typeof XMLHttpRequest === "undefined") {
+        reject(fetchError);
+        return;
+      }
+      const xhr = new XMLHttpRequest();
+      xhr.open(init?.method ?? "GET", url, true);
+      xhr.withCredentials = init?.credentials === "include" || init?.credentials === "same-origin";
+      xhr.timeout = 30000;
+      xhr.setRequestHeader("Accept", "application/json");
+      xhr.onload = () => {
+        let payload: T = {} as T;
+        try {
+          payload = xhr.responseText ? (JSON.parse(xhr.responseText) as T) : ({} as T);
+        } catch {
+          payload = {} as T;
+        }
+        resolve({ response: { ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status }, payload });
+      };
+      xhr.onerror = () => reject(fetchError);
+      xhr.ontimeout = () => reject(fetchError);
+      xhr.send(typeof init?.body === "string" ? init.body : undefined);
+    });
+  }
+}
+
 async function fetchTurnSummaries(input: {
   debateId: string;
   after?: number;
@@ -653,15 +713,17 @@ async function fetchTurnSummaries(input: {
   if (typeof input.after === "number" && input.after >= 0) params.set("after", String(input.after));
   if (typeof input.before === "number" && input.before > 0) params.set("before", String(input.before));
   if (typeof input.limit === "number" && input.limit > 0) params.set("limit", String(input.limit));
-  const response = await fetch(`/api/debates/${input.debateId}/turns?${params.toString()}`, { cache: "no-store" });
-  const payload = (await response.json().catch(() => ({}))) as TurnsListResponse<TurnSummary>;
-  return { response, payload };
+  return fetchJsonWithXhrFallback<TurnsListResponse<TurnSummary>>(
+    debateApiPath(input.debateId, `/turns?${params.toString()}`),
+    { cache: "no-store" }
+  );
 }
 
 async function fetchTurnDetail(input: { debateId: string; turnNumber: number }) {
-  const response = await fetch(`/api/debates/${input.debateId}/turns/${input.turnNumber}`, { cache: "no-store" });
-  const payload = (await response.json().catch(() => ({}))) as TurnDetailResponse;
-  return { response, payload };
+  return fetchJsonWithXhrFallback<TurnDetailResponse>(
+    debateApiPath(input.debateId, `/turns/${encodeURIComponent(String(input.turnNumber))}`),
+    { cache: "no-store" }
+  );
 }
 
 function isLightweightWorkflowPresentation(workflow: NormalizedDebateWorkflow | null) {
@@ -825,6 +887,74 @@ function summarizeRuntimeError(code: string | null | undefined, message: string 
     summary: summary.length > 180 ? `${summary.slice(0, 180)}...` : summary,
     raw
   };
+}
+
+function buildRuntimeErrorSignature(code: string | null | undefined, message: string | null | undefined) {
+  const normalizedCode = typeof code === "string" ? code.trim() : "";
+  const normalizedMessage = typeof message === "string" ? message.trim() : "";
+  const signature = [normalizedCode, normalizedMessage].filter(Boolean).join(" · ");
+  return signature || null;
+}
+
+function RuntimeErrorDialog(props: {
+  error: ReturnType<typeof summarizeRuntimeError>;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const { error, open, onClose } = props;
+  const [copied, setCopied] = useState(false);
+
+  if (!open || !error) return null;
+  const runtimeError = error;
+
+  async function copyRawError() {
+    try {
+      await navigator.clipboard.writeText(runtimeError.raw);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <div role="dialog" aria-modal="true" onClick={onClose} style={{ ...MODAL_OVERLAY_STYLE, alignItems: "flex-start", zIndex: 1000 }}>
+      <div
+        className="panel stack"
+        onClick={MODAL_PANEL_CLICK_STOP}
+        style={{ width: "min(920px, 100%)", maxHeight: "calc(100dvh - 48px)", overflow: "hidden" }}
+      >
+        <div className="row debateModalHeader" style={{ justifyContent: "space-between" }}>
+          <div className="stack" style={{ gap: 4 }}>
+            <div className="row" style={{ gap: 8 }}>
+              <strong>失败原因详情</strong>
+              <span className="runtimeErrorCodeBadge">{runtimeError.code}</span>
+            </div>
+            <div className="muted">这里保留完整原始返回，主状态区只展示摘要，避免把页面挤成日志窗口。</div>
+          </div>
+          <button className="btn" type="button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        <div className="runtimeErrorDialogBody">
+          <section className="runtimeErrorSection">
+            <div className="runtimeErrorSectionTitle">概要</div>
+            <div className="runtimeErrorDialogMessage">{runtimeError.message}</div>
+          </section>
+          <section className="runtimeErrorSection">
+            <div className="runtimeErrorSectionTitle">原始返回</div>
+            <pre className="runtimeErrorDialogRaw">{runtimeError.raw}</pre>
+          </section>
+        </div>
+        <div className="row debateModalFooter" style={{ justifyContent: "space-between" }}>
+          <span className="muted">{copied ? "已复制原始错误" : "需要排障时再看原始返回。"}</span>
+          <button className="btn btn-primary" type="button" onClick={() => void copyRawError()}>
+            {copied ? "已复制" : "复制原始错误"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 async function fetchWorkflowRulesMarkdown(debateId: string) {
@@ -1073,12 +1203,17 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
   const roundSummaryPendingJobs = summaryJobs.filter(
     (job) => (job.kind === "round_summary" || job.kind === "facts_board") && isPendingSummaryJob(job)
   );
+  const roundSummaryStaleJobs = summaryJobs.filter(
+    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && isStaleRunningSummaryJob(job)
+  );
   const roundSummaryRunning = summaryJobs.some(
-    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && job.status === "running"
+    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && isActiveRunningSummaryJob(job)
   );
   const roundSummaryPending = roundSummaryPendingJobs.length > 0;
+  const roundSummaryStale = roundSummaryStaleJobs.length > 0;
   const roundSummaryFailed = roundSummaryFailedJobs.length > 0;
   const roundSummaryPendingTitle = roundSummaryPendingJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
+  const roundSummaryStaleTitle = roundSummaryStaleJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
   const roundSummaryFailedTitle = roundSummaryFailedJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
 
   return (
@@ -1142,6 +1277,15 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
           AI 待补生成
         </span>
       ) : null}
+      {roundSummaryStale ? (
+        <span
+          className="softBox"
+          style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}
+          title={roundSummaryStaleTitle || undefined}
+        >
+          AI 异常中断
+        </span>
+      ) : null}
       {roundSummaryRunning ? (
         <span className="softBox" style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}>
           AI 总结中...
@@ -1200,13 +1344,18 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
             const turnSummaryPendingJobs = summaryJobs.filter(
               (job) => job.kind === "turn_summary" && job.turnNumber === turn.turnNumber && isPendingSummaryJob(job)
             );
+            const turnSummaryStaleJobs = summaryJobs.filter(
+              (job) => job.kind === "turn_summary" && job.turnNumber === turn.turnNumber && isStaleRunningSummaryJob(job)
+            );
             const turnSummaryRunning = summaryJobs.some(
-              (job) => job.kind === "turn_summary" && job.turnNumber === turn.turnNumber && job.status === "running"
+              (job) => job.kind === "turn_summary" && job.turnNumber === turn.turnNumber && isActiveRunningSummaryJob(job)
             );
             const turnSummaryFailed = turnSummaryFailedJobs.length > 0;
             const turnSummaryPending = turnSummaryPendingJobs.length > 0;
+            const turnSummaryStale = turnSummaryStaleJobs.length > 0;
             const turnSummaryFailedTitle = turnSummaryFailedJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
             const turnSummaryPendingTitle = turnSummaryPendingJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
+            const turnSummaryStaleTitle = turnSummaryStaleJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
             return (
               <button
                 key={turn.id}
@@ -1231,6 +1380,11 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
                 {turnSummaryPending ? (
                   <span className="muted" title={turnSummaryPendingTitle || undefined}>
                     {" · AI 待补生成"}
+                  </span>
+                ) : null}
+                {turnSummaryStale ? (
+                  <span className="muted" title={turnSummaryStaleTitle || undefined}>
+                    {" · AI 异常中断"}
                   </span>
                 ) : null}
                 {turnSummaryRunning ? <span className="muted"> · AI 总结中...</span> : null}
@@ -1983,9 +2137,12 @@ function StatusSummaryPanel(props: {
   summaryJobs: SummaryJob[];
   summaryWorkerHealth: SummaryWorkerHealth | null;
   summaryActionBusy: boolean;
+  runtimeErrorIgnoreBusy: boolean;
+  onIgnoreRuntimeError: () => void;
   onRetryFailedSummaryJobs: () => void;
   onRebuildFactsBoard: () => void;
 }) {
+  const [runtimeErrorDetailOpen, setRuntimeErrorDetailOpen] = useState(false);
   const runtimeNoticeBadgeClass =
     props.debate.runtimeNoticeKind === "recovering"
       ? "badge-recovering"
@@ -2009,14 +2166,24 @@ function StatusSummaryPanel(props: {
       if (job.kind === "turn_summary") acc.turn += 1;
       else if (job.kind === "round_summary") acc.round += 1;
       else acc.facts += 1;
-      if (job.status === "running") acc.running += 1;
+      if (isStaleRunningSummaryJob(job)) acc.stale += 1;
+      else if (isActiveRunningSummaryJob(job)) acc.running += 1;
       else if (isPendingSummaryJob(job)) acc.pending += 1;
       else if (job.status === "failed" || job.status === "dead_letter") acc.failed += 1;
       return acc;
     },
-    { turn: 0, round: 0, facts: 0, running: 0, pending: 0, failed: 0 }
+    { turn: 0, round: 0, facts: 0, running: 0, pending: 0, stale: 0, failed: 0 }
   );
   const runtimeError = summarizeRuntimeError(props.debate.lastErrorCode, props.debate.lastErrorMessage);
+  const runtimeErrorSignature = buildRuntimeErrorSignature(props.debate.lastErrorCode, props.debate.lastErrorMessage);
+  const runtimeErrorIgnored =
+    Boolean(runtimeErrorSignature) && runtimeErrorSignature === props.debate.ignoredRuntimeErrorSignature;
+  const runtimeErrorTone =
+    runtimeError?.code === "AI_API_ERROR"
+      ? "接口请求失败"
+      : runtimeError?.code === "AI_NETWORK_ERROR"
+        ? "网络异常"
+        : "运行异常";
   const workerStatus = props.summaryWorkerHealth
     ? props.summaryWorkerHealth.stale
       ? "worker 离线"
@@ -2068,16 +2235,33 @@ function StatusSummaryPanel(props: {
         </div>
       ) : null}
       {props.debate.stoppedReason ? <div className="muted">停止原因: {props.debate.stoppedReason}</div> : null}
-      {runtimeError ? (
-        <details className="runtimeErrorBox">
-          <summary>
-            <strong>失败原因</strong>
-            <span>{runtimeError.code}</span>
-            <small>点击展开详情</small>
-          </summary>
-          <div className="runtimeErrorMessage">{runtimeError.message}</div>
-          <pre>{runtimeError.raw}</pre>
-        </details>
+      {runtimeError && !runtimeErrorIgnored ? (
+        <div className="runtimeErrorCard">
+          <div className="runtimeErrorCardHeader">
+            <div className="row" style={{ gap: 8 }}>
+              <strong>失败原因</strong>
+              <span className="runtimeErrorCodeBadge">{runtimeError.code}</span>
+              <span className="runtimeErrorToneBadge">{runtimeErrorTone}</span>
+            </div>
+          </div>
+          <div className="runtimeErrorCardMessage">{runtimeError.message}</div>
+          <div className="runtimeErrorCardActions">
+            <span className="muted">已折叠原始详情，避免状态区出现双滚动条。</span>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn" type="button" onClick={() => setRuntimeErrorDetailOpen(true)}>
+                查看原始详情
+              </button>
+              <button className="btn btn-muted" type="button" disabled={props.runtimeErrorIgnoreBusy} onClick={props.onIgnoreRuntimeError}>
+                {props.runtimeErrorIgnoreBusy ? "忽略中..." : "忽略"}
+              </button>
+            </div>
+          </div>
+          <RuntimeErrorDialog
+            error={runtimeError}
+            open={runtimeErrorDetailOpen}
+            onClose={() => setRuntimeErrorDetailOpen(false)}
+          />
+        </div>
       ) : null}
       {props.summaryJobs.length > 0 ? (
         <details className="summaryJobsBox">
@@ -2087,7 +2271,7 @@ function StatusSummaryPanel(props: {
               回 {summaryCounts.turn} · 轮 {summaryCounts.round} · 事实板 {summaryCounts.facts}
             </span>
             <small>
-              运行中 {summaryCounts.running} · 待补 {summaryCounts.pending} · 失败 {summaryCounts.failed} · {workerStatus}
+              运行中 {summaryCounts.running} · 待补 {summaryCounts.pending} · 异常中断 {summaryCounts.stale} · 失败 {summaryCounts.failed} · {workerStatus}
             </small>
           </summary>
           {props.summaryWorkerHealth ? (
@@ -2110,7 +2294,7 @@ function StatusSummaryPanel(props: {
               <div key={job.key} className="softBox" style={{ padding: "8px 10px" }}>
                 <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
                   <strong>{job.label}</strong>
-                  <span className="muted">{job.status}</span>
+                  <span className="muted">{formatSummaryJobStatus(job)}</span>
                 </div>
                 {formatSummaryJobDetail(job) ? <div className="muted">{formatSummaryJobDetail(job)}</div> : null}
               </div>
@@ -3700,6 +3884,7 @@ export default function DebateDetailPage() {
   const [summaryJobsByKey, setSummaryJobsByKey] = useState<Record<string, SummaryJob>>({});
   const [summaryWorkerHealth, setSummaryWorkerHealth] = useState<SummaryWorkerHealth | null>(null);
   const [summaryActionBusy, setSummaryActionBusy] = useState(false);
+  const [runtimeErrorIgnoreBusy, setRuntimeErrorIgnoreBusy] = useState(false);
   const [liveText, setLiveText] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [activeLive, setActiveLive] = useState(false);
@@ -4336,6 +4521,30 @@ export default function DebateDetailPage() {
   const handleRebuildFactsBoard = useCallback(() => {
     void postSummaryJobAction("rebuild_facts");
   }, [postSummaryJobAction]);
+
+  const ignoreRuntimeError = useCallback(async () => {
+    if (!id || runtimeErrorIgnoreBusy) return;
+    setRuntimeErrorIgnoreBusy(true);
+    try {
+      const response = await fetch(`/api/debates/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ignoreRuntimeError: true })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "忽略失败");
+        return;
+      }
+      setDebate(payload.data ?? null);
+      showToast("success", "已忽略当前失败原因");
+    } catch (error) {
+      console.error(error);
+      showToast("error", "网络错误：忽略失败");
+    } finally {
+      setRuntimeErrorIgnoreBusy(false);
+    }
+  }, [id, runtimeErrorIgnoreBusy, showToast]);
 
   useEffect(() => {
     if (!id) return;
@@ -5711,6 +5920,8 @@ export default function DebateDetailPage() {
                 summaryJobs={liveSummaryJobs}
                 summaryWorkerHealth={summaryWorkerHealth}
                 summaryActionBusy={summaryActionBusy}
+                runtimeErrorIgnoreBusy={runtimeErrorIgnoreBusy}
+                onIgnoreRuntimeError={ignoreRuntimeError}
                 onRetryFailedSummaryJobs={handleRetryFailedSummaryJobs}
                 onRebuildFactsBoard={handleRebuildFactsBoard}
               />

@@ -118,6 +118,7 @@ import {
   FACTS_BOARD_JOB_KEY,
   markBlockedDebateSummaryJob,
   scheduleDebateSummaryJobRetry,
+  toDebateSummaryJobLiveView,
   type DebateSummaryJobKind,
   type DebateSummaryJobRecord
 } from "@/lib/summary-jobs";
@@ -980,25 +981,9 @@ function getSummaryJobLabel(kind: DebateSummaryJobKind, roundNumber?: number | n
   return "结构化事实板";
 }
 
-function mapSummaryJobStatusToLiveStatus(status: DebateSummaryJobRecord["status"]) {
-  return status;
-}
-
 async function syncSummaryJobToLive(job: DebateSummaryJobRecord, message?: string | null, blockedReason?: string | null) {
-  setDebateSummaryJob(job.debateId, {
-    key: job.jobKey,
-    kind: job.kind,
-    label: getSummaryJobLabel(job.kind, job.roundNumber, job.turnNumber),
-    turnNumber: job.turnNumber,
-    roundNumber: job.roundNumber,
-    status: mapSummaryJobStatusToLiveStatus(job.status),
-    message: message ?? null,
-    errorReason: blockedReason ?? job.lastError,
-    retryAt: job.nextRetryAt,
-    attemptCount: job.attemptCount,
-    blockedReason,
-    deadLetter: job.status === "dead_letter"
-  });
+  const liveJob = toDebateSummaryJobLiveView(job, message, blockedReason);
+  setDebateSummaryJob(job.debateId, liveJob);
 }
 
 async function updateSummaryJob(
@@ -1029,6 +1014,7 @@ async function updateSummaryJob(
     retryAt: job.retryAt ?? null,
     attemptCount: job.attemptCount ?? null,
     blockedReason: job.blockedReason ?? null,
+    leaseState: job.status === "running" ? "active" : null,
     deadLetter: job.status === "dead_letter"
   });
   if (job.status === "completed") {
@@ -1474,6 +1460,119 @@ export function parseResponse(raw: string): {
   }
 
   return { content: raw, structuredOutput: null, parseStatus: "ok" as const };
+}
+
+function normalizeDebateTurnRow(row: Record<string, unknown>): DebateTurnRecord {
+  return {
+    id: String(row.id),
+    debateId: String(row.debate_id),
+    aiAgentId: String(row.ai_agent_id),
+    debateAgentId: row.debate_agent_id ? String(row.debate_agent_id) : null,
+    seatNumber: row.seat_number === null ? null : Number(row.seat_number),
+    turnNumber: Number(row.turn_number),
+    content: String(row.content),
+    structuredOutput: (row.structured_output as StructuredOutput | null) ?? null,
+    parseStatus: row.parse_status as "ok" | "fallback",
+    tokenUsed: Number(row.token_used),
+    responseTimeMs: row.response_time_ms === null ? null : Number(row.response_time_ms),
+    retryCount: Number(row.retry_count),
+    errorCode: (row.error_code as string | null) ?? null,
+    createdAt: String(row.created_at)
+  };
+}
+
+async function reconcileDebateProgressFromPersistedTurns(input: {
+  db: Awaited<ReturnType<typeof ensureDb>>;
+  userId: string;
+  debate: DebateRecord;
+  participantCount: number;
+}) {
+  const turnRows = await input.db
+    .selectFrom("debate_turns")
+    .selectAll()
+    .where("debate_id", "=", input.debate.id)
+    .orderBy("turn_number", "asc")
+    .orderBy("created_at", "asc")
+    .execute();
+  if (turnRows.length <= 0) return input.debate;
+
+  const turns = turnRows.map((row) => normalizeDebateTurnRow(row as Record<string, unknown>));
+  const persistedCurrentTurn = turns.reduce((max, turn) => Math.max(max, turn.turnNumber), 0);
+  if (persistedCurrentTurn <= input.debate.currentTurn) return input.debate;
+
+  const workflow = await loadDebateWorkflow(input.userId, input.debate.id);
+  const closedVoteRounds = await listClosedOfficialVoteRounds(input.userId, input.debate.id);
+  const openVote = await loadOpenVote(input.userId, input.debate.id);
+  const latestVote = await loadLatestVote(input.userId, input.debate.id);
+  const consensus = aggregateConsensusByLastRound(turns, input.participantCount, workflow?.consensus ?? null);
+  const totalTokenUsed = turns.reduce((sum, turn) => sum + Math.max(0, turn.tokenUsed), 0);
+  const mustKeepRunningForVote = Boolean(openVote);
+  const currentSpeechRoundIndexAfterTurn =
+    Math.floor(Math.max(0, persistedCurrentTurn - 1) / Math.max(1, input.participantCount)) + 1;
+  const currentRoundNumberAfterTurn = mapSpeechRoundIndexToActualRound(currentSpeechRoundIndexAfterTurn, closedVoteRounds);
+  const finalizationPhase = resolveCurrentWorkflowPhase({
+    workflow,
+    roundNumber: currentRoundNumberAfterTurn,
+    openVote,
+    latestVote,
+    persistedPhaseKind: input.debate.workflowPhaseKind
+  });
+  const requiresFinalizationPhase = requiresWorkflowFinalizationPhaseForCompletion(workflow);
+  const requiresOutputs = requiresWorkflowOutputsForCompletion(workflow);
+  const canCompleteByPhase =
+    requiresFinalizationPhase
+      ? finalizationPhase?.kind === "finalization" && currentRoundNumberAfterTurn >= getWorkflowEarliestCompletionRound(workflow)
+      : currentRoundNumberAfterTurn >= getWorkflowEarliestCompletionRound(workflow);
+  const missingDeliverables = requiresOutputs
+    ? await listMissingRequiredDeliverables({
+        userId: input.userId,
+        debateId: input.debate.id,
+        workflow
+      })
+    : [];
+  const canCompleteByDeliverables = missingDeliverables.length === 0;
+  const consensusRequired = workflow?.consensus.enabled !== false;
+  const canCompleteByConsensus = !consensusRequired || consensus.reached;
+  const consensusReachedForDb = mustKeepRunningForVote ? false : consensus.reached;
+  const reconciledStatus =
+    input.debate.status === "running" && !mustKeepRunningForVote && canCompleteByConsensus && canCompleteByPhase && canCompleteByDeliverables
+      ? "completed"
+      : input.debate.status;
+  const phaseSnapshot = getPhaseSnapshot(finalizationPhase, currentRoundNumberAfterTurn);
+  const reconciledAt = turns[turns.length - 1]?.createdAt ?? new Date().toISOString();
+
+  const updated = await input.db
+    .updateTable("debates")
+    .set({
+      current_turn: persistedCurrentTurn,
+      token_used: totalTokenUsed,
+      consensus_summary: consensus.leadingSolution
+        ? JSON.stringify({
+            leadingSolution: consensus.leadingSolution,
+            score: consensus.score
+          })
+        : null,
+      consensus_reached: consensusReachedForDb,
+      workflow_phase_kind: phaseSnapshot.workflowPhaseKind,
+      workflow_phase_title: phaseSnapshot.workflowPhaseTitle,
+      workflow_phase_round: phaseSnapshot.workflowPhaseRound,
+      status: reconciledStatus,
+      finished_at: reconciledStatus === "completed" ? reconciledAt : input.debate.finishedAt,
+      updated_at: reconciledAt
+    })
+    .where("id", "=", input.debate.id)
+    .returningAll()
+    .executeTakeFirst();
+
+  await logRuntimeEvent("warn", "debate progress reconciled from persisted turns", {
+    debateId: input.debate.id,
+    previousCurrentTurn: input.debate.currentTurn,
+    persistedCurrentTurn,
+    totalTokenUsed,
+    reconciledStatus
+  });
+
+  return updated ? normalizeDebateRow(updated as Record<string, unknown>) : input.debate;
 }
 
 export function appendWorkflowSummaryLines(lines: string[], workflow: NormalizedDebateWorkflow | null) {
@@ -2998,6 +3097,8 @@ export function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
     runtimeNoticeAt: (row.runtime_notice_at as string | null) ?? null,
     lastErrorCode: (row.last_error_code as string | null) ?? null,
     lastErrorMessage: (row.last_error_message as string | null) ?? null,
+    ignoredRuntimeErrorSignature: (row.ignored_runtime_error_signature as string | null) ?? null,
+    ignoredRuntimeErrorAt: (row.ignored_runtime_error_at as string | null) ?? null,
     startedAt: (row.started_at as string | null) ?? null,
     finishedAt: (row.finished_at as string | null) ?? null,
     stoppedReason: (row.stopped_reason as string | null) ?? null,
@@ -3032,7 +3133,10 @@ export function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
     baseUrl: String(row.base_url),
     apiKeyEncrypted: String(row.api_key_encrypted),
     apiKeyMasked: String(row.api_key_masked),
-    isActive: Boolean(row.is_active),
+    lastConnectivityCheckStatus: (row.last_connectivity_check_status as AgentRecord["lastConnectivityCheckStatus"]) ?? null,
+    lastConnectivityCheckAt: (row.last_connectivity_check_at as string | null) ?? null,
+    lastConnectivityCheckMessage: (row.last_connectivity_check_message as string | null) ?? null,
+    isActive: row.is_active === undefined ? true : Boolean(row.is_active),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
@@ -3063,6 +3167,14 @@ export async function finishDebate(
             runtime_notice_at = null,
             last_error_code = coalesce(${options?.lastErrorCode ?? null}, last_error_code),
             last_error_message = coalesce(${options?.lastErrorMessage ?? null}, last_error_message),
+            ignored_runtime_error_signature = case
+              when ${options?.lastErrorCode ?? null} is not null or ${options?.lastErrorMessage ?? null} is not null then null
+              else ignored_runtime_error_signature
+            end,
+            ignored_runtime_error_at = case
+              when ${options?.lastErrorCode ?? null} is not null or ${options?.lastErrorMessage ?? null} is not null then null
+              else ignored_runtime_error_at
+            end,
             updated_at = ${now}
       where id = ${id}
   `.compile(db));
@@ -3132,6 +3244,14 @@ export async function pauseDebateAfterRuntimeInterruption(
             runtime_notice_at = ${now},
             last_error_code = coalesce(${options?.lastErrorCode ?? null}, last_error_code),
             last_error_message = coalesce(${options?.lastErrorMessage ?? null}, last_error_message),
+            ignored_runtime_error_signature = case
+              when ${options?.lastErrorCode ?? null} is not null or ${options?.lastErrorMessage ?? null} is not null then null
+              else ignored_runtime_error_signature
+            end,
+            ignored_runtime_error_at = case
+              when ${options?.lastErrorCode ?? null} is not null or ${options?.lastErrorMessage ?? null} is not null then null
+              else ignored_runtime_error_at
+            end,
             updated_at = ${now}
       where id = ${id}
   `.compile(db));
@@ -4090,7 +4210,7 @@ export async function runDebate(id: string, userId: string) {
         break;
       }
 
-      const debate = normalizeDebateRow(debateResult as Record<string, unknown>);
+      let debate = normalizeDebateRow(debateResult as Record<string, unknown>);
       if (debate.status !== "running") {
         break;
       }
@@ -4118,6 +4238,15 @@ export async function runDebate(id: string, userId: string) {
       const roleAssignments = await loadDebateParticipantRoleTypes(userId, id);
       if (participantCount < 2) {
         throw new AppError("VALIDATION_ERROR", 400, "Debate requires at least 2 agents");
+      }
+      debate = await reconcileDebateProgressFromPersistedTurns({
+        db,
+        userId,
+        debate,
+        participantCount
+      });
+      if (debate.status !== "running") {
+        break;
       }
 
       const workflowBeforeTurn = await loadDebateWorkflow(userId, id);
@@ -4592,22 +4721,7 @@ export async function runDebate(id: string, userId: string) {
         .where("debate_id", "=", id)
         .orderBy("turn_number", "asc")
         .execute();
-      const turns: DebateTurnRecord[] = turnRows.map((row) => ({
-        id: String(row.id),
-        debateId: String(row.debate_id),
-        aiAgentId: String(row.ai_agent_id),
-        debateAgentId: row.debate_agent_id ? String(row.debate_agent_id) : null,
-        seatNumber: row.seat_number === null ? null : Number(row.seat_number),
-        turnNumber: Number(row.turn_number),
-        content: String(row.content),
-        structuredOutput: (row.structured_output as StructuredOutput | null) ?? null,
-        parseStatus: row.parse_status as "ok" | "fallback",
-        tokenUsed: Number(row.token_used),
-        responseTimeMs: row.response_time_ms === null ? null : Number(row.response_time_ms),
-        retryCount: Number(row.retry_count),
-        errorCode: (row.error_code as string | null) ?? null,
-        createdAt: String(row.created_at)
-      }));
+      const turns: DebateTurnRecord[] = turnRows.map((row) => normalizeDebateTurnRow(row as Record<string, unknown>));
 
       const consensus = aggregateConsensusByLastRound(turns, participantCount, workflow?.consensus ?? null);
       const nextTurn = debate.currentTurn + 1;

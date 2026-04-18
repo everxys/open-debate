@@ -211,6 +211,8 @@ export type DebateTable = {
   runtime_notice_at: NullableTimestampString;
   last_error_code: string | null;
   last_error_message: string | null;
+  ignored_runtime_error_signature: string | null;
+  ignored_runtime_error_at: NullableTimestampString;
   started_at: NullableTimestampString;
   finished_at: NullableTimestampString;
   stopped_reason: string | null;

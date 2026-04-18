@@ -112,6 +112,7 @@ export const createDebateSchema = z.union([
 export const updateDebateQuestionSchema = z.object({ question: debateCommonSchema.shape.question });
 
 export const updateDebateSharingSchema = z.object({ isShared: z.boolean() });
+export const ignoreDebateRuntimeErrorSchema = z.object({ ignoreRuntimeError: z.literal(true) });
 
 // === Workspace schemas ===
 

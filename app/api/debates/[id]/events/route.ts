@@ -10,6 +10,17 @@ function sseEvent(event: string, data: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+function shouldPreferLiveJob(
+  dbJob: ReturnType<typeof toDebateSummaryJobLiveView> | undefined,
+  liveJob: ReturnType<typeof toDebateSummaryJobLiveView>
+) {
+  if (!dbJob) return true;
+  if ((dbJob.leaseState === "stale" || dbJob.leaseState === "recovering") && dbJob.status === liveJob.status) {
+    return false;
+  }
+  return liveJob.updatedAt > dbJob.updatedAt;
+}
+
 async function requireDebateOwnership(debateId: string, userId: string) {
   const result = await query<{ user_id: string; is_shared: boolean }>(
     "select user_id, is_shared from debates where id = $1",
@@ -53,7 +64,8 @@ export async function GET(
           mergedJobs.set(job.jobKey, toDebateSummaryJobLiveView(job));
         }
         for (const job of initial.summaryJobs) {
-          mergedJobs.set(job.key, job);
+          const current = mergedJobs.get(job.key);
+          if (shouldPreferLiveJob(current, job)) mergedJobs.set(job.key, job);
         }
         if (initial.progress) {
           controller.enqueue(encoder.encode(sseEvent("turn_start", { progress: initial.progress })));

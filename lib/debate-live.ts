@@ -42,6 +42,7 @@ export type DebateSummaryJob = {
   attemptCount: number | null;
   blockedReason: string | null;
   deadLetter: boolean;
+  leaseState: "active" | "stale" | "recovering" | null;
   updatedAt: string;
 };
 
@@ -103,11 +104,12 @@ export function emitDebateLiveEvent(debateId: string, event: DebateLiveEvent) {
 
 export function setDebateSummaryJob(
   debateId: string,
-  job: Omit<DebateSummaryJob, "updatedAt" | "attemptCount" | "blockedReason" | "deadLetter"> & {
+  job: Omit<DebateSummaryJob, "updatedAt" | "attemptCount" | "blockedReason" | "deadLetter" | "leaseState"> & {
     updatedAt?: string;
     attemptCount?: number | null;
     blockedReason?: string | null;
     deadLetter?: boolean;
+    leaseState?: DebateSummaryJob["leaseState"];
   }
 ) {
   const store = getStore();
@@ -117,6 +119,7 @@ export function setDebateSummaryJob(
     attemptCount: job.attemptCount ?? null,
     blockedReason: job.blockedReason ?? null,
     deadLetter: Boolean(job.deadLetter),
+    leaseState: job.leaseState ?? null,
     updatedAt: job.updatedAt ?? new Date().toISOString()
   };
   jobs.set(next.key, next);

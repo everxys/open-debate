@@ -8,6 +8,8 @@ export type DebateSummaryJobKind = "turn_summary" | "round_summary" | "facts_boa
 export const FACTS_BOARD_JOB_KEY = "facts:board";
 export const FACTS_BOARD_DEBOUNCE_MS = 8_000;
 export const SUMMARY_WORKER_NOTIFY_CHANNEL = "open_debate_summary_jobs";
+export const SUMMARY_JOB_LEASE_HEARTBEAT_MS = 15_000;
+export const SUMMARY_JOB_STALE_AFTER_MS = 45_000;
 
 export type DebateSummaryJobStatus =
   | "queued"
@@ -38,6 +40,8 @@ export type DebateSummaryJobRecord = {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  lockedWorkerStatus: string | null;
+  lockedWorkerLastHeartbeatAt: string | null;
 };
 
 export type DebateSummaryJobLiveView = {
@@ -53,6 +57,7 @@ export type DebateSummaryJobLiveView = {
   attemptCount: number | null;
   blockedReason: string | null;
   deadLetter: boolean;
+  leaseState: "active" | "stale" | "recovering" | null;
   updatedAt: string;
 };
 
@@ -76,6 +81,8 @@ type SummaryJobRow = {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  locked_worker_status?: string | null;
+  locked_worker_last_heartbeat_at?: string | null;
 };
 
 type SummaryWorkerRow = {
@@ -115,6 +122,15 @@ export type DebateSummaryQueueStat = {
   count: number;
 };
 
+export type RecoveredDebateSummaryJob = {
+  job: DebateSummaryJobRecord;
+  lockedBy: string | null;
+  lockedAt: string | null;
+  workerStatus: string | null;
+  workerHeartbeatAgeMs: number | null;
+  recoveredBecause: string;
+};
+
 function normalizeStringArray(value: unknown) {
   if (!Array.isArray(value)) return [] as string[];
   return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
@@ -145,13 +161,18 @@ function normalizeSummaryJobRow(row: SummaryJobRow): DebateSummaryJobRecord {
     lockedAt: row.locked_at ? String(row.locked_at) : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
-    completedAt: row.completed_at ? String(row.completed_at) : null
+    completedAt: row.completed_at ? String(row.completed_at) : null,
+    lockedWorkerStatus: row.locked_worker_status ? String(row.locked_worker_status) : null,
+    lockedWorkerLastHeartbeatAt: row.locked_worker_last_heartbeat_at ? String(row.locked_worker_last_heartbeat_at) : null
   };
 }
 
 function normalizeSummaryWorkerRow(row: SummaryWorkerRow): DebateSummaryWorkerHealth {
   const lastHeartbeatMs = new Date(row.last_heartbeat_at).getTime();
-  const stale = !Number.isFinite(lastHeartbeatMs) || Date.now() - lastHeartbeatMs > 30_000;
+  const stale =
+    String(row.status) === "stopped" ||
+    !Number.isFinite(lastHeartbeatMs) ||
+    Date.now() - lastHeartbeatMs > SUMMARY_JOB_STALE_AFTER_MS;
   return {
     id: String(row.id),
     mode: String(row.mode),
@@ -167,6 +188,39 @@ function normalizeSummaryWorkerRow(row: SummaryWorkerRow): DebateSummaryWorkerHe
     updatedAt: String(row.updated_at),
     stale
   };
+}
+
+function getRecoveredLeaseMeta(payload: Record<string, unknown>) {
+  const recoveredAt =
+    typeof payload.leaseRecoveredAt === "string" && payload.leaseRecoveredAt.trim() ? payload.leaseRecoveredAt : null;
+  const recoveredBecause =
+    typeof payload.leaseRecoveredBecause === "string" && payload.leaseRecoveredBecause.trim()
+      ? payload.leaseRecoveredBecause
+      : null;
+  return { recoveredAt, recoveredBecause };
+}
+
+function getWorkerHeartbeatAgeMs(lastHeartbeatAt: string | null) {
+  if (!lastHeartbeatAt) return null;
+  const timestamp = new Date(lastHeartbeatAt).getTime();
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.max(0, Date.now() - timestamp);
+}
+
+export function getSummaryJobLeaseState(job: DebateSummaryJobRecord): DebateSummaryJobLiveView["leaseState"] {
+  if (job.status === "running") {
+    if (!job.lockedBy || !job.lockedAt) return "stale";
+    if (job.lockedWorkerStatus === "stopped") return "stale";
+    if (!job.lockedWorkerStatus) return "active";
+    const heartbeatAgeMs = getWorkerHeartbeatAgeMs(job.lockedWorkerLastHeartbeatAt);
+    if (heartbeatAgeMs === null || heartbeatAgeMs > SUMMARY_JOB_STALE_AFTER_MS) return "stale";
+    return "active";
+  }
+  const { recoveredAt } = getRecoveredLeaseMeta(job.payload);
+  if ((job.status === "queued" || job.status === "retry_wait" || job.status === "blocked") && recoveredAt) {
+    return "recovering";
+  }
+  return null;
 }
 
 export function getSummaryJobRetryDelayMs(attemptCount: number) {
@@ -190,18 +244,21 @@ async function notifySummaryWorkerQueueChanged(debateId: string) {
 export async function listDebateSummaryJobs(debateId: string) {
   const db = await ensureDb();
   const result = await db.executeQuery<SummaryJobRow>(sql`
-    select *
-      from debate_summary_jobs
-     where debate_id = ${debateId}
+    select j.*,
+           w.status as locked_worker_status,
+           w.last_heartbeat_at as locked_worker_last_heartbeat_at
+      from debate_summary_jobs j
+      left join debate_summary_workers w on w.id = j.locked_by
+     where j.debate_id = ${debateId}
      order by
-       case kind
+       case j.kind
          when 'turn_summary' then 1
          when 'round_summary' then 2
          else 3
        end,
-       coalesce(round_number, 0) asc,
-       coalesce(turn_number, 0) asc,
-       created_at asc
+       coalesce(j.round_number, 0) asc,
+       coalesce(j.turn_number, 0) asc,
+       j.created_at asc
   `.compile(db));
   return result.rows.map(normalizeSummaryJobRow);
 }
@@ -209,19 +266,22 @@ export async function listDebateSummaryJobs(debateId: string) {
 export async function listActiveDebateSummaryJobs(debateId: string) {
   const db = await ensureDb();
   const result = await db.executeQuery<SummaryJobRow>(sql`
-    select *
-      from debate_summary_jobs
-     where debate_id = ${debateId}
-       and status <> 'completed'
+    select j.*,
+           w.status as locked_worker_status,
+           w.last_heartbeat_at as locked_worker_last_heartbeat_at
+      from debate_summary_jobs j
+      left join debate_summary_workers w on w.id = j.locked_by
+     where j.debate_id = ${debateId}
+       and j.status <> 'completed'
      order by
-       case kind
+       case j.kind
          when 'turn_summary' then 1
          when 'round_summary' then 2
          else 3
        end,
-       coalesce(round_number, 0) asc,
-       coalesce(turn_number, 0) asc,
-       created_at asc
+       coalesce(j.round_number, 0) asc,
+       coalesce(j.turn_number, 0) asc,
+       j.created_at asc
   `.compile(db));
   return result.rows.map(normalizeSummaryJobRow);
 }
@@ -231,6 +291,13 @@ export function toDebateSummaryJobLiveView(
   message?: string | null,
   blockedReason?: string | null
 ): DebateSummaryJobLiveView {
+  const leaseState = getSummaryJobLeaseState(job);
+  const derivedMessage =
+    leaseState === "stale"
+      ? "总结器异常中断，等待自动恢复"
+      : leaseState === "recovering"
+        ? "已从异常中断中恢复，等待重新执行"
+        : message ?? null;
   return {
     key: job.jobKey,
     kind: job.kind,
@@ -243,12 +310,13 @@ export function toDebateSummaryJobLiveView(
           : "结构化事实板",
     turnNumber: job.turnNumber,
     roundNumber: job.roundNumber,
-    message: message ?? null,
+    message: derivedMessage,
     errorReason: blockedReason ?? job.lastError,
     retryAt: job.nextRetryAt,
     attemptCount: job.attemptCount,
     blockedReason: blockedReason ?? (job.status === "blocked" ? job.lastError : null),
     deadLetter: job.status === "dead_letter",
+    leaseState,
     updatedAt: job.updatedAt
   };
 }
@@ -275,6 +343,9 @@ export async function enqueueDebateSummaryJob(input: {
   runAfter?: string | null;
   force?: boolean;
 }) {
+  if (input.kind === "facts_board") {
+    await recoverStaleDebateSummaryJobs({ debateId: input.debateId });
+  }
   const now = new Date().toISOString();
   const payloadJson = JSON.stringify(input.payload ?? {});
   const dependsOnJson = JSON.stringify(input.dependsOnKeys ?? []);
@@ -469,22 +540,89 @@ export async function failDebateSummaryJob(id: string, errorMessage: string) {
   return normalizeSummaryJobRow(result.rows[0]);
 }
 
-export async function recoverStaleDebateSummaryJobs() {
+export async function recoverStaleDebateSummaryJobs(options?: { debateId?: string | null; workerId?: string | null }) {
   const now = new Date().toISOString();
   const db = await ensureDb();
-  const result = await db.executeQuery<SummaryJobRow>(sql`
-    update debate_summary_jobs
-       set status = 'queued',
-           locked_by = null,
-           locked_at = null,
-           updated_at = ${now},
-           last_error = coalesce(last_error, 'stale_running_recovered')
-     where status = 'running'
-       and locked_at is not null
-       and locked_at < now() - interval '5 minutes'
-     returning *
+  const staleSeconds = Math.ceil(SUMMARY_JOB_STALE_AFTER_MS / 1000);
+  const candidates = await db.executeQuery<
+    SummaryJobRow & {
+      recovered_because: string;
+      worker_status: string | null;
+      worker_last_heartbeat_at: string | null;
+    }
+  >(sql`
+    select j.*,
+           w.status as worker_status,
+           w.last_heartbeat_at as worker_last_heartbeat_at,
+           case
+             when j.locked_by is null then 'missing_worker_lock'
+             when j.locked_at is null then 'missing_lock_timestamp'
+             when w.id is null then 'worker_missing'
+             when w.status = 'stopped' then 'worker_stopped'
+             when w.last_heartbeat_at < now() - (${staleSeconds} * interval '1 second') then 'worker_heartbeat_stale'
+             when j.locked_at < now() - (${staleSeconds} * interval '1 second') then 'job_lock_stale'
+             else null
+           end as recovered_because
+      from debate_summary_jobs j
+      left join debate_summary_workers w on w.id = j.locked_by
+     where j.status = 'running'
+       and (${options?.debateId ?? null}::uuid is null or j.debate_id = ${options?.debateId ?? null}::uuid)
+       and (${options?.workerId ?? null}::text is null or j.locked_by = ${options?.workerId ?? null}::text)
+       and (
+         j.locked_by is null
+         or j.locked_at is null
+         or w.id is null
+         or w.status = 'stopped'
+         or w.last_heartbeat_at < now() - (${staleSeconds} * interval '1 second')
+         or j.locked_at < now() - (${staleSeconds} * interval '1 second')
+       )
   `.compile(db));
-  return result.rows.map(normalizeSummaryJobRow);
+
+  const recovered: RecoveredDebateSummaryJob[] = [];
+  for (const row of candidates.rows) {
+    const recoveredBecause = String(row.recovered_because ?? "").trim();
+    if (!recoveredBecause) continue;
+    const previousLockedBy = row.locked_by ? String(row.locked_by) : null;
+    const previousLockedAt = row.locked_at ? String(row.locked_at) : null;
+    const workerStatus = row.worker_status ? String(row.worker_status) : null;
+    const workerLastHeartbeatAt = row.worker_last_heartbeat_at ? String(row.worker_last_heartbeat_at) : null;
+    const payload = normalizePayload(row.payload_json);
+    const recoveredPayload = JSON.stringify({
+      ...payload,
+      leaseRecoveredAt: now,
+      leaseRecoveredBecause: recoveredBecause,
+      leaseRecoveredFromWorkerId: previousLockedBy
+    });
+    const result = await db.executeQuery<SummaryJobRow>(sql`
+      update debate_summary_jobs
+         set status = 'queued',
+             locked_by = null,
+             locked_at = null,
+             run_after = null,
+             updated_at = ${now},
+             payload_json = ${recoveredPayload}::jsonb
+       where id = ${row.id}
+         and status = 'running'
+         and locked_by is not distinct from ${row.locked_by ?? null}
+         and locked_at is not distinct from ${row.locked_at ?? null}
+       returning *
+    `.compile(db));
+    if (result.rows.length <= 0) continue;
+    recovered.push({
+      job: normalizeSummaryJobRow(result.rows[0]),
+      lockedBy: previousLockedBy,
+      lockedAt: previousLockedAt,
+      workerStatus,
+      workerHeartbeatAgeMs: getWorkerHeartbeatAgeMs(workerLastHeartbeatAt),
+      recoveredBecause
+    });
+  }
+  await Promise.all(
+    Array.from(new Set(recovered.map((item) => item.job.debateId))).map((debateId) =>
+      notifySummaryWorkerQueueChanged(debateId).catch(() => null)
+    )
+  );
+  return recovered;
 }
 
 export async function heartbeatRunningSummaryJobLock(input: { jobId: string; workerId: string }) {
@@ -540,6 +678,7 @@ export async function claimRunnableDebateSummaryJobs(input: {
   maxConcurrentPerDebate?: number;
 }) {
   const db = await ensureDb();
+  const staleSeconds = Math.ceil(SUMMARY_JOB_STALE_AFTER_MS / 1000);
   return await db.transaction().execute(async (trx) => {
     const result = await trx.executeQuery<SummaryJobRow>(sql`
       with candidates as (
@@ -550,7 +689,21 @@ export async function claimRunnableDebateSummaryJobs(input: {
            (j.status = 'queued' and (j.run_after is null or j.run_after <= now()))
            or (j.status = 'retry_wait' and (j.next_retry_at is null or j.next_retry_at <= now()))
            or (j.status = 'blocked' and j.updated_at < now() - interval '30 seconds')
-           or (j.status = 'running' and j.locked_at is not null and j.locked_at < now() - interval '5 minutes')
+           or (
+             j.status = 'running'
+             and (
+               j.locked_by is null
+               or j.locked_at is null
+               or j.locked_at < now() - (${staleSeconds} * interval '1 second')
+               or not exists (
+                 select 1
+                   from debate_summary_workers w
+                  where w.id = j.locked_by
+                    and w.status <> 'stopped'
+                    and w.last_heartbeat_at >= now() - (${staleSeconds} * interval '1 second')
+               )
+             )
+           )
          )
            and not exists (
              select 1
@@ -563,10 +716,19 @@ export async function claimRunnableDebateSummaryJobs(input: {
            and (
              select count(*)
                from debate_summary_jobs r
-              where r.debate_id = j.debate_id
+             where r.debate_id = j.debate_id
                 and r.status = 'running'
                 and r.id <> j.id
-                and (r.locked_at is null or r.locked_at >= now() - interval '5 minutes')
+                and r.locked_by is not null
+                and r.locked_at is not null
+                and r.locked_at >= now() - (${staleSeconds} * interval '1 second')
+                and exists (
+                  select 1
+                    from debate_summary_workers w
+                   where w.id = r.locked_by
+                     and w.status <> 'stopped'
+                     and w.last_heartbeat_at >= now() - (${staleSeconds} * interval '1 second')
+                )
            ) < ${Math.max(1, input.maxConcurrentPerDebate ?? 1)}
          order by
            case
@@ -597,6 +759,7 @@ export async function claimRunnableDebateSummaryJobs(input: {
          set status = 'running',
              locked_by = ${input.workerId},
              locked_at = now(),
+             payload_json = coalesce(j.payload_json, '{}'::jsonb) - 'leaseRecoveredAt' - 'leaseRecoveredBecause' - 'leaseRecoveredFromWorkerId',
              updated_at = now()
         from candidates c
        where j.id = c.id
@@ -716,6 +879,7 @@ export async function markSummaryWorkerStopped(workerId: string) {
   const result = await db.executeQuery<SummaryWorkerRow>(sql`
     update debate_summary_workers
        set status = 'stopped',
+           last_heartbeat_at = ${now},
            current_job_id = null,
            current_debate_id = null,
            current_job_key = null,

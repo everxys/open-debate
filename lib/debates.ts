@@ -9,7 +9,7 @@ import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
 import { runDebate } from "@/lib/runtime";
 import { listStrategyFileAccessRules, mergeWorkflowConfigWithFileAccessRules } from "@/lib/strategies";
 import type { DebateRecord } from "@/lib/types";
-import { createDebateSchema, updateDebateQuestionSchema, updateDebateSharingSchema } from "@/lib/validation";
+import { createDebateSchema, ignoreDebateRuntimeErrorSchema, updateDebateQuestionSchema, updateDebateSharingSchema } from "@/lib/validation";
 import {
   createDefaultDebateWorkflowConfig,
   type DebateWorkflowConfig,
@@ -64,8 +64,6 @@ function buildFileActivityDiagnosticLabels(input: {
   return labels;
 }
 
-const DEFAULT_WORKFLOW_JSON = JSON.stringify(createDefaultDebateWorkflowConfig(), null, 2);
-
 function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
   return {
     id: String(row.id),
@@ -87,12 +85,21 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
     runtimeNoticeAt: (row.runtime_notice_at as string | null) ?? null,
     lastErrorCode: (row.last_error_code as string | null) ?? null,
     lastErrorMessage: (row.last_error_message as string | null) ?? null,
+    ignoredRuntimeErrorSignature: (row.ignored_runtime_error_signature as string | null) ?? null,
+    ignoredRuntimeErrorAt: (row.ignored_runtime_error_at as string | null) ?? null,
     startedAt: (row.started_at as string | null) ?? null,
     finishedAt: (row.finished_at as string | null) ?? null,
     stoppedReason: (row.stopped_reason as string | null) ?? null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
+}
+
+function buildRuntimeErrorSignature(code: string | null | undefined, message: string | null | undefined) {
+  const normalizedCode = typeof code === "string" ? code.trim() : "";
+  const normalizedMessage = typeof message === "string" ? message.trim() : "";
+  const signature = [normalizedCode, normalizedMessage].filter(Boolean).join(" · ");
+  return signature || null;
 }
 
 function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<ReturnType<typeof normalizeDebateWorkflow>>) {
@@ -349,6 +356,8 @@ async function insertPendingDebate(input: {
       runtime_notice_at: null,
       last_error_code: null,
       last_error_message: null,
+      ignored_runtime_error_signature: null,
+      ignored_runtime_error_at: null,
       started_at: null,
       finished_at: null,
       stopped_reason: null,
@@ -382,26 +391,6 @@ async function insertDebateAgent(input: {
     .executeTakeFirstOrThrow();
 }
 
-async function ensureDefaultDebateWorkflow(debateId: string, now: string) {
-  // Ensure workflow.json exists so debate flow is deterministic.
-  try {
-    const db = await ensureDb();
-    await db
-      .insertInto("debate_files")
-      .values({
-        debate_id: debateId,
-        path: "workflow.json",
-        content: DEFAULT_WORKFLOW_JSON,
-        created_at: now,
-        updated_at: now
-      })
-      .onConflict((oc) => oc.columns(["debate_id", "path"]).doNothing())
-      .execute();
-  } catch {
-    // backward-compat: older DBs may not have debate_files yet.
-  }
-}
-
 async function validateOwnedAgents(userId: string, agentIds: string[]) {
   const db = await ensureDb();
   const agents = await db
@@ -409,10 +398,11 @@ async function validateOwnedAgents(userId: string, agentIds: string[]) {
     .select("id")
     .where("user_id", "=", userId)
     .where("deleted_at", "is", null)
+    .where("is_active", "=", true)
     .where("id", "in", agentIds)
     .execute();
   if (agents.length !== agentIds.length) {
-    throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid");
+    throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid or disabled");
   }
 }
 
@@ -644,8 +634,6 @@ async function createDebateWithAgents(
       now
     });
   }
-
-  await ensureDefaultDebateWorkflow(debate.id, now);
   return toListItem(debate);
 }
 
@@ -865,6 +853,8 @@ export async function getDebateDetail(id: string) {
     workflowPhaseRound: debate.workflowPhaseRound,
     lastErrorCode: debate.lastErrorCode,
     lastErrorMessage: debate.lastErrorMessage,
+    ignoredRuntimeErrorSignature: debate.ignoredRuntimeErrorSignature,
+    ignoredRuntimeErrorAt: debate.ignoredRuntimeErrorAt,
     stoppedReason: debate.stoppedReason,
     agents
   };
@@ -1096,6 +1086,43 @@ export async function updateDebateSharing(id: string, input: unknown) {
     }
     throw error;
   }
+}
+
+export async function ignoreDebateRuntimeError(id: string, input: unknown) {
+  const session = await requireSessionUser();
+  ignoreDebateRuntimeErrorSchema.parse(input);
+  const db = await ensureDb();
+  const current = await db
+    .selectFrom("debates")
+    .select(["last_error_code", "last_error_message"])
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .executeTakeFirst();
+  if (!current) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
+
+  const signature = buildRuntimeErrorSignature(
+    current.last_error_code ? String(current.last_error_code) : null,
+    current.last_error_message ? String(current.last_error_message) : null
+  );
+  if (!signature) {
+    return getDebateDetail(id);
+  }
+
+  const now = new Date().toISOString();
+  await db
+    .updateTable("debates")
+    .set({
+      ignored_runtime_error_signature: signature,
+      ignored_runtime_error_at: now,
+      updated_at: now
+    })
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .executeTakeFirst();
+
+  return getDebateDetail(id);
 }
 
 export async function deleteDebate(id: string) {
@@ -2228,6 +2255,8 @@ export async function startDebate(id: string) {
       runtime_notice_at: null,
       last_error_code: null,
       last_error_message: null,
+      ignored_runtime_error_signature: null,
+      ignored_runtime_error_at: null,
       updated_at: now
     })
     .where("id", "=", id)
@@ -2321,6 +2350,8 @@ export async function resumeDebate(id: string) {
       runtime_notice_kind: null,
       runtime_notice_message: null,
       runtime_notice_at: null,
+      ignored_runtime_error_signature: null,
+      ignored_runtime_error_at: null,
       updated_at: now
     })
     .where("id", "=", id)
@@ -2348,6 +2379,10 @@ export async function repairDebate(id: string) {
       runtime_notice_kind: "interrupted",
       runtime_notice_message: "该辩论已从 failed 修复为 paused；请确认状态后手动恢复运行",
       runtime_notice_at: now,
+      last_error_code: null,
+      last_error_message: null,
+      ignored_runtime_error_signature: null,
+      ignored_runtime_error_at: null,
       updated_at: now
     })
     .where("id", "=", id)

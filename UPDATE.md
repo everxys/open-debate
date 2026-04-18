@@ -1,3 +1,8 @@
+## 2026-04-18
+
+- 辩论详情页的发言列表/正文 GET 请求新增 XHR 兜底，并对 debate id 做 URL 编码；当浏览器扩展拦截 `fetch` 导致 `Failed to fetch` 时，会自动重试一次，减少打开发言正文时的控制台 TypeError。
+- “忽略失败原因”改为直接依赖数据库列；移除了业务代码里的自动补列逻辑，并为本地 `debates` 表手动补上 `ignored_runtime_error_signature` / `ignored_runtime_error_at`。
+
 ## 2026-04-13
 
 - 辩论列表页的“清空已停止辩论”现在会同时纳入 `failed` 状态：后端清理条件已扩展为 `status in ('stopped', 'failed')`，前端统计与确认文案也同步改成“已停止/失败辩论”，避免失败辩论留在批量清理之外。
@@ -123,6 +128,7 @@
 - 2026-04-12: 策略页切换高亮改为 btn-primary 蓝色，并放大角色编辑区与提示词输入框高度。
 - 2026-04-12: 策略页三块内容区统一最小高度，保持视觉一致。
 - 2026-04-12: 策略页三块内容区统一固定视口高度，并让文件区与角色编辑框撑满面板。
+- 2026-04-18: 辩论状态页“失败原因”从卡片内双滚动改为“摘要卡 + 原始详情弹层”：主界面只显示提炼后的错误摘要与错误码，原始 payload 改到独立弹层里单滚动查看并支持复制，避免嵌套滚动条和状态区被长日志挤坏。
 - 2026-04-18: AI 配置页新增“最近连通性校验”状态；保存配置后测试成功/失败都会持久化记录，列表与编辑区可见，且当 Provider / 模型 / Base URL / API Key 变更时会自动重置为未校验。
 - 2026-04-18: 为 `next dev` 显式改用 webpack 内存缓存，避免 Windows 下 `PackFileCacheStrategy` 写 `.next/cache/webpack/*.pack` 时触发 `Failed to allocate memory` / `Caching failed for pack`。
 - 2026-04-12: 策略页文件区容器改为内滚动，避免文件树溢出边框。
@@ -165,3 +171,6 @@
 - 2026-04-13: 总结进程升级为独立可观测 worker：新增 `npm run worker:summary` 常驻消费 `debate_summary_jobs`，队列支持 `priority/run_after`、worker 心跳与 stale recovery；facts board 入队合并为固定 `facts:board` 并带 debounce，避免每回/每轮重复堆积，同时新增 worker health API 与辩论页总结任务中的 worker 在线状态展示。
 - 2026-04-13: `npm run dev` 现在会同时启动 Next.js dev server 与独立 summary worker，并在 Next 进程中禁用嵌入式 summary worker，避免开发环境双 worker 抢任务。
 - 2026-04-13: 继续优化 summary worker：入队后通过 Postgres `LISTEN/NOTIFY` 唤醒 worker，长 AI 总结期间定时刷新 job lease 与 worker heartbeat，避免长任务被误判 stale；同时为 active/running 总结队列补充 partial indexes，降低队列表增长后的扫描成本。
+- 2026-04-18: 总结器队列改为短租约自愈：summary job lease 心跳收紧到 15s、stale 判定改为 45s，并结合 `debate_summary_workers` 的 `status/last_heartbeat_at` 回收失活锁；`facts_board` 入队前会先回收同辩论的 stale 运行任务，worker 停止时也会主动释放自己名下遗留锁。辩论页“总结任务”新增 `leaseState` 展示，可把 stale `running` 明确显示为“异常中断，等待自动恢复”，不再把卡死任务误看成一直运行或全部失败。
+- 2026-04-18: “新增辩论”直建入口收紧为裸辩论模式：页面只显示已启用的 AI，隐藏“全场共享事实板”开关，并将创建说明改为“不注入 workflow 或预置文件”；后端直建辩论不再自动写入默认 `workflow.json`，同时新增硬校验，禁用中的 AI 不允许被选入辩论创建。
+- 2026-04-18: 修复运行中强停进程后的重复发言问题：`runDebate` 启动时会先对账 `debate_turns` 与 `debates.current_turn`，若检测到“本回合已落盘但 current_turn 尚未推进”，会自动补齐轮次、token、共识与阶段快照，再继续运行，避免同一席位在服务恢复后把刚才那回重新生成一遍。

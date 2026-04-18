@@ -11,6 +11,7 @@ import {
   heartbeatRunningSummaryJobLock,
   markSummaryWorkerStopped,
   recoverStaleDebateSummaryJobs,
+  SUMMARY_JOB_LEASE_HEARTBEAT_MS,
   SUMMARY_WORKER_NOTIFY_CHANNEL,
   upsertSummaryWorkerHeartbeat,
   type DebateSummaryJobRecord
@@ -24,8 +25,6 @@ type SummaryWorkerTickInput = {
   unrefTimer: boolean;
   reschedule: boolean;
 };
-
-const SUMMARY_JOB_LEASE_HEARTBEAT_MS = 60_000;
 
 const workerGlobal = globalThis as typeof globalThis & {
   openDebateSummaryWorkerPromise?: Promise<{ workerId: string }>;
@@ -52,6 +51,23 @@ function flattenErrorCodes(error: unknown, into: Set<string>) {
     const cause = (error as { cause?: unknown }).cause;
     if (cause) flattenErrorCodes(cause, into);
   }
+}
+
+async function logRecoveredSummaryJobs(reason: string, recovered: Awaited<ReturnType<typeof recoverStaleDebateSummaryJobs>>) {
+  if (recovered.length <= 0) return;
+  await logRuntimeEvent("warn", "summary worker recovered stale jobs", {
+    reason,
+    recovered: recovered.map((item) => ({
+      debateId: item.job.debateId,
+      jobId: item.job.id,
+      jobKey: item.job.jobKey,
+      lockedBy: item.lockedBy,
+      lockedAt: item.lockedAt,
+      workerStatus: item.workerStatus,
+      workerHeartbeatAgeMs: item.workerHeartbeatAgeMs,
+      recoveredBecause: item.recoveredBecause
+    }))
+  });
 }
 
 function isDatabaseConnectionError(error: unknown) {
@@ -181,12 +197,7 @@ async function tickSummaryJobWorker(input: SummaryWorkerTickInput) {
 
     const recovered = await recoverStaleDebateSummaryJobs();
     workerGlobal.openDebateSummaryWorkerFailureCount = 0;
-    if (recovered.length > 0) {
-      await logRuntimeEvent("warn", "summary worker recovered stale jobs", {
-        reason: input.reason,
-        recovered: recovered.map((job) => ({ debateId: job.debateId, jobKey: job.jobKey }))
-      });
-    }
+    await logRecoveredSummaryJobs(input.reason, recovered);
 
     const claimed = await claimRunnableDebateSummaryJobs({
       workerId: input.workerId,
@@ -288,6 +299,8 @@ export async function runSummaryJobWorkerOnce(options?: { reason?: string; mode?
     reschedule: false
   });
   await markSummaryWorkerStopped(workerId).catch(() => null);
+  const recovered = await recoverStaleDebateSummaryJobs({ workerId });
+  await logRecoveredSummaryJobs("worker_once_stop", recovered);
   return { workerId };
 }
 
@@ -298,7 +311,10 @@ export async function stopSummaryJobWorkerLoop() {
     workerGlobal.openDebateSummaryWorkerTimer = null;
   }
   if (workerGlobal.openDebateSummaryWorkerId) {
-    await markSummaryWorkerStopped(workerGlobal.openDebateSummaryWorkerId).catch(() => null);
+    const workerId = workerGlobal.openDebateSummaryWorkerId;
+    await markSummaryWorkerStopped(workerId).catch(() => null);
+    const recovered = await recoverStaleDebateSummaryJobs({ workerId });
+    await logRecoveredSummaryJobs("worker_stop", recovered);
   }
   const wakeClient = workerGlobal.openDebateSummaryWorkerWakeClient;
   workerGlobal.openDebateSummaryWorkerWakeClient = null;

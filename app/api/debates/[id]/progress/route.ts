@@ -6,6 +6,17 @@ import { getSummaryWorkerHealthSnapshot, listActiveDebateSummaryJobs, toDebateSu
 
 export const runtime = "nodejs";
 
+function shouldPreferLiveJob(
+  dbJob: ReturnType<typeof toDebateSummaryJobLiveView> | undefined,
+  liveJob: ReturnType<typeof toDebateSummaryJobLiveView>
+) {
+  if (!dbJob) return true;
+  if ((dbJob.leaseState === "stale" || dbJob.leaseState === "recovering") && dbJob.status === liveJob.status) {
+    return false;
+  }
+  return liveJob.updatedAt > dbJob.updatedAt;
+}
+
 export async function GET(
   _request: Request,
   context: { params: Promise<{ id: string }> }
@@ -45,7 +56,8 @@ export async function GET(
       mergedJobs.set(job.jobKey, toDebateSummaryJobLiveView(job));
     }
     for (const job of live.summaryJobs) {
-      mergedJobs.set(job.key, job);
+      const current = mergedJobs.get(job.key);
+      if (shouldPreferLiveJob(current, job)) mergedJobs.set(job.key, job);
     }
     const workerHealth = await getSummaryWorkerHealthSnapshot().catch(() => ({ workers: [], queue: [] }));
 

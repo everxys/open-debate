@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 
@@ -11,6 +11,7 @@ type Agent = {
   name: string;
   provider: string;
   model: string;
+  isActive?: boolean;
 };
 
 const QUESTION_HISTORY_STORAGE_KEY = "open-debate:new-debate-question-history";
@@ -19,8 +20,7 @@ const QUESTION_HISTORY_LIMIT = 12;
 const initialForm = {
   question: "",
   maxTurns: 10,
-  unlimitedTurns: false,
-  enableSharedFacts: true
+  unlimitedTurns: false
 };
 
 function summarizeQuestionHistoryItem(value: string) {
@@ -61,6 +61,17 @@ export default function NewDebatePage() {
   useEffect(() => {
     void loadAgents();
   }, [loadAgents]);
+
+  const activeAgents = useMemo(() => agents.filter((agent) => agent.isActive !== false), [agents]);
+  const activeAgentIds = useMemo(() => activeAgents.map((agent) => agent.id), [activeAgents]);
+
+  useEffect(() => {
+    const activeIdSet = new Set(activeAgentIds);
+    setSelectedAgentIds((current) => {
+      const next = current.filter((id) => activeIdSet.has(id));
+      return next.length === current.length ? current : next;
+    });
+  }, [activeAgentIds]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -103,7 +114,7 @@ export default function NewDebatePage() {
         body: JSON.stringify({
           question: form.question,
           maxTurns: form.unlimitedTurns ? 0 : form.maxTurns,
-          enableSharedFacts: form.enableSharedFacts,
+          enableSharedFacts: false,
           agentIds: selectedAgentIds
         })
       });
@@ -185,7 +196,7 @@ export default function NewDebatePage() {
         <div className="row" style={{ justifyContent: "space-between" }}>
           <div>
             <h2 style={{ margin: 0 }}>新增辩论</h2>
-            <div className="muted">手动选择至少 2 个 AI 直接创建辩论；如需使用策略，请先创建工作台。</div>
+            <div className="muted">这是裸辩论模式：只给问题与启用中的 AI，不注入 workflow 或预置文件；如需策略，请先创建工作台。</div>
           </div>
           <div className="row" style={{ gap: 8 }}>
             <Link className="btn" href="/workspaces">
@@ -302,16 +313,7 @@ export default function NewDebatePage() {
               }))
             }
           />
-          <span>无限轮次（直到达成共识或手动终止）</span>
-        </label>
-
-        <label className="row" style={{ alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            checked={form.enableSharedFacts}
-            onChange={(event) => setForm({ ...form, enableSharedFacts: event.target.checked })}
-          />
-          <span>开启全场共享事实板（会注入后续上下文）</span>
+          <span>无限轮次（直到手动终止）</span>
         </label>
 
         <div className="stack">
@@ -319,7 +321,7 @@ export default function NewDebatePage() {
             <label style={{ fontWeight: 600 }}>参与 AI（已选 {selectedAgentIds.length}）</label>
             <span className="muted">至少选择 2 个</span>
           </div>
-          {agents.map((agent) => (
+          {activeAgents.map((agent) => (
             <label key={agent.id} className="row">
               <input checked={selectedAgentIds.includes(agent.id)} type="checkbox" onChange={() => toggleAgent(agent.id)} />
               <span>
@@ -327,9 +329,9 @@ export default function NewDebatePage() {
               </span>
             </label>
           ))}
-          {agents.length === 0 ? (
+          {activeAgents.length === 0 ? (
             <div className="muted">
-              还没有 AI 配置。先去 <Link href="/agents">AI 配置</Link> 创建。
+              还没有已启用的 AI 配置。先去 <Link href="/agents">AI 配置</Link> 创建或启用。
             </div>
           ) : null}
         </div>

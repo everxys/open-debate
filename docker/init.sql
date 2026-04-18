@@ -102,6 +102,8 @@ create table if not exists debates (
   runtime_notice_at timestamptz null,
   last_error_code text null,
   last_error_message text null,
+  ignored_runtime_error_signature text null,
+  ignored_runtime_error_at timestamptz null,
   started_at timestamptz null,
   finished_at timestamptz null,
   stopped_reason text null,
