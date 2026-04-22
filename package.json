@@ -9,7 +9,9 @@
     "worker:summary": "tsx scripts/summary-worker.ts",
     "test": "node --import tsx --test tests/**/*.test.ts",
     "lint": "next lint",
-    "migrate:workflow-phase-1-5": "node scripts/migrate-workflow-phase-1-5.cjs"
+    "migrate:workflow-phase-1-5": "node scripts/migrate-workflow-phase-1-5.cjs",
+    "repair:duplicate-turns": "node scripts/repair-duplicate-debate-turns.cjs",
+    "repair:idea-bank-shadows": "node scripts/repair-idea-bank-shadows.cjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

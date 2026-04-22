@@ -161,10 +161,12 @@ export function buildFileToolInstructions(input: {
     "- debate_files_write: write a debate-level file (use for final deliverables or shared working files).",
     "- debate_files_read: read an allowed debate-level shared file when the current context policy permits it.",
     `  - Allowed paths: ${allowedPathsText} (Markdown preferred).`,
-    "  - outputs/* may omit mode and default to replace.",
+    "  - If workflow-specific source files are listed, they are the source of truth. Do not create same-named shadow copies under outputs/.",
+    "  - Non-final allowed files may omit mode and default to replace.",
     "  - final/* must use an explicit safe mode. Use replace only for full-file rewrites, append only for intentional tail appends, and section_merge for updating one Markdown heading section.",
     "  - Before any write on final/*, call debate_files_stat or debate_files_read and pass baseVersion/baseUpdatedAt back into debate_files_write.",
-    "  - For section_merge, read the file first and pass targetHeading plus replacement content that starts with the same Markdown heading."
+    "  - For section_merge, read the file first and pass targetHeading plus replacement content that starts with the same Markdown heading.",
+    "  - After debate_files_write, treat the tool result path/version/size as the only proof of persistence. Never claim a file was written if the tool returned an error."
   ];
 
   if ((input.contextAccessLines?.length ?? 0) > 0) {
@@ -286,7 +288,7 @@ export function buildOpenAiTools(input: { enableVoting: boolean; allowedOutputPa
       type: "function",
       function: {
         name: "debate_files_write",
-        description: `Write a debate-level output file (final deliverables). Allowed paths: ${allowedPathsText}. outputs/* default to replace. final/* require an explicit mode and safe write semantics.`,
+        description: `Write a debate-level output file. Allowed paths: ${allowedPathsText}. Non-final allowed files default to replace. final/* require an explicit mode and safe write semantics. Use listed workflow-specific source files as source of truth; do not create same-named outputs copies.`,
         parameters: {
           type: "object",
           properties: {
@@ -398,7 +400,7 @@ export function buildAnthropicTools(input: { enableVoting: boolean; allowedOutpu
     },
     {
       name: "debate_files_write",
-      description: `Write a debate-level output file (final deliverables). Allowed paths: ${allowedPathsText}. outputs/* default to replace. final/* require an explicit mode and safe write semantics.`,
+      description: `Write a debate-level output file. Allowed paths: ${allowedPathsText}. Non-final allowed files default to replace. final/* require an explicit mode and safe write semantics. Use listed workflow-specific source files as source of truth; do not create same-named outputs copies.`,
       input_schema: {
         type: "object",
         properties: {

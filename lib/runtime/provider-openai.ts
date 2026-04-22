@@ -32,6 +32,29 @@ function normalizeOpenAiChatBody(body: Record<string, unknown>) {
   return { ...body, messages };
 }
 
+function toOpenAiApiError(response: Response, payload: unknown) {
+  const payloadText = JSON.stringify(payload).slice(0, 400);
+  const errorObject =
+    payload && typeof payload === "object" && "error" in payload && payload.error && typeof payload.error === "object"
+      ? (payload.error as Record<string, unknown>)
+      : null;
+  const providerCode = typeof errorObject?.code === "string" ? errorObject.code : "";
+  const providerType = typeof errorObject?.type === "string" ? errorObject.type : "";
+  const providerMessage = typeof errorObject?.message === "string" ? errorObject.message : "";
+  const normalizedCode = `${providerCode} ${providerType} ${providerMessage}`.toLowerCase();
+  const looksInvalidKey =
+    response.status === 401 ||
+    normalizedCode.includes("invalid_api_key") ||
+    normalizedCode.includes("invalid access token") ||
+    normalizedCode.includes("token expired") ||
+    normalizedCode.includes("incorrect api key") ||
+    normalizedCode.includes("unauthorized");
+  if (looksInvalidKey) {
+    return new AppError("AI_INVALID_API_KEY", 401, payloadText);
+  }
+  return new AppError("AI_API_ERROR", 502, payloadText);
+}
+
 async function readSseJsonLines(response: Response, onData: (data: string) => void) {
   if (!response.body) return;
   const reader = response.body.getReader();
@@ -94,7 +117,7 @@ export async function openAiChatStream(args: {
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    throw new AppError("AI_API_ERROR", 502, JSON.stringify(payload).slice(0, 400));
+    throw toOpenAiApiError(response, payload);
   }
 
   await readSseJsonLines(response, (data) => {
@@ -169,7 +192,7 @@ export async function openAiChatOnce(args: { url: string; apiKey: string; body: 
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new AppError("AI_API_ERROR", 502, JSON.stringify(payload).slice(0, 400));
+    throw toOpenAiApiError(response, payload);
   }
 
   const message = payload?.choices?.[0]?.message ?? null;
@@ -208,7 +231,7 @@ export async function openAiUsageProbe(args: { url: string; apiKey: string; body
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new AppError("AI_API_ERROR", 502, JSON.stringify(payload).slice(0, 400));
+    throw toOpenAiApiError(response, payload);
   }
   return payload?.usage ?? null;
 }

@@ -113,6 +113,7 @@ export const updateDebateQuestionSchema = z.object({ question: debateCommonSchem
 
 export const updateDebateSharingSchema = z.object({ isShared: z.boolean() });
 export const ignoreDebateRuntimeErrorSchema = z.object({ ignoreRuntimeError: z.literal(true) });
+export const updateDebateAutoRecoverSchema = z.object({ autoRecoverOnceOnFailed: z.boolean() });
 
 // === Workspace schemas ===
 

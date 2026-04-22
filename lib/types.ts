@@ -66,6 +66,8 @@ export type DebateRecord = {
   lastErrorMessage: string | null;
   ignoredRuntimeErrorSignature: string | null;
   ignoredRuntimeErrorAt: string | null;
+  autoRecoverOnceOnFailed: boolean;
+  autoRecoverOnceUsedAt: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   stoppedReason: string | null;

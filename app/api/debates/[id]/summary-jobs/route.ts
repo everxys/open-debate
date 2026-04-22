@@ -8,7 +8,7 @@ import {
   retryFailedDebateSummaryJobs
 } from "@/lib/summary-jobs";
 import { getRoundSummaryPath, getTurnSummaryPath } from "@/lib/runtime-main";
-import { loadDebateWorkflow } from "@/lib/runtime/workflow-phase";
+import { listClosedOfficialVoteRounds, loadDebateWorkflow, mapActualRoundToSpeechRoundIndex } from "@/lib/runtime/workflow-phase";
 import { readDebateFile } from "@/lib/runtime/file-store";
 
 async function requireDebateOwnership(debateId: string, userId: string) {
@@ -21,6 +21,21 @@ async function requireDebateOwnership(debateId: string, userId: string) {
   if (String(row.user_id) !== userId && !Boolean(row.is_shared)) {
     throw new AppError("NOT_FOUND", 404, "Debate not found");
   }
+}
+
+async function resolveRoundSummaryDependsOnKeys(input: {
+  userId: string;
+  debateId: string;
+  roundNumber: number;
+  participantCount: number;
+}) {
+  const closedVoteRounds = await listClosedOfficialVoteRounds(input.userId, input.debateId);
+  const speechRoundIndex = mapActualRoundToSpeechRoundIndex(input.roundNumber, closedVoteRounds);
+  if (!speechRoundIndex) {
+    throw new AppError("VALIDATION_ERROR", 400, "This round does not have a speech summary");
+  }
+  const startTurn = (speechRoundIndex - 1) * input.participantCount + 1;
+  return Array.from({ length: input.participantCount }, (_, index) => `turn:${startTurn + index}`);
 }
 
 export async function GET(
@@ -124,15 +139,26 @@ export async function POST(
       }
       const agentCountResult = await query<{ count: string }>("select count(*)::text as count from debate_agents where debate_id = $1", [id]);
       const participantCount = Math.max(1, Number(agentCountResult.rows[0]?.count ?? 1));
-      const dependsOnKeys = Array.from({ length: participantCount }, (_, index) => `turn:${(roundNumber - 1) * participantCount + index + 1}`);
-      const anyTurnSummary = await readDebateFile(session.userId, id, getTurnSummaryPath(workflow, roundNumber, (roundNumber - 1) * participantCount + 1));
+      const dependsOnKeys = await resolveRoundSummaryDependsOnKeys({
+        userId: session.userId,
+        debateId: id,
+        roundNumber,
+        participantCount
+      });
+      const turnSummaryContents = await Promise.all(
+        dependsOnKeys.map(async (key) => {
+          const turnNumber = Number(key.replace(/^turn:/, ""));
+          return readDebateFile(session.userId, id, getTurnSummaryPath(workflow, roundNumber, turnNumber));
+        })
+      );
+      const allTurnSummariesReady = turnSummaryContents.every((content) => Boolean(content?.trim()));
       const job = await enqueueDebateSummaryJob({
         debateId: id,
         kind: "round_summary",
         jobKey: `round:${roundNumber}`,
         roundNumber,
         dependsOnKeys,
-        status: anyTurnSummary?.trim() ? "queued" : "blocked",
+        status: allTurnSummariesReady ? "queued" : "blocked",
         payload: {
           userId: session.userId,
           debateId: id,

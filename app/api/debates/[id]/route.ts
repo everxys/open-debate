@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 
-import { deleteDebate, getDebateDetail, ignoreDebateRuntimeError, updateDebateQuestion, updateDebateSharing } from "@/lib/debates";
+import {
+  deleteDebate,
+  getDebateDetail,
+  ignoreDebateRuntimeError,
+  updateDebateAutoRecover,
+  updateDebateQuestion,
+  updateDebateSharing
+} from "@/lib/debates";
 import { toErrorResponse } from "@/lib/http";
 
 export async function GET(
@@ -28,6 +35,8 @@ export async function PATCH(
         ? await updateDebateQuestion(id, body)
         : body && typeof body === "object" && "ignoreRuntimeError" in body
           ? await ignoreDebateRuntimeError(id, body)
+          : body && typeof body === "object" && "autoRecoverOnceOnFailed" in body
+            ? await updateDebateAutoRecover(id, body)
           : await updateDebateSharing(id, body);
     return NextResponse.json({ success: true, data: debate });
   } catch (error) {

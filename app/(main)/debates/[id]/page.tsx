@@ -72,6 +72,8 @@ type Debate = {
   lastErrorMessage: string | null;
   ignoredRuntimeErrorSignature: string | null;
   ignoredRuntimeErrorAt: string | null;
+  autoRecoverOnceOnFailed: boolean;
+  autoRecoverOnceUsedAt: string | null;
   stoppedReason: string | null;
   agents: DebateAgent[];
 };
@@ -148,14 +150,38 @@ type SummaryWorkerHealth = {
   stale: boolean;
 };
 
+function selectDebateSummaryWorkerHealth(workers: SummaryWorkerHealth[], debateId: string) {
+  const currentDebateWorkers = workers.filter((worker) => worker.currentDebateId === debateId);
+  return (
+    currentDebateWorkers.find((worker) => !worker.stale && worker.status !== "stopped") ??
+    currentDebateWorkers[0] ??
+    null
+  );
+}
+
 function formatSummaryJobDetail(job: SummaryJob) {
   const parts: string[] = [];
   if (job.message) parts.push(job.message);
   if (job.attemptCount) parts.push(`尝试：${job.attemptCount}`);
   if (job.errorReason) parts.push(`原因：${job.errorReason}`);
   if (job.blockedReason) parts.push(`阻塞：${job.blockedReason}`);
-  if (job.retryAt) parts.push(`下次重试：${new Date(job.retryAt).toLocaleString()}`);
+  if (job.retryAt) parts.push(`下次重试：${formatDateTime(job.retryAt)}`);
   return parts.join(" · ");
+}
+
+function formatDateTime(value: string | null | undefined) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(date);
 }
 
 function isStaleRunningSummaryJob(job: SummaryJob) {
@@ -181,6 +207,22 @@ function formatSummaryJobStatus(job: SummaryJob) {
   if (job.status === "failed") return "失败";
   if (job.status === "completed") return "完成";
   return job.status;
+}
+
+function summarizeSummaryJobBuckets(jobs: SummaryJob[]) {
+  return jobs.reduce(
+    (acc, job) => {
+      if (isStaleRunningSummaryJob(job)) acc.stale += 1;
+      else if (isActiveRunningSummaryJob(job)) acc.running += 1;
+      else if (job.leaseState === "recovering") acc.recovering += 1;
+      else if (job.status === "blocked") acc.blocked += 1;
+      else if (job.status === "retry_wait") acc.retryWait += 1;
+      else if (job.status === "queued") acc.queued += 1;
+      else if (job.status === "failed" || job.status === "dead_letter") acc.failed += 1;
+      return acc;
+    },
+    { running: 0, queued: 0, blocked: 0, retryWait: 0, recovering: 0, stale: 0, failed: 0 }
+  );
 }
 
 type DebateRoundDirectoryItemProps = {
@@ -573,7 +615,7 @@ function FileActivityEntryCard(props: {
         <span className="muted">{`Round ${item.roundNumber}`}</span>
         <span className="muted">{`Turn ${item.turnNumber}`}</span>
         <span className="muted">{item.scope === "agent" ? `seat file${item.targetSeatName ? ` · ${item.targetSeatName}` : ""}` : "shared file"}</span>
-        <span className="muted">{item.createdAt ? new Date(item.createdAt).toLocaleString() : ""}</span>
+        <span className="muted">{formatDateTime(item.createdAt)}</span>
       </div>
       {action === "read" ? <div className="muted debateFileActivityEntryHint">点击查看详细信息</div> : null}
       {action !== "read" ? (
@@ -615,6 +657,7 @@ const WORKFLOW_RULES_ERROR_MARKDOWN = "**讨论规则**\n\n- 读取失败（网�
 const RECENT_TURNS_LIMIT = 120;
 const OLDER_TURNS_PAGE_SIZE = 50;
 const TURN_DETAIL_CACHE_LIMIT = 80;
+const VOTE_CACHE_LIMIT = 12;
 const SSE_STALE_MS = 10_000;
 const FALLBACK_POLL_MS = 5_000;
 const MODAL_OVERLAY_STYLE: CSSProperties = {
@@ -665,6 +708,17 @@ function touchTurnDetailCacheOrder(current: string[], id: string) {
 function trimTurnDetailsCacheByOrder(cache: Record<string, TurnDetail>, order: string[]) {
   const keep = new Set(order.slice(0, TURN_DETAIL_CACHE_LIMIT));
   return Object.fromEntries(Object.entries(cache).filter(([id]) => keep.has(id)));
+}
+
+function touchVoteCacheOrder(current: number[], round: number) {
+  return [round, ...current.filter((item) => item !== round)].slice(0, VOTE_CACHE_LIMIT);
+}
+
+function trimVoteCacheByOrder(cache: Record<number, OfficialVoteClosed>, order: number[]) {
+  const keep = new Set(order.slice(0, VOTE_CACHE_LIMIT));
+  return Object.fromEntries(
+    Object.entries(cache).filter(([round]) => keep.has(Number(round)))
+  ) as Record<number, OfficialVoteClosed>;
 }
 
 function debateApiPath(debateId: string, suffix = "") {
@@ -1200,8 +1254,14 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
   const roundSummaryFailedJobs = summaryJobs.filter(
     (job) => (job.kind === "round_summary" || job.kind === "facts_board") && (job.status === "failed" || job.status === "dead_letter")
   );
-  const roundSummaryPendingJobs = summaryJobs.filter(
-    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && isPendingSummaryJob(job)
+  const roundSummaryQueuedJobs = summaryJobs.filter(
+    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && job.status === "queued"
+  );
+  const roundSummaryBlockedJobs = summaryJobs.filter(
+    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && job.status === "blocked"
+  );
+  const roundSummaryRetryWaitJobs = summaryJobs.filter(
+    (job) => (job.kind === "round_summary" || job.kind === "facts_board") && job.status === "retry_wait"
   );
   const roundSummaryStaleJobs = summaryJobs.filter(
     (job) => (job.kind === "round_summary" || job.kind === "facts_board") && isStaleRunningSummaryJob(job)
@@ -1209,10 +1269,14 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
   const roundSummaryRunning = summaryJobs.some(
     (job) => (job.kind === "round_summary" || job.kind === "facts_board") && isActiveRunningSummaryJob(job)
   );
-  const roundSummaryPending = roundSummaryPendingJobs.length > 0;
+  const roundSummaryQueued = roundSummaryQueuedJobs.length > 0;
+  const roundSummaryBlocked = roundSummaryBlockedJobs.length > 0;
+  const roundSummaryRetryWait = roundSummaryRetryWaitJobs.length > 0;
   const roundSummaryStale = roundSummaryStaleJobs.length > 0;
   const roundSummaryFailed = roundSummaryFailedJobs.length > 0;
-  const roundSummaryPendingTitle = roundSummaryPendingJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
+  const roundSummaryQueuedTitle = roundSummaryQueuedJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
+  const roundSummaryBlockedTitle = roundSummaryBlockedJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
+  const roundSummaryRetryWaitTitle = roundSummaryRetryWaitJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
   const roundSummaryStaleTitle = roundSummaryStaleJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
   const roundSummaryFailedTitle = roundSummaryFailedJobs.map(formatSummaryJobDetail).filter(Boolean).join("\n");
 
@@ -1268,13 +1332,31 @@ const DebateRoundDirectoryItem = memo(function DebateRoundDirectoryItem(props: D
           AI 总结失败
         </span>
       ) : null}
-      {roundSummaryPending ? (
+      {roundSummaryQueued ? (
         <span
           className="softBox"
           style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}
-          title={roundSummaryPendingTitle || undefined}
+          title={roundSummaryQueuedTitle || undefined}
         >
-          AI 待补生成
+          AI 排队中
+        </span>
+      ) : null}
+      {roundSummaryBlocked ? (
+        <span
+          className="softBox"
+          style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}
+          title={roundSummaryBlockedTitle || undefined}
+        >
+          等待依赖
+        </span>
+      ) : null}
+      {roundSummaryRetryWait ? (
+        <span
+          className="softBox"
+          style={{ marginLeft: 8, padding: "2px 8px", fontSize: 12 }}
+          title={roundSummaryRetryWaitTitle || undefined}
+        >
+          等待重试
         </span>
       ) : null}
       {roundSummaryStale ? (
@@ -1683,11 +1765,11 @@ function FileInfoDialog(props: {
               </div>
               <div className="panel stack" style={{ gap: 6 }}>
                 <span className="muted">创建时间</span>
-                <strong>{props.info.createdAt ? new Date(props.info.createdAt).toLocaleString() : "-"}</strong>
+                <strong>{formatDateTime(props.info.createdAt) || "-"}</strong>
               </div>
               <div className="panel stack" style={{ gap: 6 }}>
                 <span className="muted">修改时间</span>
-                <strong>{props.info.updatedAt ? new Date(props.info.updatedAt).toLocaleString() : "-"}</strong>
+                <strong>{formatDateTime(props.info.updatedAt) || "-"}</strong>
               </div>
             </div>
           </div>
@@ -2109,10 +2191,11 @@ function StatusQuestionPanel(props: {
           baseline={props.debate.question}
         />
       ) : (
-        <div className="panel" style={{ whiteSpace: "pre-wrap", maxHeight: 200, overflowY: "auto" }}>
+        <div className="panel debateQuestionPreview">
           {props.debate.question}
         </div>
       )}
+      {!editable ? <div className="muted">完整内容请用“放大”查看。</div> : null}
       {editable ? (
         <div className="row" style={{ justifyContent: "space-between" }}>
           <span className="muted">{props.questionDraft.length.toLocaleString()}/50,000</span>
@@ -2137,7 +2220,9 @@ function StatusSummaryPanel(props: {
   summaryJobs: SummaryJob[];
   summaryWorkerHealth: SummaryWorkerHealth | null;
   summaryActionBusy: boolean;
+  autoRecoverArmBusy: boolean;
   runtimeErrorIgnoreBusy: boolean;
+  onToggleAutoRecoverOnce: () => void;
   onIgnoreRuntimeError: () => void;
   onRetryFailedSummaryJobs: () => void;
   onRebuildFactsBoard: () => void;
@@ -2174,6 +2259,7 @@ function StatusSummaryPanel(props: {
     },
     { turn: 0, round: 0, facts: 0, running: 0, pending: 0, stale: 0, failed: 0 }
   );
+  const summaryBuckets = summarizeSummaryJobBuckets(props.summaryJobs);
   const runtimeError = summarizeRuntimeError(props.debate.lastErrorCode, props.debate.lastErrorMessage);
   const runtimeErrorSignature = buildRuntimeErrorSignature(props.debate.lastErrorCode, props.debate.lastErrorMessage);
   const runtimeErrorIgnored =
@@ -2189,6 +2275,22 @@ function StatusSummaryPanel(props: {
       ? "worker 离线"
       : `${props.summaryWorkerHealth.mode} worker ${props.summaryWorkerHealth.status}`
     : "worker 未上报";
+  const autoRecoverStateLabel = props.debate.autoRecoverOnceOnFailed
+    ? "已启用"
+    : props.debate.autoRecoverOnceUsedAt
+      ? "已用完"
+      : "未启用";
+  const autoRecoverStateClass = props.debate.autoRecoverOnceOnFailed
+    ? "badge-recovered"
+    : props.debate.autoRecoverOnceUsedAt
+      ? "badge-paused"
+      : "badge-pending";
+  const autoRecoverDescription = props.debate.autoRecoverOnceOnFailed
+    ? "下一次进入 failed 时会自动修复并立即重试一次。"
+    : props.debate.autoRecoverOnceUsedAt
+      ? "这次自动恢复机会已经消耗；再次启用后才会重新生效。"
+      : "先手动武装，之后只在下一次 failed 时自动接管一次。";
+  const runtimeErrorPreview = runtimeError?.message ? runtimeError.message.replace(/\s+/g, " ").trim() : "";
   return (
     <Fragment>
       {props.debate.status === "running" ? (
@@ -2207,53 +2309,95 @@ function StatusSummaryPanel(props: {
           <span className="muted">{props.liveStatus || "运行中"}</span>
         </div>
       ) : null}
-      <div className="muted">
-        轮次 {props.completedRounds}/{props.debate.maxTurns <= 0 ? "∞" : props.debate.maxTurns} · 参与者 {props.agentCount}
+      <div className="statusMetaList">
+        <span className="statusMetaChip statusMetaChipBlue">
+          <span className="statusMetaLabel">轮次</span>
+          <strong>{props.completedRounds}/{props.debate.maxTurns <= 0 ? "∞" : props.debate.maxTurns}</strong>
+          <span>·</span>
+          <span>参与者 {props.agentCount}</span>
+        </span>
+        <span className="statusMetaChip statusMetaChipSlate">
+          <span className="statusMetaLabel">Token</span>
+          <strong>{props.debate.tokenUsed}</strong>
+        </span>
+        <span className={`statusMetaChip ${props.debate.consensusReached ? "statusMetaChipGreen" : "statusMetaChipAmber"}`}>
+          <span className="statusMetaLabel">共识</span>
+          <strong>{props.debate.consensusReached ? "已达成" : "未达成"}</strong>
+          {props.debate.consensusSummary ? <span>{`· ${props.debate.consensusSummary.leadingSolution} · ${props.debate.consensusSummary.score}`}</span> : null}
+        </span>
+        {props.showWorkflowPhaseUi && props.debate.workflowPhaseTitle ? (
+          <span className="statusMetaChip statusMetaChipPurple">
+            <span className="statusMetaLabel">阶段</span>
+            <strong>{props.debate.workflowPhaseTitle}</strong>
+            {props.debate.workflowPhaseRound ? <span>{`· 第 ${props.debate.workflowPhaseRound} 轮`}</span> : null}
+          </span>
+        ) : null}
       </div>
-      <div className="muted">token {props.debate.tokenUsed}</div>
-      <div className="muted">
-        共识: {props.debate.consensusReached ? "已达成" : "未达成"}
-        {props.debate.consensusSummary
-          ? ` · ${props.debate.consensusSummary.leadingSolution} · ${props.debate.consensusSummary.score}`
-          : ""}
-      </div>
-      {props.showWorkflowPhaseUi && props.debate.workflowPhaseTitle ? (
-        <div className="muted">
-          阶段快照: {props.debate.workflowPhaseTitle}
-          {props.debate.workflowPhaseRound ? ` · 第 ${props.debate.workflowPhaseRound} 轮` : ""}
-        </div>
-      ) : null}
       {props.debate.runtimeNoticeMessage ? (
         <div className={`runtimeNoticeCard ${runtimeNoticeCardClass}`}>
           <div className="runtimeNoticeTitle">
             <span className={`badge ${runtimeNoticeBadgeClass}`}>{runtimeNoticeTitle}</span>
             {props.debate.runtimeNoticeAt ? (
-              <span className="muted">{new Date(props.debate.runtimeNoticeAt).toLocaleString()}</span>
+              <span className="muted">{formatDateTime(props.debate.runtimeNoticeAt)}</span>
             ) : null}
           </div>
           <div className="runtimeNoticeText">{props.debate.runtimeNoticeMessage}</div>
         </div>
       ) : null}
-      {props.debate.stoppedReason ? <div className="muted">停止原因: {props.debate.stoppedReason}</div> : null}
-      {runtimeError && !runtimeErrorIgnored ? (
-        <div className="runtimeErrorCard">
-          <div className="runtimeErrorCardHeader">
-            <div className="row" style={{ gap: 8 }}>
-              <strong>失败原因</strong>
-              <span className="runtimeErrorCodeBadge">{runtimeError.code}</span>
-              <span className="runtimeErrorToneBadge">{runtimeErrorTone}</span>
+      {props.debate.isOwner ? (
+        <details className="autoRecoverCard">
+          <summary className="autoRecoverSummary">
+            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <strong>失败后自动恢复</strong>
+              <span className={`badge ${autoRecoverStateClass}`}>{autoRecoverStateLabel}</span>
             </div>
+            <span className="muted autoRecoverSummaryText">{autoRecoverDescription}</span>
+          </summary>
+          <div className="autoRecoverBody">
+            <button className="btn" type="button" disabled={props.autoRecoverArmBusy} onClick={props.onToggleAutoRecoverOnce}>
+              {props.autoRecoverArmBusy
+                ? "处理中..."
+                : props.debate.autoRecoverOnceOnFailed
+                  ? "取消本次机会"
+                  : props.debate.autoRecoverOnceUsedAt
+                    ? "重新启用1次"
+                    : "启用1次"}
+            </button>
+            {props.debate.autoRecoverOnceUsedAt ? (
+              <div className="muted">上次触发：{formatDateTime(props.debate.autoRecoverOnceUsedAt)}</div>
+            ) : (
+              <div className="muted">不会无限循环；自动恢复成功后立刻消耗掉这次机会。</div>
+            )}
           </div>
-          <div className="runtimeErrorCardMessage">{runtimeError.message}</div>
-          <div className="runtimeErrorCardActions">
-            <span className="muted">已折叠原始详情，避免状态区出现双滚动条。</span>
-            <div className="row" style={{ gap: 8 }}>
-              <button className="btn" type="button" onClick={() => setRuntimeErrorDetailOpen(true)}>
-                查看原始详情
-              </button>
-              <button className="btn btn-muted" type="button" disabled={props.runtimeErrorIgnoreBusy} onClick={props.onIgnoreRuntimeError}>
-                {props.runtimeErrorIgnoreBusy ? "忽略中..." : "忽略"}
-              </button>
+        </details>
+      ) : null}
+      {props.debate.stoppedReason && !(runtimeError && props.debate.status === "failed") ? (
+        <div className="muted">停止原因: {props.debate.stoppedReason}</div>
+      ) : null}
+      {runtimeError && !runtimeErrorIgnored ? (
+        <details className="runtimeErrorCard">
+          <summary className="runtimeErrorSummary">
+            <div className="runtimeErrorCardHeader">
+              <div className="row" style={{ gap: 8 }}>
+                <strong>失败原因</strong>
+                <span className="runtimeErrorCodeBadge">{runtimeError.code}</span>
+                <span className="runtimeErrorToneBadge">{runtimeErrorTone}</span>
+              </div>
+            </div>
+            <div className="runtimeErrorCardMessage runtimeErrorCardMessagePreview">{runtimeErrorPreview}</div>
+          </summary>
+          <div className="runtimeErrorBody">
+            <div className="runtimeErrorCardMessage">{runtimeError.message}</div>
+            <div className="runtimeErrorCardActions">
+              <span className="muted">已折叠原始详情，避免状态区出现双滚动条。</span>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="btn" type="button" onClick={() => setRuntimeErrorDetailOpen(true)}>
+                  查看原始详情
+                </button>
+                <button className="btn btn-muted" type="button" disabled={props.runtimeErrorIgnoreBusy} onClick={props.onIgnoreRuntimeError}>
+                  {props.runtimeErrorIgnoreBusy ? "忽略中..." : "忽略"}
+                </button>
+              </div>
             </div>
           </div>
           <RuntimeErrorDialog
@@ -2261,7 +2405,7 @@ function StatusSummaryPanel(props: {
             open={runtimeErrorDetailOpen}
             onClose={() => setRuntimeErrorDetailOpen(false)}
           />
-        </div>
+        </details>
       ) : null}
       {props.summaryJobs.length > 0 ? (
         <details className="summaryJobsBox">
@@ -2271,14 +2415,15 @@ function StatusSummaryPanel(props: {
               回 {summaryCounts.turn} · 轮 {summaryCounts.round} · 事实板 {summaryCounts.facts}
             </span>
             <small>
-              运行中 {summaryCounts.running} · 待补 {summaryCounts.pending} · 异常中断 {summaryCounts.stale} · 失败 {summaryCounts.failed} · {workerStatus}
+              运行中 {summaryBuckets.running} · 排队 {summaryBuckets.queued} · 等待依赖 {summaryBuckets.blocked} · 等待重试{" "}
+              {summaryBuckets.retryWait} · 恢复中 {summaryBuckets.recovering} · 异常中断 {summaryBuckets.stale} · 失败{" "}
+              {summaryBuckets.failed} · {workerStatus}
             </small>
           </summary>
           {props.summaryWorkerHealth ? (
             <div className="muted">
-              worker heartbeat: {new Date(props.summaryWorkerHealth.lastHeartbeatAt).toLocaleString()}
-              {props.summaryWorkerHealth.currentJobKey ? ` · 当前 ${props.summaryWorkerHealth.currentJobKey}` : ""}
-              {` · 完成 ${props.summaryWorkerHealth.completedCount} · 失败 ${props.summaryWorkerHealth.failedCount}`}
+              worker heartbeat: {formatDateTime(props.summaryWorkerHealth.lastHeartbeatAt)}
+              {props.summaryWorkerHealth.currentJobKey ? ` · 当前任务 ${props.summaryWorkerHealth.currentJobKey}` : ""}
             </div>
           ) : null}
           <div className="summaryJobsActions">
@@ -2953,7 +3098,7 @@ function QuestionHistoryDialog(props: {
                     <div>
                       <strong>v{item.version}</strong>
                     </div>
-                    <div className="muted">{item.at ? new Date(item.at).toLocaleString() : ""}</div>
+                    <div className="muted">{formatDateTime(item.at)}</div>
                   </button>
                 ))}
               </div>
@@ -3431,7 +3576,7 @@ function FileActivityDetailDialog(props: {
                   ))}
                 </div>
                 <div className="muted">
-                  {props.detail.createdAt ? new Date(props.detail.createdAt).toLocaleString() : ""}
+                  {formatDateTime(props.detail.createdAt)}
                   {props.detail.scope === "agent" ? ` · seat file${props.detail.targetSeatName ? ` · ${props.detail.targetSeatName}` : ""}` : " · shared file"}
                   {props.action === "read" ? ` · ${formatFileActivityEntryAction(props.detail.action)}` : ""}
                 </div>
@@ -3520,7 +3665,7 @@ function MemoryDialog(props: {
         </div>
         <div className="muted">
           {path}
-          {updatedAt ? ` · ${new Date(updatedAt).toLocaleString()}` : ""}
+          {updatedAt ? ` · ${formatDateTime(updatedAt)}` : ""}
         </div>
         {truncation?.truncated ? (
           <div className="muted">
@@ -3884,6 +4029,7 @@ export default function DebateDetailPage() {
   const [summaryJobsByKey, setSummaryJobsByKey] = useState<Record<string, SummaryJob>>({});
   const [summaryWorkerHealth, setSummaryWorkerHealth] = useState<SummaryWorkerHealth | null>(null);
   const [summaryActionBusy, setSummaryActionBusy] = useState(false);
+  const [autoRecoverArmBusy, setAutoRecoverArmBusy] = useState(false);
   const [runtimeErrorIgnoreBusy, setRuntimeErrorIgnoreBusy] = useState(false);
   const [liveText, setLiveText] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -3894,6 +4040,7 @@ export default function DebateDetailPage() {
   const viewerScrollRef = useRef<HTMLDivElement | null>(null);
   const [votePathsByRound, setVotePathsByRound] = useState<Record<number, string>>({});
   const [voteByRound, setVoteByRound] = useState<Record<number, OfficialVoteClosed>>({});
+  const [voteCacheOrder, setVoteCacheOrder] = useState<number[]>([]);
   const [openVoteState, setOpenVoteState] = useState<OfficialVoteOpenState | null>(null);
   const [voteLoadingRound, setVoteLoadingRound] = useState<number | null>(null);
   const [openRoundsByNumber, setOpenRoundsByNumber] = useState<Record<number, boolean>>({});
@@ -4009,6 +4156,26 @@ export default function DebateDetailPage() {
       const nextSummaries = typeof updater === "function" ? updater(current.summaries) : updater;
       return buildTurnWindowState(nextSummaries);
     });
+  }, []);
+
+  const loadSummaryJobs = useCallback(async (debateId: string) => {
+    const response = await fetch(`/api/debates/${debateId}/summary-jobs`, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        ok: false as const,
+        message: payload?.error?.message ?? "加载总结任务失败"
+      };
+    }
+    const jobs = Array.isArray(payload.data) ? (payload.data as SummaryJob[]) : [];
+    setSummaryJobsByKey(
+      Object.fromEntries(
+        jobs
+          .filter((job) => job && typeof job.key === "string" && job.status !== "completed")
+          .map((job) => [job.key, job] as const)
+      )
+    );
+    return { ok: true as const };
   }, []);
 
   async function loadOlderTurnSummaries() {
@@ -4276,6 +4443,7 @@ export default function DebateDetailPage() {
     setActiveVoteRound(null);
     setVotePathsByRound({});
     setVoteByRound({});
+    setVoteCacheOrder([]);
     setOpenVoteState(null);
     setVoteLoadingRound(null);
     setInjectedPromptDialog(null);
@@ -4387,7 +4555,7 @@ export default function DebateDetailPage() {
     loadingDebateIdRef.current = expectedId;
     try {
       const after = lastTurnNumberRef.current;
-      const [debateResult, turnsResult] = await Promise.allSettled([
+      const [debateResult, turnsResult, summaryJobsResult] = await Promise.allSettled([
         fetch(`/api/debates/${expectedId}`, { cache: "no-store" }).then(async (response) => ({
           response,
           payload: await response.json().catch(() => ({}))
@@ -4395,7 +4563,8 @@ export default function DebateDetailPage() {
         fetchTurnSummaries({
           debateId: expectedId,
           ...(after > 0 ? { after } : { limit: RECENT_TURNS_LIMIT })
-        })
+        }),
+        loadSummaryJobs(expectedId)
       ]);
 
       if (activeDebateIdRef.current && activeDebateIdRef.current !== expectedId) {
@@ -4472,6 +4641,14 @@ export default function DebateDetailPage() {
         hadNetworkFailure = true;
       }
 
+      if (summaryJobsResult.status === "fulfilled") {
+        if (!summaryJobsResult.value.ok) {
+          hadNetworkFailure = true;
+        }
+      } else {
+        hadNetworkFailure = true;
+      }
+
       if (hadNetworkFailure) {
         const now = Date.now();
         if (now - lastLoadErrorAtRef.current > 5000) {
@@ -4488,7 +4665,7 @@ export default function DebateDetailPage() {
     } finally {
       if (loadingDebateIdRef.current === expectedId) loadingDebateIdRef.current = null;
     }
-  }, [id, loadContextUsage, loadContextUsageTotals, loadOpenVoteState, loadVoteIndex, showToast, updateTurnWindow]);
+  }, [id, loadContextUsage, loadContextUsageTotals, loadOpenVoteState, loadSummaryJobs, loadVoteIndex, showToast, updateTurnWindow]);
 
   const postSummaryJobAction = useCallback(
     async (action: string, extra?: Record<string, unknown>) => {
@@ -4505,13 +4682,14 @@ export default function DebateDetailPage() {
           throw new Error(payload?.error?.message ?? "总结任务操作失败");
         }
         showToast("success", "总结任务已提交");
+        await loadSummaryJobs(id);
       } catch (error) {
         showToast("error", error instanceof Error ? error.message : "总结任务操作失败");
       } finally {
         setSummaryActionBusy(false);
       }
     },
-    [id, showToast]
+    [id, loadSummaryJobs, showToast]
   );
 
   const handleRetryFailedSummaryJobs = useCallback(() => {
@@ -4521,6 +4699,31 @@ export default function DebateDetailPage() {
   const handleRebuildFactsBoard = useCallback(() => {
     void postSummaryJobAction("rebuild_facts");
   }, [postSummaryJobAction]);
+
+  const toggleAutoRecoverOnce = useCallback(async () => {
+    if (!id || !debate?.isOwner || autoRecoverArmBusy) return;
+    const nextEnabled = !debate.autoRecoverOnceOnFailed;
+    setAutoRecoverArmBusy(true);
+    try {
+      const response = await fetch(`/api/debates/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autoRecoverOnceOnFailed: nextEnabled })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "自动恢复设置失败");
+        return;
+      }
+      setDebate(payload.data ?? null);
+      showToast("success", nextEnabled ? "已启用失败后自动恢复一次" : "已取消自动恢复一次");
+    } catch (error) {
+      console.error(error);
+      showToast("error", "网络错误：自动恢复设置失败");
+    } finally {
+      setAutoRecoverArmBusy(false);
+    }
+  }, [autoRecoverArmBusy, debate?.autoRecoverOnceOnFailed, debate?.isOwner, id, showToast]);
 
   const ignoreRuntimeError = useCallback(async () => {
     if (!id || runtimeErrorIgnoreBusy) return;
@@ -4555,6 +4758,10 @@ export default function DebateDetailPage() {
 
   const loadVoteRound = useCallback(async (round: number) => {
     if (!id) return null;
+    if (voteByRound[round]) {
+      setVoteCacheOrder((current) => touchVoteCacheOrder(current, round));
+      return voteByRound[round];
+    }
     const path = votePathsByRound[round];
     if (!path) return null;
     if (voteLoadingRound === round) return null;
@@ -4566,14 +4773,18 @@ export default function DebateDetailPage() {
       const content = String(payload.data?.content ?? "");
       const parsed = JSON.parse(content) as OfficialVoteClosed;
       if (!parsed || typeof parsed !== "object") return null;
-      setVoteByRound((current) => ({ ...current, [round]: parsed }));
+      setVoteCacheOrder((current) => {
+        const nextOrder = touchVoteCacheOrder(current, round);
+        setVoteByRound((currentCache) => trimVoteCacheByOrder({ ...currentCache, [round]: parsed }, nextOrder));
+        return nextOrder;
+      });
       return parsed;
     } catch {
       return null;
     } finally {
       setVoteLoadingRound((current) => (current === round ? null : current));
     }
-  }, [id, voteLoadingRound, votePathsByRound]);
+  }, [id, voteByRound, voteLoadingRound, votePathsByRound]);
 
   function buildQuestionCompareRows(oldText: string, newText: string) {
     return buildLineDiffRows(oldText, newText);
@@ -4877,7 +5088,7 @@ export default function DebateDetailPage() {
         lastSseEventAtRef.current = Date.now();
         const payload = JSON.parse((event as MessageEvent).data) as { workerHealth?: { workers?: SummaryWorkerHealth[] } };
         const workers = Array.isArray(payload.workerHealth?.workers) ? payload.workerHealth.workers : [];
-        setSummaryWorkerHealth(workers[0] ?? null);
+        setSummaryWorkerHealth(selectDebateSummaryWorkerHealth(workers, id));
       } catch {
       }
     });
@@ -5447,14 +5658,13 @@ export default function DebateDetailPage() {
   }, [turnRoundGroups, votePathsByRound, openVoteState?.roundNumber, liveDisplayRound, currentDirectoryRound]);
 
   useEffect(() => {
-    const roundsToPreload = Object.keys(votePathsByRound)
-      .map((value) => Number(value))
-      .filter((round) => Number.isFinite(round) && round > 0 && !voteByRound[round]);
-    if (roundsToPreload.length <= 0) return;
-    for (const round of roundsToPreload) {
-      void loadVoteRound(round);
+    if (activeVoteRound === null) return;
+    if (voteByRound[activeVoteRound]) {
+      setVoteCacheOrder((current) => touchVoteCacheOrder(current, activeVoteRound));
+      return;
     }
-  }, [votePathsByRound, voteByRound, loadVoteRound]);
+    void loadVoteRound(activeVoteRound);
+  }, [activeVoteRound, loadVoteRound, voteByRound]);
 
   useEffect(() => {
     if (!followLatest) return;
@@ -5888,7 +6098,7 @@ export default function DebateDetailPage() {
 
         {!debate.isOwner ? <div className="muted">公开辩论（只读）</div> : null}
 
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        <div className="debateSidebarContent">
           {leftTab === "status" ? (
             <Fragment>
               <div>
@@ -5920,7 +6130,9 @@ export default function DebateDetailPage() {
                 summaryJobs={liveSummaryJobs}
                 summaryWorkerHealth={summaryWorkerHealth}
                 summaryActionBusy={summaryActionBusy}
+                autoRecoverArmBusy={autoRecoverArmBusy}
                 runtimeErrorIgnoreBusy={runtimeErrorIgnoreBusy}
+                onToggleAutoRecoverOnce={toggleAutoRecoverOnce}
                 onIgnoreRuntimeError={ignoreRuntimeError}
                 onRetryFailedSummaryJobs={handleRetryFailedSummaryJobs}
                 onRebuildFactsBoard={handleRebuildFactsBoard}

@@ -3,7 +3,7 @@ import { sql, type Kysely, type Transaction } from "kysely";
 
 import { decryptSecret } from "@/lib/crypto";
 import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type DebateParticipantRoleType } from "@/lib/debate-role-types";
-import { ensureDb } from "@/lib/db";
+import { ensureDb, ensureDebateAutoRecoverColumns } from "@/lib/db";
 import type { OpenDebateDb } from "@/lib/db-schema";
 import {
   clearDebateLiveProgress,
@@ -158,6 +158,7 @@ import {
   listClosedOfficialVoteRounds,
   listMissingRequiredDeliverables,
   loadDebateWorkflow,
+  mapActualRoundToSpeechRoundIndex,
   mapSpeechRoundIndexToActualRound,
   OfficialVote,
   OpenOfficialVote,
@@ -835,6 +836,9 @@ async function callWorkflowSummarizerMarkdown(input: {
       const message = String(details.message ?? "");
       const looksRateLimited =
         message.includes("429") || message.toLowerCase().includes("rate limit") || message.toLowerCase().includes("too many requests");
+      if (isNonRetryableSummaryJobError(details)) {
+        throw error;
+      }
       const retryable = isRecoverableRuntimeInterruption(details) || looksRateLimited;
       if (!retryable || attempt >= retryDelaysMs.length) {
         throw error;
@@ -1143,8 +1147,13 @@ async function listRoundTurnSummaries(input: {
   roundNumber: number;
   participantCount: number;
 }) {
-  const startTurn = (input.roundNumber - 1) * input.participantCount + 1;
-  const endTurn = input.roundNumber * input.participantCount;
+  const roundTurnRange = await resolveActualRoundTurnRange({
+    userId: input.userId,
+    debateId: input.debateId,
+    roundNumber: input.roundNumber,
+    participantCount: input.participantCount
+  });
+  if (!roundTurnRange) return [];
   const db = await ensureDb();
   const turnRows = await db
     .selectFrom("debate_turns as t")
@@ -1155,8 +1164,8 @@ async function listRoundTurnSummaries(input: {
       sql<string>`coalesce(da.display_name, a.name)`.as("speaker_name")
     ])
     .where("t.debate_id", "=", input.debateId)
-    .where("t.turn_number", ">=", startTurn)
-    .where("t.turn_number", "<=", endTurn)
+    .where("t.turn_number", ">=", roundTurnRange.startTurn)
+    .where("t.turn_number", "<=", roundTurnRange.endTurn)
     .orderBy("t.turn_number", "asc")
     .execute();
   const items: Array<{ turnNumber: number; agentName: string; content: string }> = [];
@@ -1175,6 +1184,23 @@ async function listRoundTurnSummaries(input: {
     });
   }
   return items;
+}
+
+async function resolveActualRoundTurnRange(input: {
+  userId: string;
+  debateId: string;
+  roundNumber: number;
+  participantCount: number;
+}) {
+  const safeParticipantCount = Math.max(1, input.participantCount);
+  const closedVoteRounds = await listClosedOfficialVoteRounds(input.userId, input.debateId);
+  const speechRoundIndex = mapActualRoundToSpeechRoundIndex(input.roundNumber, closedVoteRounds);
+  if (!speechRoundIndex) return null;
+  return {
+    speechRoundIndex,
+    startTurn: (speechRoundIndex - 1) * safeParticipantCount + 1,
+    endTurn: speechRoundIndex * safeParticipantCount
+  };
 }
 
 export async function refreshFactsBoardFromSummaries(input: {
@@ -1462,6 +1488,17 @@ export function parseResponse(raw: string): {
   return { content: raw, structuredOutput: null, parseStatus: "ok" as const };
 }
 
+function normalizeTimestampString(value: unknown) {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
+function normalizeNullableTimestampString(value: unknown) {
+  if (value === null || value === undefined) return null;
+  return normalizeTimestampString(value);
+}
+
 function normalizeDebateTurnRow(row: Record<string, unknown>): DebateTurnRecord {
   return {
     id: String(row.id),
@@ -1477,7 +1514,7 @@ function normalizeDebateTurnRow(row: Record<string, unknown>): DebateTurnRecord 
     responseTimeMs: row.response_time_ms === null ? null : Number(row.response_time_ms),
     retryCount: Number(row.retry_count),
     errorCode: (row.error_code as string | null) ?? null,
-    createdAt: String(row.created_at)
+    createdAt: normalizeTimestampString(row.created_at)
   };
 }
 
@@ -2200,8 +2237,13 @@ export async function loadWorkflowIdeaBankInline(input: {
   if (input.phaseKind === "analysis") return null;
 
   const lines: string[] = ["Idea bank routing (IMPORTANT):"];
-  const rawPath = input.workflow.ideaBank.rawIdeaBankPath;
-  const derived = input.workflow.ideaBank.derivedFiles;
+  const ideaBank = await resolveDebateIdeaBankPaths({
+    workflow: input.workflow,
+    userId: input.userId,
+    debateId: input.debateId
+  });
+  const rawPath = ideaBank.rawIdeaBankPath;
+  const derived = ideaBank.derivedFiles;
 
   if (input.phaseKind === "deliberation") {
     if (rawPath) {
@@ -2255,6 +2297,36 @@ export async function loadWorkflowIdeaBankInline(input: {
   }
 
   return lines.length > 1 ? lines.join("\n") : null;
+}
+
+type ResolvedIdeaBankPaths = {
+  rawIdeaBankPath: string | null;
+  derivedFiles: {
+    selectedSTierPath: string | null;
+    selectedATierPath: string | null;
+    rejectedOrMergedPath: string | null;
+    eventMappingsPath: string | null;
+    newlyInventedIdeasPath: string | null;
+  };
+};
+
+export async function resolveDebateIdeaBankPaths(input: {
+  workflow: NormalizedDebateWorkflow | null;
+  userId: string;
+  debateId: string;
+}): Promise<ResolvedIdeaBankPaths> {
+  const configured = input.workflow?.ideaBank;
+
+  return {
+    rawIdeaBankPath: configured?.rawIdeaBankPath ?? null,
+    derivedFiles: {
+      selectedSTierPath: configured?.derivedFiles.selectedSTierPath ?? null,
+      selectedATierPath: configured?.derivedFiles.selectedATierPath ?? null,
+      rejectedOrMergedPath: configured?.derivedFiles.rejectedOrMergedPath ?? null,
+      eventMappingsPath: configured?.derivedFiles.eventMappingsPath ?? null,
+      newlyInventedIdeasPath: configured?.derivedFiles.newlyInventedIdeasPath ?? null
+    }
+  };
 }
 
 export function rotateOrder<T>(items: T[], offset: number) {
@@ -2975,6 +3047,33 @@ export async function toolDebateFilesStat(input: {
   }
 }
 
+function getWorkflowSourcePathHint(allowedOutputPaths?: string[]) {
+  const sourcePaths = getWorkflowSourceOutputPaths(allowedOutputPaths);
+  return sourcePaths.length > 0 ? sourcePaths.join(" / ") : "the configured workflow source-of-truth file";
+}
+
+function getWorkflowSourceOutputPaths(allowedOutputPaths?: string[]) {
+  return (allowedOutputPaths ?? []).filter((item) => !item.endsWith("/") && !item.startsWith("outputs/") && !item.startsWith("final/"));
+}
+
+function getFileBaseName(path: string) {
+  return path.split("/").pop()?.toLowerCase() ?? "";
+}
+
+function stripMarkdownExtension(path: string) {
+  return path.toLowerCase().replace(/\.mdx?$/, "");
+}
+
+function isWorkflowSourceShadowOutputPath(path: string, allowedOutputPaths?: string[]) {
+  if (!path.startsWith("outputs/")) return false;
+  const outputBaseName = getFileBaseName(path);
+  const outputStem = stripMarkdownExtension(outputBaseName);
+  return getWorkflowSourceOutputPaths(allowedOutputPaths).some((sourcePath) => {
+    const sourceBaseName = getFileBaseName(sourcePath);
+    return outputBaseName === sourceBaseName || outputStem === stripMarkdownExtension(sourceBaseName);
+  });
+}
+
 export async function toolDebateFilesWrite(input: {
   userId: string;
   debateAgentId?: string | null;
@@ -2996,6 +3095,11 @@ export async function toolDebateFilesWrite(input: {
   if (!safePath) {
     return {
       error: `Invalid path. Only ${(input.allowedOutputPaths?.length ?? 0) > 0 ? input.allowedOutputPaths?.join(", ") : "final/, outputs/"} allowed (no '..').`
+    };
+  }
+  if (isWorkflowSourceShadowOutputPath(safePath, input.allowedOutputPaths)) {
+    return {
+      error: `Invalid path: ${safePath} looks like a shadow copy of a workflow source-of-truth file. Write the configured source file instead: ${getWorkflowSourcePathHint(input.allowedOutputPaths)}.`
     };
   }
   const content = String(input.content ?? "");
@@ -3045,7 +3149,14 @@ export async function toolDebateFilesWrite(input: {
     size: writeResult.size,
     version: writeResult.version,
     updatedAt: writeResult.updatedAt,
-    mode: writeResult.mode
+    mode: writeResult.mode,
+    verification: {
+      path: writeResult.path,
+      version: writeResult.version,
+      size: writeResult.size,
+      updatedAt: writeResult.updatedAt
+    },
+    message: `WRITE_CONFIRMED: ${writeResult.path} v${writeResult.version}, ${writeResult.size} chars`
   };
 }
 
@@ -3094,16 +3205,18 @@ export function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
     workflowPhaseRound: row.workflow_phase_round === null ? null : Number(row.workflow_phase_round),
     runtimeNoticeKind: (row.runtime_notice_kind as DebateRecord["runtimeNoticeKind"]) ?? null,
     runtimeNoticeMessage: (row.runtime_notice_message as string | null) ?? null,
-    runtimeNoticeAt: (row.runtime_notice_at as string | null) ?? null,
+    runtimeNoticeAt: normalizeNullableTimestampString(row.runtime_notice_at),
     lastErrorCode: (row.last_error_code as string | null) ?? null,
     lastErrorMessage: (row.last_error_message as string | null) ?? null,
     ignoredRuntimeErrorSignature: (row.ignored_runtime_error_signature as string | null) ?? null,
-    ignoredRuntimeErrorAt: (row.ignored_runtime_error_at as string | null) ?? null,
-    startedAt: (row.started_at as string | null) ?? null,
-    finishedAt: (row.finished_at as string | null) ?? null,
+    ignoredRuntimeErrorAt: normalizeNullableTimestampString(row.ignored_runtime_error_at),
+    autoRecoverOnceOnFailed: Boolean(row.auto_recover_once_on_failed),
+    autoRecoverOnceUsedAt: normalizeNullableTimestampString(row.auto_recover_once_used_at),
+    startedAt: normalizeNullableTimestampString(row.started_at),
+    finishedAt: normalizeNullableTimestampString(row.finished_at),
     stoppedReason: (row.stopped_reason as string | null) ?? null,
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at)
+    createdAt: normalizeTimestampString(row.created_at),
+    updatedAt: normalizeTimestampString(row.updated_at)
   };
 }
 
@@ -3134,11 +3247,11 @@ export function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
     apiKeyEncrypted: String(row.api_key_encrypted),
     apiKeyMasked: String(row.api_key_masked),
     lastConnectivityCheckStatus: (row.last_connectivity_check_status as AgentRecord["lastConnectivityCheckStatus"]) ?? null,
-    lastConnectivityCheckAt: (row.last_connectivity_check_at as string | null) ?? null,
+    lastConnectivityCheckAt: normalizeNullableTimestampString(row.last_connectivity_check_at),
     lastConnectivityCheckMessage: (row.last_connectivity_check_message as string | null) ?? null,
     isActive: row.is_active === undefined ? true : Boolean(row.is_active),
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at)
+    createdAt: normalizeTimestampString(row.created_at),
+    updatedAt: normalizeTimestampString(row.updated_at)
   };
 }
 
@@ -3154,30 +3267,87 @@ export async function finishDebate(
 ) {
   const db = await ensureDb();
   const now = new Date().toISOString();
-  await db.executeQuery(sql`
-    update debates
-        set status = ${status},
-            finished_at = ${now},
-            stopped_reason = ${reason ?? null},
-            workflow_phase_kind = ${options?.phase?.workflowPhaseKind ?? null},
-            workflow_phase_title = ${options?.phase?.workflowPhaseTitle ?? null},
-            workflow_phase_round = ${options?.phase?.workflowPhaseRound ?? null},
-            runtime_notice_kind = null,
-            runtime_notice_message = null,
-            runtime_notice_at = null,
-            last_error_code = coalesce(${options?.lastErrorCode ?? null}, last_error_code),
-            last_error_message = coalesce(${options?.lastErrorMessage ?? null}, last_error_message),
-            ignored_runtime_error_signature = case
-              when ${options?.lastErrorCode ?? null} is not null or ${options?.lastErrorMessage ?? null} is not null then null
-              else ignored_runtime_error_signature
-            end,
-            ignored_runtime_error_at = case
-              when ${options?.lastErrorCode ?? null} is not null or ${options?.lastErrorMessage ?? null} is not null then null
-              else ignored_runtime_error_at
-            end,
-            updated_at = ${now}
-      where id = ${id}
-  `.compile(db));
+  const lastErrorCode = options?.lastErrorCode ?? null;
+  const lastErrorMessage = options?.lastErrorMessage ?? null;
+  const hasRuntimeError = lastErrorCode !== null || lastErrorMessage !== null;
+
+  const row = await db
+    .updateTable("debates")
+    .set({
+      status,
+      finished_at: now,
+      stopped_reason: reason ?? null,
+      workflow_phase_kind: options?.phase?.workflowPhaseKind ?? null,
+      workflow_phase_title: options?.phase?.workflowPhaseTitle ?? null,
+      workflow_phase_round: options?.phase?.workflowPhaseRound ?? null,
+      runtime_notice_kind: null,
+      runtime_notice_message: null,
+      runtime_notice_at: null,
+      ...(lastErrorCode !== null ? { last_error_code: lastErrorCode } : {}),
+      ...(lastErrorMessage !== null ? { last_error_message: lastErrorMessage } : {}),
+      ...(hasRuntimeError
+        ? {
+            ignored_runtime_error_signature: null,
+            ignored_runtime_error_at: null
+          }
+        : {}),
+      updated_at: now
+    })
+    .where("id", "=", id)
+    .returningAll()
+    .executeTakeFirst();
+  return row ? normalizeDebateRow(row as Record<string, unknown>) : null;
+}
+
+async function autoRecoverFailedDebateOnce(input: {
+  debateId: string;
+  userId: string;
+  phase?: Pick<DebateRecord, "workflowPhaseKind" | "workflowPhaseTitle" | "workflowPhaseRound"> | null;
+}) {
+  const now = new Date().toISOString();
+  async function executeRecover() {
+    const db = await ensureDb();
+    return db
+      .updateTable("debates")
+      .set({
+        status: "running",
+        finished_at: null,
+        stopped_reason: null,
+        workflow_phase_kind: input.phase?.workflowPhaseKind ?? null,
+        workflow_phase_title: input.phase?.workflowPhaseTitle ?? null,
+        workflow_phase_round: input.phase?.workflowPhaseRound ?? null,
+        runtime_notice_kind: "recovered",
+        runtime_notice_message: "已按一次性自动恢复设置自动重试；如果再次失败，将停留在 failed",
+        runtime_notice_at: now,
+        last_error_code: null,
+        last_error_message: null,
+        ignored_runtime_error_signature: null,
+        ignored_runtime_error_at: null,
+        auto_recover_once_on_failed: false,
+        auto_recover_once_used_at: now,
+        updated_at: now
+      })
+      .where("id", "=", input.debateId)
+      .where("user_id", "=", input.userId)
+      .where("status", "=", "failed")
+      .where("auto_recover_once_on_failed", "=", true)
+      .returningAll()
+      .executeTakeFirst();
+  }
+
+  let row;
+  try {
+    row = await executeRecover();
+  } catch (error) {
+    const details = describeRuntimeError(error);
+    if (String(details.code ?? "") === "42703" && String(details.message ?? "").toLowerCase().includes("auto_recover_once_on_failed")) {
+      await ensureDebateAutoRecoverColumns();
+      row = await executeRecover();
+    } else {
+      throw error;
+    }
+  }
+  return row ? normalizeDebateRow(row as Record<string, unknown>) : null;
 }
 
 export async function setDebateRuntimeNotice(
@@ -3214,6 +3384,30 @@ export function isRecoverableRuntimeInterruption(details: { code?: string | null
     "connection closed",
     "other side closed",
     "client network socket disconnected"
+  ];
+  return patterns.some((pattern) => message.includes(pattern));
+}
+
+export function isNonRetryableSummaryJobError(error: unknown) {
+  const details =
+    typeof error === "string"
+      ? {
+          code: "",
+          message: error
+        }
+      : describeRuntimeError(error);
+  const code = String(details.code ?? "").toUpperCase();
+  const message = String(details.message ?? "").toLowerCase();
+  if (code === "AI_DEMO_KEY_DISABLED" || code === "AI_INVALID_API_KEY" || code === "AI_AUTH_ERROR") {
+    return true;
+  }
+  const patterns = [
+    "invalid_api_key",
+    "invalid access token",
+    "token expired",
+    "incorrect api key",
+    "unauthorized",
+    "authentication failed"
   ];
   return patterns.some((pattern) => message.includes(pattern));
 }
@@ -3833,6 +4027,7 @@ export async function generateRoundSummary(input: {
       });
       return { ok: false, error: "missing_turn_summaries" };
     }
+    const lastTurnNumber = turnSummaries.reduce((max, item) => Math.max(max, item.turnNumber), 0);
     const content = await callWorkflowSummarizerMarkdown({
       userId: input.userId,
       debateId: input.debate.id,
@@ -3867,7 +4062,7 @@ export async function generateRoundSummary(input: {
       userId: input.userId,
       debateId: input.debate.id,
       debateAgentId: input.debateAgentId,
-      turnNumber: input.endedRound * Math.max(1, input.participantCount),
+      turnNumber: lastTurnNumber,
       roundNumber: input.endedRound,
       path: roundPath,
       content: `${nextContent}\n`,
@@ -3960,8 +4155,15 @@ async function enqueueRoundSummaryJob(input: {
 }) {
   const summarizer = getWorkflowSummarizerConfig(input.workflow);
   if (!summarizer || !summarizer.perRound) return null;
+  const roundTurnRange = await resolveActualRoundTurnRange({
+    userId: input.userId,
+    debateId: input.debateId,
+    roundNumber: input.roundNumber,
+    participantCount: input.participantCount
+  });
+  if (!roundTurnRange) return null;
   const dependsOnKeys = Array.from({ length: Math.max(0, input.participantCount) }, (_, index) => {
-    const turnNumber = (input.roundNumber - 1) * input.participantCount + index + 1;
+    const turnNumber = roundTurnRange.startTurn + index;
     return `turn:${turnNumber}`;
   });
   const blocked = dependsOnKeys.length > 0;
@@ -4022,6 +4224,34 @@ async function updateDbSummaryJobLive(job: DebateSummaryJobRecord, message?: str
   await syncSummaryJobToLive(job, message, blockedReason);
 }
 
+async function failOrRetrySummaryJob(
+  job: DebateSummaryJobRecord,
+  error: unknown,
+  labels: {
+    failedMessage: string;
+    retryWaitingMessage: string;
+    deadLetterMessage: string;
+  }
+) {
+  const details = describeRuntimeError(error);
+  const errorMessage = truncateErrorMessage(String(details.message ?? "summary_job_failed"));
+  if (isNonRetryableSummaryJobError(details)) {
+    const failed = await failDebateSummaryJob(job.id, errorMessage);
+    await updateDbSummaryJobLive(failed, labels.failedMessage, errorMessage);
+    return failed;
+  }
+  const retried = await scheduleDebateSummaryJobRetry({
+    id: job.id,
+    attemptCount: job.attemptCount,
+    errorMessage
+  });
+  await updateDbSummaryJobLive(
+    retried,
+    retried.status === "dead_letter" ? labels.deadLetterMessage : labels.retryWaitingMessage
+  );
+  return retried;
+}
+
 export async function runSummaryJobByRecord(job: DebateSummaryJobRecord) {
   const payload = job.payload;
   const workflow = await loadDebateWorkflow(String(payload.userId ?? ""), job.debateId);
@@ -4054,13 +4284,11 @@ export async function runSummaryJobByRecord(job: DebateSummaryJobRecord) {
         refreshFactsBoard: Boolean(payload.refreshFactsBoard)
       });
       if (!result.ok) {
-        const retried = await scheduleDebateSummaryJobRetry({
-          id: job.id,
-          attemptCount: job.attemptCount,
-          errorMessage: truncateErrorMessage(String(result.error ?? "turn_summary_failed"))
+        return await failOrRetrySummaryJob(job, result.error ?? "turn_summary_failed", {
+          failedMessage: "回摘要失败，请更新总结器凭证",
+          retryWaitingMessage: "回摘要待重试",
+          deadLetterMessage: "回摘要进入死信"
         });
-        await updateDbSummaryJobLive(retried, retried.status === "dead_letter" ? "回摘要进入死信" : "回摘要待重试");
-        return retried;
       }
       const completed = await completeDebateSummaryJob(job.id);
       await updateDbSummaryJobLive(completed, "回摘要已完成");
@@ -4106,13 +4334,11 @@ export async function runSummaryJobByRecord(job: DebateSummaryJobRecord) {
           await updateDbSummaryJobLive(blocked, "等待本轮回摘要完成", message);
           return blocked;
         }
-        const retried = await scheduleDebateSummaryJobRetry({
-          id: job.id,
-          attemptCount: job.attemptCount,
-          errorMessage: message
+        return await failOrRetrySummaryJob(job, result.error ?? message, {
+          failedMessage: "轮摘要失败，请更新总结器凭证",
+          retryWaitingMessage: "轮摘要待重试",
+          deadLetterMessage: "轮摘要进入死信"
         });
-        await updateDbSummaryJobLive(retried, retried.status === "dead_letter" ? "轮摘要进入死信" : "轮摘要待重试");
-        return retried;
       }
       const completed = await completeDebateSummaryJob(job.id);
       await updateDbSummaryJobLive(completed, "轮摘要已完成");
@@ -4149,24 +4375,21 @@ export async function runSummaryJobByRecord(job: DebateSummaryJobRecord) {
       now: new Date().toISOString()
     });
     if (!result.ok) {
-      const retried = await scheduleDebateSummaryJobRetry({
-        id: job.id,
-        attemptCount: job.attemptCount,
-        errorMessage: truncateErrorMessage(String(result.error ?? "facts_board_failed"))
+      return await failOrRetrySummaryJob(job, result.error ?? "facts_board_failed", {
+        failedMessage: "事实板失败，请更新总结器凭证",
+        retryWaitingMessage: "事实板待重试",
+        deadLetterMessage: "事实板进入死信"
       });
-      await updateDbSummaryJobLive(retried, retried.status === "dead_letter" ? "事实板进入死信" : "事实板待重试");
-      return retried;
     }
     const completed = await completeDebateSummaryJob(job.id);
     await updateDbSummaryJobLive(completed, completed.status === "completed" ? "事实板已完成" : "事实板待整理最新变更");
     return completed;
   } catch (error) {
-    const retried = await scheduleDebateSummaryJobRetry({
-      id: job.id,
-      attemptCount: job.attemptCount,
-      errorMessage: truncateErrorMessage(String(describeRuntimeError(error).message ?? "summary_job_failed"))
+    const retried = await failOrRetrySummaryJob(job, error, {
+      failedMessage: "总结任务失败，请更新总结器凭证",
+      retryWaitingMessage: "总结任务待重试",
+      deadLetterMessage: "总结任务进入死信"
     });
-    await updateDbSummaryJobLive(retried, retried.status === "dead_letter" ? "总结任务进入死信" : "总结任务待重试");
     await logRuntimeEvent("warn", "summary job execution failed", {
       debateId: job.debateId,
       jobKey: job.jobKey,
@@ -4194,6 +4417,7 @@ export async function runDebate(id: string, userId: string) {
 
   const { runToken } = acquired.snapshot;
   let lastKnownPhase: Pick<DebateRecord, "workflowPhaseKind" | "workflowPhaseTitle" | "workflowPhaseRound"> | null = null;
+  let shouldAutoRestartAfterFailure = false;
 
   try {
     const pendingAutoSegmentByDebateAgentId = new Map<string, { reason: string }>();
@@ -4501,31 +4725,52 @@ export async function runDebate(id: string, userId: string) {
         stage: "saving",
         updatedAt: createdAt
       });
-      await db.executeQuery(sql`
-        insert into debate_turns (
-          id, debate_id, ai_agent_id, debate_agent_id, seat_number, turn_number, content, structured_output,
-          parse_status, token_used, response_time_ms, retry_count, error_code, created_at
-        ) values (
-          ${randomUUID()},
-          ${id},
-          ${String((currentParticipant as { ai_agent_id?: unknown }).ai_agent_id)},
-          ${String((currentParticipant as { id?: unknown }).id)},
-          ${typeof (currentParticipant as any).turn_order === "number"
-            ? Number((currentParticipant as any).turn_order)
-            : typeof (currentParticipant as any).turnOrder === "number"
-              ? Number((currentParticipant as any).turnOrder)
-              : currentIndex + 1},
-          ${debate.currentTurn + 1},
-          ${persistedResponse.content},
-          ${persistedResponse.structuredOutput ? JSON.stringify(persistedResponse.structuredOutput) : null},
-          ${persistedResponse.parseStatus},
-          ${tokenUsed},
-          ${responseTimeMs},
-          ${retryCount},
-          ${null},
-          ${createdAt}
-        )
-      `.compile(db));
+      const turnPersisted = await db.transaction().execute(async (trx) => {
+        await trx.executeQuery(sql`select pg_advisory_xact_lock(hashtextextended(${id}, 0))`.compile(trx));
+        const existing = await trx
+          .selectFrom("debate_turns")
+          .select(["id"])
+          .where("debate_id", "=", id)
+          .where("turn_number", "=", messageNumber)
+          .executeTakeFirst();
+        if (existing) return false;
+
+        await trx.executeQuery(sql`
+          insert into debate_turns (
+            id, debate_id, ai_agent_id, debate_agent_id, seat_number, turn_number, content, structured_output,
+            parse_status, token_used, response_time_ms, retry_count, error_code, created_at
+          ) values (
+            ${randomUUID()},
+            ${id},
+            ${String((currentParticipant as { ai_agent_id?: unknown }).ai_agent_id)},
+            ${String((currentParticipant as { id?: unknown }).id)},
+            ${typeof (currentParticipant as any).turn_order === "number"
+              ? Number((currentParticipant as any).turn_order)
+              : typeof (currentParticipant as any).turnOrder === "number"
+                ? Number((currentParticipant as any).turnOrder)
+                : currentIndex + 1},
+            ${messageNumber},
+            ${persistedResponse.content},
+            ${persistedResponse.structuredOutput ? JSON.stringify(persistedResponse.structuredOutput) : null},
+            ${persistedResponse.parseStatus},
+            ${tokenUsed},
+            ${responseTimeMs},
+            ${retryCount},
+            ${null},
+            ${createdAt}
+          )
+        `.compile(trx));
+        return true;
+      });
+
+      if (!turnPersisted) {
+        await logRuntimeEvent("warn", "skip duplicate turn persistence", {
+          debateId: id,
+          turnNumber: messageNumber,
+          debateAgentId: String(currentParticipant.id)
+        });
+        continue;
+      }
 
       try {
         const turnChunks = splitTextIntoRetrievalChunks(persistedResponse.content, 1_200, 180);
@@ -4558,7 +4803,7 @@ export async function runDebate(id: string, userId: string) {
           now: createdAt,
           entry: {
             at: createdAt,
-            turnNumber: debate.currentTurn + 1,
+            turnNumber: messageNumber,
             roundNumber,
             debateAgentId: String(currentParticipant.id),
             seatNumber:
@@ -4960,9 +5205,18 @@ export async function runDebate(id: string, userId: string) {
         lastErrorCode: details.code,
         lastErrorMessage: truncateErrorMessage(details.message)
       });
+      const recovered = await autoRecoverFailedDebateOnce({
+        debateId: id,
+        userId,
+        phase: lastKnownPhase
+      });
+      shouldAutoRestartAfterFailure = Boolean(recovered);
     }
   } finally {
     releaseDebateRun(id, runToken);
     clearDebateLiveProgress(id);
+    if (shouldAutoRestartAfterFailure) {
+      void runDebate(id, userId);
+    }
   }
 }

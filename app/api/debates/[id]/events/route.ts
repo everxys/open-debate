@@ -10,17 +10,6 @@ function sseEvent(event: string, data: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-function shouldPreferLiveJob(
-  dbJob: ReturnType<typeof toDebateSummaryJobLiveView> | undefined,
-  liveJob: ReturnType<typeof toDebateSummaryJobLiveView>
-) {
-  if (!dbJob) return true;
-  if ((dbJob.leaseState === "stale" || dbJob.leaseState === "recovering") && dbJob.status === liveJob.status) {
-    return false;
-  }
-  return liveJob.updatedAt > dbJob.updatedAt;
-}
-
 async function requireDebateOwnership(debateId: string, userId: string) {
   const result = await query<{ user_id: string; is_shared: boolean }>(
     "select user_id, is_shared from debates where id = $1",
@@ -48,40 +37,54 @@ export async function GET(
     }
 
     const encoder = new TextEncoder();
+    let unsubscribe = () => {};
+    let closed = false;
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
+    const teardown = () => {
+      if (closed) return;
+      closed = true;
+      request.signal.removeEventListener("abort", abort);
+      unsubscribe();
+    };
+    const abort = () => {
+      teardown();
+      try {
+        streamController?.close();
+      } catch {
+      }
+    };
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
-        let unsubscribe = () => {};
-        const abort = () => {
-          controller.close();
-          request.signal.removeEventListener("abort", abort);
-          unsubscribe();
-        };
-
+        streamController = controller;
         const initial = getDebateLiveProgress(id);
         const dbJobs = await listActiveDebateSummaryJobs(id).catch(() => []);
-        const mergedJobs = new Map<string, ReturnType<typeof toDebateSummaryJobLiveView>>();
-        for (const job of dbJobs) {
-          mergedJobs.set(job.jobKey, toDebateSummaryJobLiveView(job));
-        }
-        for (const job of initial.summaryJobs) {
-          const current = mergedJobs.get(job.key);
-          if (shouldPreferLiveJob(current, job)) mergedJobs.set(job.key, job);
-        }
         if (initial.progress) {
           controller.enqueue(encoder.encode(sseEvent("turn_start", { progress: initial.progress })));
         }
-        for (const job of mergedJobs.values()) {
-          controller.enqueue(encoder.encode(sseEvent("summary_job", { debateId: id, job })));
+        for (const job of dbJobs) {
+          controller.enqueue(encoder.encode(sseEvent("summary_job", { debateId: id, job: toDebateSummaryJobLiveView(job) })));
         }
         const workerHealth = await getSummaryWorkerHealthSnapshot().catch(() => ({ workers: [], queue: [] }));
         controller.enqueue(encoder.encode(sseEvent("summary_worker_health", { workerHealth })));
         controller.enqueue(encoder.encode(sseEvent("hello", { at: new Date().toISOString() })));
 
         unsubscribe = subscribeDebateLiveEvents(id, (evt) => {
-          controller.enqueue(encoder.encode(sseEvent(evt.type, evt)));
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(sseEvent(evt.type, evt)));
+          } catch {
+            teardown();
+            try {
+              controller.close();
+            } catch {
+            }
+          }
         });
 
         request.signal.addEventListener("abort", abort);
+      },
+      cancel() {
+        teardown();
       }
     });
 

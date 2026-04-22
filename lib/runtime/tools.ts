@@ -567,7 +567,13 @@ export function normalizeDebateOutputPath(rawPath: string, allowedPrefixes?: str
   if (normalizedPath.includes("..")) return null;
   const allowedPathPrefixes =
     Array.isArray(allowedPrefixes) && allowedPrefixes.length > 0 ? allowedPrefixes : ["final/", "outputs/"];
-  if (allowedPathPrefixes.some((prefix) => normalizedPath.startsWith(prefix))) return normalizedPath;
+  if (
+    allowedPathPrefixes.some((prefix) =>
+      prefix.endsWith("/") ? normalizedPath.startsWith(prefix) : normalizedPath === prefix
+    )
+  ) {
+    return normalizedPath;
+  }
   return null;
 }
 

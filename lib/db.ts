@@ -12,6 +12,13 @@ const globalPool = globalThis as typeof globalThis & {
   openDebateSummaryWorkerScheduled?: boolean;
 };
 
+type PgErrorLike = {
+  code?: unknown;
+  errno?: unknown;
+  message?: unknown;
+  cause?: unknown;
+};
+
 /** Schedule debate runtime recovery after DB is ready */
 function scheduleDebateRuntimeRecovery(reason = "db_ready") {
   if (typeof window !== "undefined") return;
@@ -82,11 +89,56 @@ function getPgErrorDetails(error: unknown) {
   return Object.keys(details).length > 0 ? details : null;
 }
 
+function flattenPgErrorCodes(error: unknown, into: Set<string>) {
+  if (!error || typeof error !== "object") return;
+  const pgError = error as PgErrorLike;
+  for (const value of [pgError.code, pgError.errno]) {
+    if (typeof value === "string" && value.trim()) into.add(value.trim());
+  }
+  if (pgError.cause) flattenPgErrorCodes(pgError.cause, into);
+}
+
+function isRecoverablePoolError(error: unknown) {
+  const codes = new Set<string>();
+  flattenPgErrorCodes(error, codes);
+  return (
+    codes.has("ECONNRESET") ||
+    codes.has("ECONNREFUSED") ||
+    codes.has("57P01") ||
+    codes.has("57P02") ||
+    codes.has("57P03") ||
+    codes.has("08001") ||
+    codes.has("08006")
+  );
+}
+
+function resetDbSingletons(pool?: Pool) {
+  if (pool && globalPool.openDebatePool && globalPool.openDebatePool !== pool) return;
+  globalPool.openDebateDb = undefined;
+  globalPool.openDebateSchemaReady = undefined;
+  globalPool.openDebatePool = undefined;
+}
+
+function attachPoolErrorHandler(pool: Pool) {
+  pool.on("error", (error) => {
+    console.warn("open-debate pg pool emitted error", {
+      recoverable: isRecoverablePoolError(error),
+      details: getPgErrorDetails(error)
+    });
+
+    resetDbSingletons(pool);
+
+    // Detach broken singletons immediately; let the pool finish closing in the background.
+    void pool.end().catch(() => null);
+  });
+}
+
 /** Get or create global pool singleton */
 export function getPool(): Pool {
   if (!process.env.DATABASE_URL) throw new Error("Missing DATABASE_URL");
   if (!globalPool.openDebatePool) {
     globalPool.openDebatePool = new Pool({ connectionString: process.env.DATABASE_URL });
+    attachPoolErrorHandler(globalPool.openDebatePool);
   }
   return globalPool.openDebatePool;
 }
@@ -106,7 +158,14 @@ export function getDb(): Kysely<OpenDebateDb> {
 export async function ensureDbReady(): Promise<Pool> {
   const pool = getPool();
   if (!globalPool.openDebateSchemaReady) {
-    globalPool.openDebateSchemaReady = ensureSchema(pool);
+    globalPool.openDebateSchemaReady = ensureSchema(pool).catch((error) => {
+      if (isRecoverablePoolError(error)) {
+        resetDbSingletons(pool);
+      } else if (globalPool.openDebatePool === pool) {
+        globalPool.openDebateSchemaReady = undefined;
+      }
+      throw error;
+    });
   }
   await globalPool.openDebateSchemaReady;
   scheduleDebateRuntimeRecovery();
@@ -117,6 +176,12 @@ export async function ensureDbReady(): Promise<Pool> {
 export async function ensureDb() {
   await ensureDbReady();
   return getDb();
+}
+
+export async function ensureDebateAutoRecoverColumns() {
+  const pool = await ensureDbReady();
+  await pool.query("alter table debates add column if not exists auto_recover_once_on_failed boolean not null default false");
+  await pool.query("alter table debates add column if not exists auto_recover_once_used_at timestamptz null");
 }
 
 async function ensureSchema(pool: Pool) {
@@ -134,6 +199,19 @@ async function ensureSchema(pool: Pool) {
   async function createIndexIfTableExists(tableName: string, statement: string) {
     if (!(await hasTable(tableName))) return;
     await pool.query(statement);
+  }
+
+  async function createUniqueIndexIfClean(tableName: string, statement: string, duplicateMessage: string) {
+    if (!(await hasTable(tableName))) return;
+    try {
+      await pool.query(statement);
+    } catch (error) {
+      if ((error as { code?: string }).code === "23505") {
+        console.warn(duplicateMessage);
+        return;
+      }
+      throw error;
+    }
   }
 
   await alterTableIfExists("users", "alter table users add column if not exists role text not null default 'user'");
@@ -158,6 +236,11 @@ async function ensureSchema(pool: Pool) {
   await createIndexIfTableExists(
     "debates",
     "create index if not exists idx_debates_source_workspace_id on debates(source_workspace_id)"
+  );
+  await createUniqueIndexIfClean(
+    "debate_turns",
+    "create unique index if not exists idx_debate_turns_debate_id_turn_number_unique on debate_turns(debate_id, turn_number)",
+    "Skipped unique debate_turns(debate_id, turn_number) index because existing duplicate turns need manual cleanup."
   );
   await pool.query(`
     do $$
@@ -659,6 +742,8 @@ async function ensureSchema(pool: Pool) {
   await pool.query("create index if not exists idx_debate_context_embeddings_debate_id on debate_context_embeddings (debate_id)");
   // Per-seat identity (cannot rely on ai_agents.name because same config can be reused).
   await pool.query("alter table debate_agents add column if not exists display_name text null");
+  await pool.query("alter table debates add column if not exists auto_recover_once_on_failed boolean not null default false");
+  await pool.query("alter table debates add column if not exists auto_recover_once_used_at timestamptz null");
   await pool.query(`
     update debate_agents
        set display_name = concat('Seat-', turn_order)

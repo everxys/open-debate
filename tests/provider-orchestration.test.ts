@@ -6,6 +6,7 @@ import {
   assertNonEmptyProviderText,
   assertProviderApiKeyEnabled
 } from "@/lib/runtime/provider-orchestration";
+import { isNonRetryableSummaryJobError } from "@/lib/runtime-main";
 
 test("assertNonEmptyProviderText returns trimmed text when content exists", () => {
   const result = assertNonEmptyProviderText("  hello world  ", {
@@ -50,4 +51,21 @@ test("assertProviderApiKeyEnabled rejects demo keys", () => {
 
 test("assertProviderApiKeyEnabled allows normal keys", () => {
   assert.doesNotThrow(() => assertProviderApiKeyEnabled("sk-live-key"));
+});
+
+test("isNonRetryableSummaryJobError detects invalid api key payloads", () => {
+  assert.equal(
+    isNonRetryableSummaryJobError(
+      new AppError(
+        "AI_INVALID_API_KEY",
+        401,
+        '{"error":{"code":"invalid_api_key","message":"invalid access token or token expired"}}'
+      )
+    ),
+    true
+  );
+});
+
+test("isNonRetryableSummaryJobError keeps network interruptions retryable", () => {
+  assert.equal(isNonRetryableSummaryJobError(new AppError("AI_NETWORK_ERROR", 502, "fetch failed")), false);
 });

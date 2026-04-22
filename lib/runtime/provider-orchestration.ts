@@ -73,6 +73,7 @@ import {
   loadWorkflowIdeaBankInline,
   maybeGenerateVoteAnnouncementWithSeat1,
   recordImplicitFileReads,
+  resolveDebateIdeaBankPaths,
   toolDebateFilesStat,
   toolDebateFilesWrite,
   toolListFiles,
@@ -83,6 +84,24 @@ import {
 } from "@/lib/runtime-main";
 
 const OPENAI_COMPAT_MAX_INPUT_CHARS = 180_000;
+
+async function getWorkflowAllowedOutputPaths(input: {
+  workflow: Awaited<ReturnType<typeof loadDebateWorkflow>>;
+  userId: string;
+  debateId: string;
+}) {
+  const { workflow } = input;
+  const paths = new Set(workflow?.deliverables.allowedPaths ?? ["final/", "outputs/"]);
+  const ideaBank = await resolveDebateIdeaBankPaths({
+    workflow,
+    userId: input.userId,
+    debateId: input.debateId
+  });
+  for (const path of Object.values(ideaBank.derivedFiles)) {
+    if (path) paths.add(path);
+  }
+  return Array.from(paths);
+}
 
 type ProviderUsageSummary = {
   promptTokens: number | null;
@@ -250,7 +269,11 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
   const participantsInline =
     input.messageNumber <= input.participantCount ? null : await loadDebateParticipantsInline(input.userId, input.debate.id);
   const workflow = await loadDebateWorkflow(input.userId, input.debate.id);
-  const allowedOutputPaths = workflow?.deliverables.allowedPaths ?? ["final/", "outputs/"];
+  const allowedOutputPaths = await getWorkflowAllowedOutputPaths({
+    workflow,
+    userId: input.userId,
+    debateId: input.debate.id
+  });
   const requiredDeliverables = workflow?.deliverables.requiredFiles ?? [];
   const pendingDeliverables = await listMissingRequiredDeliverables({
     userId: input.userId,

@@ -3,13 +3,19 @@ import { sql } from "kysely";
 
 import { requireSessionUser } from "@/lib/auth";
 import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type DebateParticipantRoleType } from "@/lib/debate-role-types";
-import { ensureDb } from "@/lib/db";
+import { ensureDb, ensureDebateAutoRecoverColumns } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
 import { runDebate } from "@/lib/runtime";
 import { listStrategyFileAccessRules, mergeWorkflowConfigWithFileAccessRules } from "@/lib/strategies";
 import type { DebateRecord } from "@/lib/types";
-import { createDebateSchema, ignoreDebateRuntimeErrorSchema, updateDebateQuestionSchema, updateDebateSharingSchema } from "@/lib/validation";
+import {
+  createDebateSchema,
+  ignoreDebateRuntimeErrorSchema,
+  updateDebateAutoRecoverSchema,
+  updateDebateQuestionSchema,
+  updateDebateSharingSchema
+} from "@/lib/validation";
 import {
   createDefaultDebateWorkflowConfig,
   type DebateWorkflowConfig,
@@ -87,6 +93,8 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
     lastErrorMessage: (row.last_error_message as string | null) ?? null,
     ignoredRuntimeErrorSignature: (row.ignored_runtime_error_signature as string | null) ?? null,
     ignoredRuntimeErrorAt: (row.ignored_runtime_error_at as string | null) ?? null,
+    autoRecoverOnceOnFailed: Boolean(row.auto_recover_once_on_failed),
+    autoRecoverOnceUsedAt: (row.auto_recover_once_used_at as string | null) ?? null,
     startedAt: (row.started_at as string | null) ?? null,
     finishedAt: (row.finished_at as string | null) ?? null,
     stoppedReason: (row.stopped_reason as string | null) ?? null,
@@ -358,6 +366,8 @@ async function insertPendingDebate(input: {
       last_error_message: null,
       ignored_runtime_error_signature: null,
       ignored_runtime_error_at: null,
+      auto_recover_once_on_failed: false,
+      auto_recover_once_used_at: null,
       started_at: null,
       finished_at: null,
       stopped_reason: null,
@@ -851,10 +861,15 @@ export async function getDebateDetail(id: string) {
     workflowPhaseKind: debate.workflowPhaseKind,
     workflowPhaseTitle: debate.workflowPhaseTitle,
     workflowPhaseRound: debate.workflowPhaseRound,
+    runtimeNoticeKind: debate.runtimeNoticeKind,
+    runtimeNoticeMessage: debate.runtimeNoticeMessage,
+    runtimeNoticeAt: debate.runtimeNoticeAt,
     lastErrorCode: debate.lastErrorCode,
     lastErrorMessage: debate.lastErrorMessage,
     ignoredRuntimeErrorSignature: debate.ignoredRuntimeErrorSignature,
     ignoredRuntimeErrorAt: debate.ignoredRuntimeErrorAt,
+    autoRecoverOnceOnFailed: debate.autoRecoverOnceOnFailed,
+    autoRecoverOnceUsedAt: debate.autoRecoverOnceUsedAt,
     stoppedReason: debate.stoppedReason,
     agents
   };
@@ -1122,6 +1137,42 @@ export async function ignoreDebateRuntimeError(id: string, input: unknown) {
     .where("user_id", "=", session.userId)
     .executeTakeFirst();
 
+  return getDebateDetail(id);
+}
+
+export async function updateDebateAutoRecover(id: string, input: unknown) {
+  const session = await requireSessionUser();
+  const data = updateDebateAutoRecoverSchema.parse(input);
+  const now = new Date().toISOString();
+  async function executeUpdate() {
+    const db = await ensureDb();
+    return db
+      .updateTable("debates")
+      .set({
+        auto_recover_once_on_failed: data.autoRecoverOnceOnFailed,
+        auto_recover_once_used_at: data.autoRecoverOnceOnFailed ? null : sql`auto_recover_once_used_at`,
+        updated_at: now
+      })
+      .where("id", "=", id)
+      .where("user_id", "=", session.userId)
+      .returningAll()
+      .executeTakeFirst();
+  }
+
+  let result;
+  try {
+    result = await executeUpdate();
+  } catch (error) {
+    if (isMissingColumnError(error, "auto_recover_once_on_failed")) {
+      await ensureDebateAutoRecoverColumns();
+      result = await executeUpdate();
+    } else {
+      throw error;
+    }
+  }
+  if (!result) {
+    throw new AppError("NOT_FOUND", 404, "Debate not found");
+  }
   return getDebateDetail(id);
 }
 

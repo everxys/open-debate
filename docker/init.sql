@@ -153,6 +153,7 @@ create index if not exists idx_debates_source_workspace_id on debates(source_wor
 create index if not exists idx_debates_is_shared_updated_at on debates(is_shared, updated_at desc);
 create index if not exists idx_debate_agents_debate_id on debate_agents(debate_id);
 create index if not exists idx_debate_turns_debate_id on debate_turns(debate_id);
+create unique index if not exists idx_debate_turns_debate_id_turn_number_unique on debate_turns(debate_id, turn_number);
 
 create table if not exists rate_limit_counters (
   key text not null,

@@ -26,6 +26,15 @@ type SummaryWorkerTickInput = {
   reschedule: boolean;
 };
 
+const SUMMARY_WORKER_DEFAULT_CONCURRENCY = 3;
+const SUMMARY_WORKER_MAX_CONCURRENCY = 8;
+
+function parseSummaryWorkerConcurrency() {
+  const raw = Number(process.env.OPEN_DEBATE_SUMMARY_WORKER_CONCURRENCY ?? SUMMARY_WORKER_DEFAULT_CONCURRENCY);
+  if (!Number.isFinite(raw)) return SUMMARY_WORKER_DEFAULT_CONCURRENCY;
+  return Math.max(1, Math.min(SUMMARY_WORKER_MAX_CONCURRENCY, Math.floor(raw)));
+}
+
 const workerGlobal = globalThis as typeof globalThis & {
   openDebateSummaryWorkerPromise?: Promise<{ workerId: string }>;
   openDebateSummaryWorkerTimer?: ReturnType<typeof setTimeout> | null;
@@ -38,6 +47,12 @@ const workerGlobal = globalThis as typeof globalThis & {
   openDebateSummaryWorkerWakeClient?: PoolClient | null;
   openDebateSummaryWorkerWakeListenerPromise?: Promise<void>;
 };
+
+async function releaseSummaryWorkerWakeClient(client: PoolClient | null | undefined) {
+  if (!client) return;
+  await client.query(`unlisten ${SUMMARY_WORKER_NOTIFY_CHANNEL}`).catch(() => null);
+  client.release();
+}
 
 function flattenErrorCodes(error: unknown, into: Set<string>) {
   if (!error) return;
@@ -158,8 +173,11 @@ async function startSummaryWorkerWakeListener(input: SummaryWorkerTickInput) {
       scheduleSummaryWorkerTick(input, 0);
     });
     client.on("error", (error) => {
-      workerGlobal.openDebateSummaryWorkerWakeClient = null;
+      if (workerGlobal.openDebateSummaryWorkerWakeClient === client) {
+        workerGlobal.openDebateSummaryWorkerWakeClient = null;
+      }
       workerGlobal.openDebateSummaryWorkerWakeListenerPromise = undefined;
+      void releaseSummaryWorkerWakeClient(client).catch(() => null);
       if (workerGlobal.openDebateSummaryWorkerStopped) return;
       console.warn("summary worker wake listener lost database connection", error);
       setTimeout(() => {
@@ -169,7 +187,11 @@ async function startSummaryWorkerWakeListener(input: SummaryWorkerTickInput) {
 
     await client.query(`listen ${SUMMARY_WORKER_NOTIFY_CHANNEL}`);
   })().catch((error) => {
-    workerGlobal.openDebateSummaryWorkerWakeClient = null;
+    const client = workerGlobal.openDebateSummaryWorkerWakeClient;
+    if (client) {
+      workerGlobal.openDebateSummaryWorkerWakeClient = null;
+      void releaseSummaryWorkerWakeClient(client).catch(() => null);
+    }
     workerGlobal.openDebateSummaryWorkerWakeListenerPromise = undefined;
     throw error;
   });
@@ -185,6 +207,7 @@ async function tickSummaryJobWorker(input: SummaryWorkerTickInput) {
   workerGlobal.openDebateSummaryWorkerTickRunning = true;
   let nextDelayMs = 4_000;
   try {
+    const concurrency = parseSummaryWorkerConcurrency();
     await upsertSummaryWorkerHeartbeat({ workerId: input.workerId, mode: input.mode, status: "idle", currentJob: null });
     const coalesced = await coalesceActiveFactsBoardJobs();
     if (coalesced.removed > 0) {
@@ -201,8 +224,8 @@ async function tickSummaryJobWorker(input: SummaryWorkerTickInput) {
 
     const claimed = await claimRunnableDebateSummaryJobs({
       workerId: input.workerId,
-      limit: 1,
-      maxConcurrentPerDebate: 1
+      limit: concurrency,
+      maxConcurrentPerDebate: concurrency
     });
     if (claimed.length > 0) {
       nextDelayMs = 500;
@@ -214,19 +237,22 @@ async function tickSummaryJobWorker(input: SummaryWorkerTickInput) {
       });
     }
 
-    for (const job of claimed) {
-      await upsertSummaryWorkerHeartbeat({ workerId: input.workerId, mode: input.mode, status: "running", currentJob: job });
-      // eslint-disable-next-line no-await-in-loop
-      const result = await runJobWithLeaseHeartbeat(input, job);
-      // eslint-disable-next-line no-await-in-loop
-      await upsertSummaryWorkerHeartbeat({
-        workerId: input.workerId,
-        mode: input.mode,
-        status: "idle",
-        currentJob: null,
-        completedDelta: result.status === "completed" ? 1 : 0,
-        failedDelta: isFailedJobResult(result) ? 1 : 0
-      });
+    await Promise.all(
+      claimed.map(async (job) => {
+        await upsertSummaryWorkerHeartbeat({ workerId: input.workerId, mode: input.mode, status: "running", currentJob: job });
+        const result = await runJobWithLeaseHeartbeat(input, job);
+        await upsertSummaryWorkerHeartbeat({
+          workerId: input.workerId,
+          mode: input.mode,
+          status: "running",
+          currentJob: null,
+          completedDelta: result.status === "completed" ? 1 : 0,
+          failedDelta: isFailedJobResult(result) ? 1 : 0
+        });
+      })
+    );
+    if (claimed.length > 0) {
+      await upsertSummaryWorkerHeartbeat({ workerId: input.workerId, mode: input.mode, status: "idle", currentJob: null });
     }
   } catch (error) {
     nextDelayMs = getNextTickDelay(error);
@@ -319,10 +345,7 @@ export async function stopSummaryJobWorkerLoop() {
   const wakeClient = workerGlobal.openDebateSummaryWorkerWakeClient;
   workerGlobal.openDebateSummaryWorkerWakeClient = null;
   workerGlobal.openDebateSummaryWorkerWakeListenerPromise = undefined;
-  if (wakeClient) {
-    await wakeClient.query(`unlisten ${SUMMARY_WORKER_NOTIFY_CHANNEL}`).catch(() => null);
-    wakeClient.release();
-  }
+  await releaseSummaryWorkerWakeClient(wakeClient).catch(() => null);
   workerGlobal.openDebateSummaryWorkerPromise = undefined;
 }
 

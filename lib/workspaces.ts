@@ -50,17 +50,6 @@ type WorkspaceFileRow = {
   updated_at: string;
 };
 
-const DEFAULT_WORKSPACE_FILES = [
-  { path: "debate/ideas/raw-idea-bank.md", content: "" },
-  { path: "debate/ideas/selected-s-tier.md", content: "" },
-  { path: "debate/ideas/selected-a-tier.md", content: "" },
-  { path: "debate/ideas/rejected-or-merged.md", content: "" },
-  { path: "debate/ideas/event-mappings.md", content: "" },
-  { path: "debate/ideas/newly-invented-ideas.md", content: "" },
-  { path: "debate/notes/project-brief.md", content: "" },
-  { path: "debate/reference/private-materials.md", content: "" }
-] as const;
-
 function isMissingTableError(error: unknown, table: string) {
   if (typeof error !== "object" || error === null) return false;
   const anyError = error as { code?: unknown; message?: unknown };
@@ -241,19 +230,6 @@ export async function createWorkspace(input: unknown) {
           .execute();
       }
 
-      for (const file of DEFAULT_WORKSPACE_FILES) {
-        await trx
-          .insertInto("workspace_files")
-          .values({
-            id: randomUUID(),
-            workspace_id: workspaceId,
-            path: file.path,
-            content: file.content,
-            created_at: now,
-            updated_at: now
-          })
-          .execute();
-      }
     });
   } catch (error) {
     if (isMissingTableError(error, "workspaces") || isMissingTableError(error, "workspace_role_bindings") || isMissingTableError(error, "workspace_files")) {

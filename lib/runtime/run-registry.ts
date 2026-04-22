@@ -7,13 +7,24 @@ export type DebateRunSnapshot = {
   runToken: string;
 };
 
+const ACTIVE_DEBATE_RUN_STALE_MS = 30 * 60 * 1000;
 const activeDebateRuns = new Map<string, DebateRunSnapshot>();
 
+function reapStaleDebateRuns(now = Date.now()) {
+  for (const [id, snapshot] of activeDebateRuns.entries()) {
+    if (now - snapshot.heartbeatAt > ACTIVE_DEBATE_RUN_STALE_MS) {
+      activeDebateRuns.delete(id);
+    }
+  }
+}
+
 export function getDebateRunSnapshot(id: string) {
+  reapStaleDebateRuns();
   return activeDebateRuns.get(id) ?? null;
 }
 
 export function tryAcquireDebateRun(id: string, userId: string) {
+  reapStaleDebateRuns();
   const existing = getDebateRunSnapshot(id);
   if (existing) {
     return { acquired: false as const, existing };
@@ -31,6 +42,7 @@ export function tryAcquireDebateRun(id: string, userId: string) {
 }
 
 export function touchDebateRun(id: string, runToken: string) {
+  reapStaleDebateRuns();
   const current = activeDebateRuns.get(id);
   if (!current || current.runToken !== runToken) return null;
   const next = { ...current, heartbeatAt: Date.now() };
@@ -39,6 +51,7 @@ export function touchDebateRun(id: string, runToken: string) {
 }
 
 export function releaseDebateRun(id: string, runToken: string) {
+  reapStaleDebateRuns();
   const current = activeDebateRuns.get(id);
   if (!current || current.runToken !== runToken) return false;
   activeDebateRuns.delete(id);

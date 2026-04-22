@@ -213,6 +213,8 @@ export type DebateTable = {
   last_error_message: string | null;
   ignored_runtime_error_signature: string | null;
   ignored_runtime_error_at: NullableTimestampString;
+  auto_recover_once_on_failed: boolean;
+  auto_recover_once_used_at: NullableTimestampString;
   started_at: NullableTimestampString;
   finished_at: NullableTimestampString;
   stopped_reason: string | null;

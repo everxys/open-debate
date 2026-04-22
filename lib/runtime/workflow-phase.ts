@@ -199,6 +199,23 @@ export function mapSpeechRoundIndexToActualRound(speechRoundIndex: number, close
   return actualRound;
 }
 
+export function mapActualRoundToSpeechRoundIndex(actualRound: number, closedVoteRounds: number[]) {
+  if (!Number.isFinite(actualRound) || actualRound <= 0) return null;
+  const normalizedActualRound = Math.floor(actualRound);
+  const voteRounds = new Set(
+    closedVoteRounds
+      .filter((round) => Number.isFinite(round) && round > 0)
+      .map((round) => Math.floor(round))
+  );
+  if (voteRounds.has(normalizedActualRound)) return null;
+  let speechRoundIndex = 0;
+  for (let round = 1; round <= normalizedActualRound; round += 1) {
+    if (voteRounds.has(round)) continue;
+    speechRoundIndex += 1;
+  }
+  return speechRoundIndex > 0 ? speechRoundIndex : null;
+}
+
 export function resolveCurrentRoundNumberForWorkflow(input: {
   currentTurn: number;
   participantCount: number;
