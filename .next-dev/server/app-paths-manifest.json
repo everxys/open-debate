@@ -1,15 +1,10 @@
 {
-  "/api/debates/route": "app/api/debates/route.js",
-  "/api/workspaces/route": "app/api/workspaces/route.js",
-  "/api/workspaces/[id]/create-debate/route": "app/api/workspaces/[id]/create-debate/route.js",
   "/api/debates/[id]/route": "app/api/debates/[id]/route.js",
   "/api/debates/[id]/turns/route": "app/api/debates/[id]/turns/route.js",
   "/api/debates/[id]/summary-jobs/route": "app/api/debates/[id]/summary-jobs/route.js",
-  "/api/agents/route": "app/api/agents/route.js",
   "/api/debates/[id]/files/route": "app/api/debates/[id]/files/route.js",
-  "/api/debates/[id]/start/route": "app/api/debates/[id]/start/route.js",
+  "/api/agents/route": "app/api/agents/route.js",
+  "/api/debates/[id]/turns/[turnNumber]/route": "app/api/debates/[id]/turns/[turnNumber]/route.js",
   "/api/debates/[id]/events/route": "app/api/debates/[id]/events/route.js",
-  "/(main)/debates/[id]/page": "app/(main)/debates/[id]/page.js",
-  "/(main)/debates/page": "app/(main)/debates/page.js",
-  "/(main)/workspaces/page": "app/(main)/workspaces/page.js"
+  "/(main)/debates/[id]/page": "app/(main)/debates/[id]/page.js"
 }

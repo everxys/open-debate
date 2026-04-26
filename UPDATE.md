@@ -287,6 +287,7 @@
 - 2026-04-22: 修复辩论详情页状态区彩色栏之间个别贴连的问题：状态摘要区改为统一的纵向堆叠容器，给 `共识 / 阶段 / 自动恢复 / 总结任务` 等卡片提供一致的垂直间距，避免部分卡片因为没有自带 margin 而直接挤在一起。
 - 2026-04-22: 修复移动端长错误状态把侧栏撑出边框的问题：状态区顶部的“当前席位 + 实时状态”改为上下堆叠，并给状态文本开启 `overflow-wrap:anywhere`，避免模型/接口返回的长错误 JSON 或 request id 把整个卡片横向撑爆。
 - 2026-04-22: 修复 OpenAI 兼容 provider 因 `max_tokens` 超限直接报 `InvalidParameter` 的问题：运行时现在会按 provider 统一夹紧请求输出上限，OpenAI 路径默认和显式配置都不会超过 `32768`；agent 创建/更新/导入也新增同样的上限校验，并在读取旧配置时把超限 `max_output_tokens` 压到实际可用范围，避免库里残留的旧脏值继续把运行中的辩论打崩。
+- 2026-04-26: `.gitignore` 新增 `.next-dev/`，避免 Next.js 开发态构建产物、热更新文件和 dev trace 持续污染工作区。
 - 2026-04-26: 把小说工作台的 Phase 2 重新拉回 ledger 驱动：`workflow.json` 现在显式配置 `debate/ideas/current-battlefield.md` 与整套 idea-bank 衍生文件，Phase 2 提示改为先读 `current-battlefield`、再按需对照 `raw-idea-bank`，并明确这些文件就是 Phase 2 持续沉淀的权威 ledger，而不是留到 Phase 3 才写的空模板。
 - 2026-04-26: 运行时新增阶段优先写目标：provider 编排会按当前 phase 选出 `current-battlefield / selected-s-tier / event-mappings / selected-a-tier` 等优先写文件，harness policy 会先暴露这批目标并把写入约束收窄到它们，避免 Phase 2 还没压出中间状态就被 `final/*` 重交付文件带偏。
 - 2026-04-26: idea-bank inline 现在先注入 `current-battlefield`，只有战场摘要仍为空时才大段塞入 `raw-idea-bank`，降低模型被原始点子库淹没的概率；辩论页和 workflow 摘要也同步展示新的 `current-battlefield` 配置。

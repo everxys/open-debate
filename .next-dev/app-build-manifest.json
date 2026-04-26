@@ -1,60 +1,9 @@
 {
   "pages": {
-    "/layout": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/css/app/layout.css",
-      "static/chunks/app/layout.js"
-    ],
-    "/(main)/layout": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/(main)/layout.js"
-    ],
-    "/(main)/debates/page": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/(main)/debates/page.js"
-    ],
-    "/api/debates/route": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/api/debates/route.js"
-    ],
-    "/(main)/workspaces/page": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/(main)/workspaces/page.js"
-    ],
-    "/api/workspaces/route": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/api/workspaces/route.js"
-    ],
-    "/api/workspaces/[id]/create-debate/route": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/api/workspaces/[id]/create-debate/route.js"
-    ],
-    "/(main)/debates/[id]/page": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/(main)/debates/[id]/page.js"
-    ],
     "/api/debates/[id]/route": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
       "static/chunks/app/api/debates/[id]/route.js"
-    ],
-    "/api/agents/route": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/api/agents/route.js"
-    ],
-    "/api/debates/[id]/files/route": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/api/debates/[id]/files/route.js"
     ],
     "/api/debates/[id]/turns/route": [
       "static/chunks/webpack.js",
@@ -66,35 +15,41 @@
       "static/chunks/main-app.js",
       "static/chunks/app/api/debates/[id]/summary-jobs/route.js"
     ],
-    "/api/debates/[id]/start/route": [
+    "/api/debates/[id]/files/route": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
-      "static/chunks/app/api/debates/[id]/start/route.js"
+      "static/chunks/app/api/debates/[id]/files/route.js"
     ],
-    "/api/debates/[id]/events/route": [
+    "/layout": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
-      "static/chunks/app/api/debates/[id]/events/route.js"
+      "static/css/app/layout.css",
+      "static/chunks/app/layout.js"
     ],
-    "/api/debates/[id]/file-activity/route": [
+    "/(main)/layout": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
-      "static/chunks/app/api/debates/[id]/file-activity/route.js"
+      "static/chunks/app/(main)/layout.js"
     ],
-    "/api/debates/[id]/all-files/route": [
+    "/(main)/debates/[id]/page": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
-      "static/chunks/app/api/debates/[id]/all-files/route.js"
+      "static/chunks/app/(main)/debates/[id]/page.js"
     ],
-    "/api/debates/[id]/file-statuses/route": [
+    "/api/agents/route": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
-      "static/chunks/app/api/debates/[id]/file-statuses/route.js"
+      "static/chunks/app/api/agents/route.js"
     ],
     "/api/debates/[id]/turns/[turnNumber]/route": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
       "static/chunks/app/api/debates/[id]/turns/[turnNumber]/route.js"
+    ],
+    "/api/debates/[id]/events/route": [
+      "static/chunks/webpack.js",
+      "static/chunks/main-app.js",
+      "static/chunks/app/api/debates/[id]/events/route.js"
     ]
   }
 }
