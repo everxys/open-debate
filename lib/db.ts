@@ -2,6 +2,9 @@ import { Pool, type QueryResultRow } from "pg";
 import { Kysely, PostgresDialect } from "kysely";
 
 import type { OpenDebateDb } from "@/lib/db-schema";
+import { createServerLogger } from "@/lib/logger/server";
+
+const dbLogger = createServerLogger("db");
 
 /** Global pool singleton with schema readiness tracking */
 const globalPool = globalThis as typeof globalThis & {
@@ -30,7 +33,7 @@ function scheduleDebateRuntimeRecovery(reason = "db_ready") {
       .then(({ ensureDebateRuntimeRecoveryStarted }) => ensureDebateRuntimeRecoveryStarted(reason))
       .catch((error) => {
         globalPool.openDebateRuntimeRecoveryScheduled = false;
-        console.error("debate runtime recovery bootstrap failed", error);
+        dbLogger.error("debate runtime recovery bootstrap failed", { reason, error });
       });
   });
 }
@@ -45,7 +48,7 @@ function scheduleSummaryJobWorker(reason = "db_ready") {
       .then(({ ensureSummaryJobWorkerStarted }) => ensureSummaryJobWorkerStarted(reason))
       .catch((error) => {
         globalPool.openDebateSummaryWorkerScheduled = false;
-        console.error("summary job worker bootstrap failed", error);
+        dbLogger.error("summary job worker bootstrap failed", { reason, error });
       });
   });
 }
@@ -98,7 +101,7 @@ function flattenPgErrorCodes(error: unknown, into: Set<string>) {
   if (pgError.cause) flattenPgErrorCodes(pgError.cause, into);
 }
 
-function isRecoverablePoolError(error: unknown) {
+export function isRecoverablePoolError(error: unknown) {
   const codes = new Set<string>();
   flattenPgErrorCodes(error, codes);
   return (
@@ -121,7 +124,7 @@ function resetDbSingletons(pool?: Pool) {
 
 function attachPoolErrorHandler(pool: Pool) {
   pool.on("error", (error) => {
-    console.warn("open-debate pg pool emitted error", {
+    dbLogger.warn("open-debate pg pool emitted error", {
       recoverable: isRecoverablePoolError(error),
       details: getPgErrorDetails(error)
     });
@@ -207,7 +210,7 @@ async function ensureSchema(pool: Pool) {
       await pool.query(statement);
     } catch (error) {
       if ((error as { code?: string }).code === "23505") {
-        console.warn(duplicateMessage);
+        dbLogger.warn(duplicateMessage, { tableName });
         return;
       }
       throw error;
@@ -225,7 +228,55 @@ async function ensureSchema(pool: Pool) {
   await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists last_connectivity_check_status text null");
   await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists last_connectivity_check_at timestamptz null");
   await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists last_connectivity_check_message text null");
+  await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists usage_control_mode text not null default 'none'");
+  await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists quota_profile_id uuid null");
   await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists deleted_at timestamptz null");
+  await pool.query(`
+    create table if not exists ai_quota_profiles (
+      id uuid primary key,
+      user_id uuid not null,
+      name text not null,
+      profile_type text not null,
+      request_limit_5h int not null,
+      request_limit_week int not null,
+      request_limit_month int not null,
+      pacing_mode text not null,
+      pacing_value int not null,
+      reset_timezone text not null default 'Asia/Shanghai',
+      next_request_not_before_at timestamptz null,
+      created_at timestamptz not null,
+      updated_at timestamptz not null,
+      deleted_at timestamptz null
+    )
+  `);
+  await pool.query(`
+    create table if not exists ai_quota_window_usage (
+      id uuid primary key,
+      profile_id uuid not null,
+      window_type text not null,
+      window_start_at timestamptz not null,
+      window_end_at timestamptz not null,
+      internal_request_count int not null default 0,
+      manual_adjustment_count int not null default 0,
+      created_at timestamptz not null,
+      updated_at timestamptz not null,
+      unique (profile_id, window_type, window_start_at)
+    )
+  `);
+  await pool.query(`
+    create table if not exists ai_quota_adjustments (
+      id uuid primary key,
+      profile_id uuid not null,
+      window_type text not null,
+      delta int not null,
+      note text null,
+      created_at timestamptz not null
+    )
+  `);
+  await pool.query("create index if not exists idx_ai_quota_profiles_user_id_updated_at on ai_quota_profiles (user_id, updated_at desc)");
+  await pool.query("create index if not exists idx_ai_quota_window_usage_profile_type_end on ai_quota_window_usage (profile_id, window_type, window_end_at desc)");
+  await pool.query("create index if not exists idx_ai_quota_adjustments_profile_created_at on ai_quota_adjustments (profile_id, created_at desc)");
+  await createIndexIfTableExists("ai_agents", "create index if not exists idx_ai_agents_quota_profile_id on ai_agents(quota_profile_id)");
   await alterTableIfExists("debates", "alter table debates add column if not exists workflow_phase_kind text null");
   await alterTableIfExists("debates", "alter table debates add column if not exists workflow_phase_title text null");
   await alterTableIfExists("debates", "alter table debates add column if not exists workflow_phase_round int null");
@@ -290,6 +341,37 @@ async function ensureSchema(pool: Pool) {
       created_at timestamptz not null
     )
   `);
+  await pool.query(`
+    create table if not exists debate_turn_mutations (
+      id uuid primary key,
+      debate_id uuid not null,
+      debate_agent_id uuid not null,
+      turn_number int not null,
+      round_number int not null,
+      mutation_kind text not null,
+      target_path text not null,
+      sequence_number int not null,
+      status text not null default 'pending',
+      before_exists boolean not null default false,
+      before_content text null,
+      before_version int null,
+      before_updated_at timestamptz null,
+      before_created_at timestamptz null,
+      after_exists boolean not null default false,
+      after_content text null,
+      after_version int null,
+      after_updated_at timestamptz null,
+      action_payload_json jsonb null,
+      result_json jsonb null,
+      created_at timestamptz not null,
+      committed_at timestamptz null,
+      rolled_back_at timestamptz null
+    )
+  `);
+  await createIndexIfTableExists(
+    "debate_turn_mutations",
+    "create index if not exists idx_debate_turn_mutations_debate_turn_status on debate_turn_mutations (debate_id, turn_number, status, sequence_number asc)"
+  );
   await pool.query(`
     create table if not exists workspaces (
       id uuid primary key,
@@ -358,6 +440,59 @@ async function ensureSchema(pool: Pool) {
       unique (strategy_id, scope, strategy_role_id, target_type, target_path)
     )
   `);
+  await pool.query(`
+    create table if not exists playground_tool_checklists (
+      id uuid primary key,
+      user_id uuid not null,
+      agent_id uuid not null,
+      tool_name text not null check (
+        tool_name in (
+          'agent_files_list',
+          'agent_files_read',
+          'agent_files_search',
+          'debate_files_read',
+          'debate_files_stat',
+          'debate_files_write',
+          'debate_vote_open',
+          'debate_vote_cast',
+          'debate_vote_close',
+          'harness_read',
+          'harness_write',
+          'harness_vote_cast'
+        )
+      ),
+      status text not null check (status in ('idle', 'running', 'passed', 'failed')),
+      current_stage text null check (
+        current_stage is null or
+        current_stage in (
+          'queued',
+          'requesting_model',
+          'receiving_model_output',
+          'executing_tools',
+          'sandbox_changed',
+          'validating_result',
+          'passed',
+          'failed'
+        )
+      ),
+      stage_started_at timestamptz null,
+      stage_index int null,
+      stage_history jsonb null,
+      last_progress_message text null,
+      last_run_at timestamptz null,
+      last_passed_at timestamptz null,
+      last_error_message text null,
+      last_run_trace jsonb null,
+      created_at timestamptz not null,
+      updated_at timestamptz not null,
+      unique (user_id, agent_id, tool_name)
+    )
+  `);
+  await alterTableIfExists("playground_tool_checklists", "alter table playground_tool_checklists add column if not exists current_stage text null");
+  await alterTableIfExists("playground_tool_checklists", "alter table playground_tool_checklists add column if not exists stage_started_at timestamptz null");
+  await alterTableIfExists("playground_tool_checklists", "alter table playground_tool_checklists add column if not exists stage_index int null");
+  await alterTableIfExists("playground_tool_checklists", "alter table playground_tool_checklists add column if not exists stage_history jsonb null");
+  await alterTableIfExists("playground_tool_checklists", "alter table playground_tool_checklists add column if not exists last_progress_message text null");
   await pool.query("create index if not exists idx_workspaces_owner_user_id_updated_at on workspaces (owner_user_id, updated_at desc)");
   await pool.query("create index if not exists idx_workspaces_strategy_id_updated_at on workspaces (strategy_id, updated_at desc)");
   await pool.query("create index if not exists idx_workspace_role_bindings_workspace_id_role_order on workspace_role_bindings (workspace_id, role_order asc)");
@@ -365,6 +500,7 @@ async function ensureSchema(pool: Pool) {
   await pool.query("create index if not exists idx_strategy_shared_files_strategy_id_updated_at on strategy_shared_files (strategy_id, updated_at desc)");
   await pool.query("create index if not exists idx_strategy_file_access_rules_strategy_id_scope on strategy_file_access_rules (strategy_id, scope, updated_at desc)");
   await pool.query("create index if not exists idx_strategy_file_access_rules_role_id on strategy_file_access_rules (strategy_role_id, updated_at desc)");
+  await pool.query("create index if not exists idx_playground_tool_checklists_user_agent_updated_at on playground_tool_checklists (user_id, agent_id, updated_at desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_created_at on debate_file_activity_logs (debate_id, created_at desc, id desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_action_created_at on debate_file_activity_logs (debate_id, action, created_at desc, id desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_nav on debate_file_activity_logs (debate_id, debate_agent_id, round_number, turn_number, created_at desc, id desc)");
@@ -408,6 +544,23 @@ async function ensureSchema(pool: Pool) {
   `);
   await pool.query("create index if not exists idx_debate_summary_jobs_debate_status on debate_summary_jobs (debate_id, status, updated_at desc)");
   await pool.query("create index if not exists idx_debate_summary_jobs_kind_round_turn on debate_summary_jobs (debate_id, kind, round_number asc, turn_number asc)");
+  await pool.query(`
+    create table if not exists debate_resume_jobs (
+      id uuid primary key,
+      debate_id uuid not null,
+      profile_id uuid not null,
+      resume_at timestamptz not null,
+      reason text not null default 'quota_wait',
+      status text not null default 'pending',
+      locked_by text null,
+      locked_at timestamptz null,
+      last_error text null,
+      created_at timestamptz not null,
+      updated_at timestamptz not null,
+      completed_at timestamptz null
+    )
+  `);
+  await pool.query("create index if not exists idx_debate_resume_jobs_status_resume_at on debate_resume_jobs (status, resume_at asc, updated_at asc)");
   await pool.query(`
     create table if not exists debate_summary_workers (
       id text primary key,
@@ -623,6 +776,66 @@ async function ensureSchema(pool: Pool) {
             (scope = 'shared' and phase_kind is not null)
           );
       end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'playground_tool_checklists_user_id_fkey'
+      ) then
+        alter table playground_tool_checklists
+          add constraint playground_tool_checklists_user_id_fkey
+          foreign key (user_id) references users(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'playground_tool_checklists_agent_id_fkey'
+      ) then
+        alter table playground_tool_checklists
+          add constraint playground_tool_checklists_agent_id_fkey
+          foreign key (agent_id) references ai_agents(id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'playground_tool_checklists_status_check'
+      ) then
+        alter table playground_tool_checklists
+          add constraint playground_tool_checklists_status_check
+          check (status in ('idle', 'running', 'passed', 'failed'));
+      end if;
+      alter table playground_tool_checklists
+        drop constraint if exists playground_tool_checklists_tool_name_check;
+      alter table playground_tool_checklists
+        add constraint playground_tool_checklists_tool_name_check
+        check (
+          tool_name in (
+            'agent_files_list',
+            'agent_files_read',
+            'agent_files_search',
+            'debate_files_read',
+            'debate_files_stat',
+            'debate_files_write',
+            'debate_vote_open',
+            'debate_vote_cast',
+            'debate_vote_close',
+            'harness_read',
+            'harness_write',
+            'harness_vote_cast'
+          )
+        );
+      if not exists (
+        select 1 from pg_constraint where conname = 'playground_tool_checklists_current_stage_check'
+      ) then
+        alter table playground_tool_checklists
+          add constraint playground_tool_checklists_current_stage_check
+          check (
+            current_stage is null or
+            current_stage in (
+              'queued',
+              'requesting_model',
+              'receiving_model_output',
+              'executing_tools',
+              'sandbox_changed',
+              'validating_result',
+              'passed',
+              'failed'
+            )
+          );
+      end if;
     exception when undefined_table then
       null;
     when duplicate_object then
@@ -787,7 +1000,7 @@ export async function query<T extends QueryResultRow>(sql: string, params: unkno
   } catch (error) {
     const diagnostics = getDbDiagnostics();
     const details = getPgErrorDetails(error);
-    console.error("DB query failed", {
+    dbLogger.error("DB query failed", {
       ...(details ?? null),
       db: diagnostics,
       sql: truncateSql(sql),

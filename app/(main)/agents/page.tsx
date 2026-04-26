@@ -1,6 +1,4 @@
 "use client";
-
-import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useAutoDismissToast } from "@/components/ui/use-toast";
@@ -18,7 +16,50 @@ type Agent = {
   lastConnectivityCheckStatus: "reachable" | "failed" | null;
   lastConnectivityCheckAt: string | null;
   lastConnectivityCheckMessage: string | null;
+  usageControlMode: "none" | "coding_plan";
+  quotaProfileId: string | null;
   isActive: boolean;
+};
+
+type QuotaProfileSummary = {
+  profileId: string;
+  profileName: string;
+  limit5h: number;
+  used5h: number;
+  remaining5h: number;
+  window5hStartAt: string | null;
+  window5hEndAt: string | null;
+  limitWeek: number;
+  usedWeek: number;
+  remainingWeek: number;
+  weekWindowStartAt: string;
+  weekWindowEndAt: string;
+  limitMonth: number;
+  usedMonth: number;
+  remainingMonth: number;
+  monthWindowStartAt: string;
+  monthWindowEndAt: string;
+  pacingMode: "percent" | "absolute";
+  pacingValue: number;
+  pacingTarget5h: number;
+  nextAvailableAt: string | null;
+  blockingReason: "pacing" | "rolling_5h_limit" | "week_limit" | "month_limit" | null;
+  effectiveIntervalMs: number;
+};
+
+type QuotaProfile = {
+  id: string;
+  name: string;
+  profileType: "coding_plan";
+  requestLimit5h: number;
+  requestLimitWeek: number;
+  requestLimitMonth: number;
+  pacingMode: "percent" | "absolute";
+  pacingValue: number;
+  resetTimezone: string;
+  nextRequestNotBeforeAt: string | null;
+  referencedAgentCount: number;
+  summary: QuotaProfileSummary;
 };
 
 type OpenRouterModel = {
@@ -38,11 +79,31 @@ const initialForm = {
   maxInputTokens: "",
   maxOutputTokens: "",
   baseUrl: "https://api.openai.com/v1",
-  apiKey: ""
+  apiKey: "",
+  usageControlMode: "none" as "none" | "coding_plan",
+  quotaProfileId: ""
+};
+
+const initialQuotaProfileForm = {
+  name: "",
+  requestLimit5h: "1200",
+  requestLimitWeek: "9000",
+  requestLimitMonth: "18000",
+  pacingMode: "percent" as "percent" | "absolute",
+  pacingValue: "90",
+  resetTimezone: "Asia/Shanghai"
+};
+
+const initialAdjustmentForm = {
+  profileId: "",
+  windowType: "rolling_5h" as "rolling_5h" | "week" | "month",
+  delta: "",
+  note: ""
 };
 
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [quotaProfiles, setQuotaProfiles] = useState<QuotaProfile[]>([]);
   const [filterTab, setFilterTab] = useState<AgentFilterTab>("all");
   const [form, setForm] = useState(initialForm);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -54,6 +115,8 @@ export default function AgentsPage() {
     maxInputTokens: number | null;
     maxOutputTokens: number | null;
     baseUrl: string;
+    usageControlMode: "none" | "coding_plan";
+    quotaProfileId: string | null;
   } | null>(null);
   const { toast, showToast } = useAutoDismissToast(1200);
   const [isTestingDraft, setIsTestingDraft] = useState(false);
@@ -76,6 +139,12 @@ export default function AgentsPage() {
   const [debugTitle, setDebugTitle] = useState("");
   const [debugText, setDebugText] = useState("");
   const [toggleDialogAgent, setToggleDialogAgent] = useState<Agent | null>(null);
+  const [quotaProfileForm, setQuotaProfileForm] = useState(initialQuotaProfileForm);
+  const [editingQuotaProfileId, setEditingQuotaProfileId] = useState<string | null>(null);
+  const [quotaActionLoading, setQuotaActionLoading] = useState<string>("");
+  const [adjustmentForm, setAdjustmentForm] = useState(initialAdjustmentForm);
+  const agentEditorRef = useRef<HTMLElement | null>(null);
+  const [syncedAgentsPanelsHeight, setSyncedAgentsPanelsHeight] = useState<number | null>(null);
 
   async function readPayload(response: Response) {
     const contentType = response.headers.get("content-type") ?? "";
@@ -119,9 +188,31 @@ export default function AgentsPage() {
     setAgents(payload.data ?? []);
   }, [showToast]);
 
+  const loadQuotaProfiles = useCallback(async () => {
+    let response: Response;
+    try {
+      response = await fetch("/api/quota-profiles", { cache: "no-store" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showToast("error", `Failed to fetch: ${message}`);
+      return;
+    }
+
+    const payload = await readPayload(response);
+    if (!response.ok) {
+      showToast("error", payload.error?.message ?? "Coding Plan 加载失败");
+      return;
+    }
+    setQuotaProfiles(payload.data ?? []);
+  }, [showToast]);
+
+  const reloadAll = useCallback(async () => {
+    await Promise.all([loadAgents(), loadQuotaProfiles()]);
+  }, [loadAgents, loadQuotaProfiles]);
+
   useEffect(() => {
-    void loadAgents();
-  }, [loadAgents]);
+    void reloadAll();
+  }, [reloadAll]);
 
   async function loadCatalogModels() {
     if (openRouterLoading) return;
@@ -139,6 +230,29 @@ export default function AgentsPage() {
   useEffect(() => {
     void loadCatalogModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const element = agentEditorRef.current;
+    if (!element) return;
+
+    const syncHeight = () => {
+      if (window.innerWidth < 900) {
+        setSyncedAgentsPanelsHeight(null);
+        return;
+      }
+      const next = Math.ceil(element.getBoundingClientRect().height);
+      setSyncedAgentsPanelsHeight((current) => (current === next ? current : next));
+    };
+
+    syncHeight();
+    const observer = new ResizeObserver(() => syncHeight());
+    observer.observe(element);
+    window.addEventListener("resize", syncHeight);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", syncHeight);
+    };
   }, []);
 
   function parseContextLengthInput(value: string) {
@@ -184,6 +298,10 @@ export default function AgentsPage() {
   const enabledAgentsCount = agents.filter((agent) => agent.isActive).length;
   const disabledAgentsCount = agents.length - enabledAgentsCount;
   const editingAgent = editingId ? agents.find((agent) => agent.id === editingId) ?? null : null;
+  const selectedQuotaProfile =
+    form.usageControlMode === "coding_plan"
+      ? quotaProfiles.find((profile) => profile.id === form.quotaProfileId) ?? null
+      : null;
   const filteredAgents = agents.filter((agent) => {
     if (filterTab === "enabled") return agent.isActive;
     if (filterTab === "disabled") return !agent.isActive;
@@ -203,13 +321,25 @@ export default function AgentsPage() {
     return "最近连通性校验：未校验";
   }
 
+  function getQuotaBlockingReasonText(reason: QuotaProfileSummary["blockingReason"]) {
+    if (reason === "rolling_5h_limit") return "5 小时硬上限";
+    if (reason === "week_limit") return "周硬上限";
+    if (reason === "month_limit") return "月硬上限";
+    if (reason === "pacing") return "节流";
+    return "正常";
+  }
+
   const canTestDraft =
     form.model.trim().length > 0 &&
     form.baseUrl.trim().length > 0 &&
     form.apiKey.trim().length > 0;
-  const canSave = canTestDraft && form.name.trim().length > 0;
+  const hasValidQuotaBinding = form.usageControlMode !== "coding_plan" || form.quotaProfileId.trim().length > 0;
+  const canSave = canTestDraft && form.name.trim().length > 0 && hasValidQuotaBinding;
   const canUpdate =
-    form.name.trim().length > 0 && form.model.trim().length > 0 && form.baseUrl.trim().length > 0;
+    form.name.trim().length > 0 &&
+    form.model.trim().length > 0 &&
+    form.baseUrl.trim().length > 0 &&
+    hasValidQuotaBinding;
 
   async function createAgent() {
     let response: Response;
@@ -218,7 +348,8 @@ export default function AgentsPage() {
         ...form,
         contextLength: parseContextLengthInput(form.contextLength),
         maxInputTokens: parseMaxInputTokensInput(form.maxInputTokens),
-        maxOutputTokens: parseMaxOutputTokensInput(form.maxOutputTokens)
+        maxOutputTokens: parseMaxOutputTokensInput(form.maxOutputTokens),
+        quotaProfileId: form.usageControlMode === "coding_plan" ? form.quotaProfileId || null : null
       };
       response = await fetch("/api/agents", {
         method: "POST",
@@ -240,7 +371,7 @@ export default function AgentsPage() {
 
     setForm(initialForm);
     showToast("success", "创建成功");
-    await loadAgents();
+    await reloadAll();
   }
 
   function startEdit(agent: Agent) {
@@ -252,7 +383,9 @@ export default function AgentsPage() {
       contextLength: agent.contextLength ?? null,
       maxInputTokens: agent.maxInputTokens ?? null,
       maxOutputTokens: agent.maxOutputTokens ?? null,
-      baseUrl: agent.baseUrl
+      baseUrl: agent.baseUrl,
+      usageControlMode: agent.usageControlMode,
+      quotaProfileId: agent.quotaProfileId
     });
     setForm({
       name: agent.name,
@@ -262,7 +395,9 @@ export default function AgentsPage() {
       maxInputTokens: agent.maxInputTokens ? String(agent.maxInputTokens) : "",
       maxOutputTokens: agent.maxOutputTokens ? String(agent.maxOutputTokens) : "",
       baseUrl: agent.baseUrl,
-      apiKey: ""
+      apiKey: "",
+      usageControlMode: agent.usageControlMode,
+      quotaProfileId: agent.quotaProfileId ?? ""
     });
   }
 
@@ -286,6 +421,8 @@ export default function AgentsPage() {
       changes.push("最大输出");
     }
     if (form.baseUrl !== editingOriginal.baseUrl) changes.push("Base URL");
+    if (form.usageControlMode !== editingOriginal.usageControlMode) changes.push("限额模式");
+    if ((form.quotaProfileId || null) !== (editingOriginal.quotaProfileId ?? null)) changes.push("Coding Plan");
     if (form.apiKey.trim()) changes.push("API Key");
     return changes;
   }
@@ -307,7 +444,9 @@ export default function AgentsPage() {
       contextLength: parseContextLengthInput(form.contextLength),
       maxInputTokens: parseMaxInputTokensInput(form.maxInputTokens),
       maxOutputTokens: parseMaxOutputTokensInput(form.maxOutputTokens),
-      baseUrl: form.baseUrl
+      baseUrl: form.baseUrl,
+      usageControlMode: form.usageControlMode,
+      quotaProfileId: form.usageControlMode === "coding_plan" ? form.quotaProfileId || null : null
     };
     if (form.apiKey.trim()) body.apiKey = form.apiKey;
 
@@ -334,7 +473,7 @@ export default function AgentsPage() {
     setEditingId(null);
     setEditingOriginal(null);
     setForm(initialForm);
-    await loadAgents();
+    await reloadAll();
   }
 
   async function testDraftConfig() {
@@ -345,7 +484,10 @@ export default function AgentsPage() {
       response = await fetch("/api/agents/test-config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form)
+        body: JSON.stringify({
+          ...form,
+          quotaProfileId: form.usageControlMode === "coding_plan" ? form.quotaProfileId || null : null
+        })
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -360,6 +502,7 @@ export default function AgentsPage() {
       payload.error?.message ??
       `${response.status} ${response.statusText}`.trim();
     showToast(response.ok ? "success" : "error", text);
+    await loadQuotaProfiles();
     setIsTestingDraft(false);
   }
 
@@ -382,7 +525,7 @@ export default function AgentsPage() {
       payload.error?.message ??
       `${response.status} ${response.statusText}`.trim();
     showToast(response.ok ? "success" : "error", text);
-    await loadAgents();
+    await reloadAll();
     setTestingAgentId(null);
   }
 
@@ -415,7 +558,143 @@ export default function AgentsPage() {
     } catch {
       setDebugText(String(payload.data ?? ""));
     }
+    await reloadAll();
     setDebugLoading(false);
+  }
+
+  function startQuotaProfileEdit(profile: QuotaProfile) {
+    setEditingQuotaProfileId(profile.id);
+    setQuotaProfileForm({
+      name: profile.name,
+      requestLimit5h: String(profile.requestLimit5h),
+      requestLimitWeek: String(profile.requestLimitWeek),
+      requestLimitMonth: String(profile.requestLimitMonth),
+      pacingMode: profile.pacingMode,
+      pacingValue: String(profile.pacingValue),
+      resetTimezone: profile.resetTimezone
+    });
+    setAdjustmentForm((current) => ({
+      ...current,
+      profileId: profile.id
+    }));
+  }
+
+  function cancelQuotaProfileEdit() {
+    setEditingQuotaProfileId(null);
+    setQuotaProfileForm(initialQuotaProfileForm);
+  }
+
+  async function saveQuotaProfile() {
+    const requestLimit5h = parseContextLengthInput(quotaProfileForm.requestLimit5h);
+    const requestLimitWeek = parseContextLengthInput(quotaProfileForm.requestLimitWeek);
+    const requestLimitMonth = parseContextLengthInput(quotaProfileForm.requestLimitMonth);
+    const pacingValue = parseContextLengthInput(quotaProfileForm.pacingValue);
+    if (!quotaProfileForm.name.trim() || !requestLimit5h || !requestLimitWeek || !requestLimitMonth || !pacingValue) {
+      showToast("error", "请完整填写 Coding Plan 配置");
+      return;
+    }
+    setQuotaActionLoading("save-profile");
+    let response: Response;
+    try {
+      response = await fetch(editingQuotaProfileId ? `/api/quota-profiles/${editingQuotaProfileId}` : "/api/quota-profiles", {
+        method: editingQuotaProfileId ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: quotaProfileForm.name.trim(),
+          requestLimit5h,
+          requestLimitWeek,
+          requestLimitMonth,
+          pacingMode: quotaProfileForm.pacingMode,
+          pacingValue,
+          resetTimezone: quotaProfileForm.resetTimezone.trim() || "Asia/Shanghai"
+        })
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showToast("error", `Failed to fetch: ${message}`);
+      setQuotaActionLoading("");
+      return;
+    }
+    const payload = await readPayload(response);
+    if (!response.ok) {
+      showToast("error", payload.error?.message ?? "Coding Plan 保存失败");
+      setQuotaActionLoading("");
+      return;
+    }
+    showToast("success", editingQuotaProfileId ? "Coding Plan 已更新" : "Coding Plan 已创建");
+    cancelQuotaProfileEdit();
+    await reloadAll();
+    setQuotaActionLoading("");
+  }
+
+  async function deleteQuotaProfile(profile: QuotaProfile) {
+    const ok = window.confirm(`确认删除 Coding Plan“${profile.name}”？如果仍被 AI 配置引用，将无法删除。`);
+    if (!ok) return;
+    setQuotaActionLoading(`delete:${profile.id}`);
+    let response: Response;
+    try {
+      response = await fetch(`/api/quota-profiles/${profile.id}`, { method: "DELETE" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showToast("error", `Failed to fetch: ${message}`);
+      setQuotaActionLoading("");
+      return;
+    }
+    const payload = await readPayload(response);
+    if (!response.ok) {
+      showToast("error", payload.error?.message ?? "Coding Plan 删除失败");
+      setQuotaActionLoading("");
+      return;
+    }
+    if (editingQuotaProfileId === profile.id) {
+      cancelQuotaProfileEdit();
+    }
+    if (form.quotaProfileId === profile.id) {
+      setForm((current) => ({ ...current, usageControlMode: "none", quotaProfileId: "" }));
+    }
+    showToast("success", "Coding Plan 已删除");
+    await reloadAll();
+    setQuotaActionLoading("");
+  }
+
+  async function applyQuotaAdjustment() {
+    if (!adjustmentForm.profileId) {
+      showToast("error", "请选择需要校正的 Coding Plan");
+      return;
+    }
+    const delta = Number(adjustmentForm.delta);
+    if (!Number.isFinite(delta) || Math.trunc(delta) === 0) {
+      showToast("error", "请输入非 0 的校正次数");
+      return;
+    }
+    setQuotaActionLoading("adjust-profile");
+    let response: Response;
+    try {
+      response = await fetch(`/api/quota-profiles/${adjustmentForm.profileId}/adjustments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          windowType: adjustmentForm.windowType,
+          delta: Math.trunc(delta),
+          note: adjustmentForm.note.trim() || null
+        })
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showToast("error", `Failed to fetch: ${message}`);
+      setQuotaActionLoading("");
+      return;
+    }
+    const payload = await readPayload(response);
+    if (!response.ok) {
+      showToast("error", payload.error?.message ?? "校正失败");
+      setQuotaActionLoading("");
+      return;
+    }
+    showToast("success", "Coding Plan 已校正");
+    setAdjustmentForm((current) => ({ ...current, delta: "", note: "" }));
+    await loadQuotaProfiles();
+    setQuotaActionLoading("");
   }
 
   async function deleteAgent(id: string) {
@@ -438,7 +717,7 @@ export default function AgentsPage() {
     }
 
     showToast("success", "已删除");
-    await loadAgents();
+    await reloadAll();
   }
 
   async function duplicateAgent(id: string) {
@@ -462,7 +741,7 @@ export default function AgentsPage() {
     }
 
     showToast("success", "已复制");
-    await loadAgents();
+    await reloadAll();
     setDuplicatingAgentId(null);
   }
 
@@ -490,7 +769,7 @@ export default function AgentsPage() {
       return;
     }
     showToast("success", nextActive ? "已启用" : "已禁用");
-    await loadAgents();
+    await reloadAll();
     setTogglingAgentId(null);
     setToggleDialogAgent(null);
   }
@@ -653,7 +932,7 @@ export default function AgentsPage() {
         ioFileInputRef.current.value = "";
       }
       setIoOpen(false);
-      await loadAgents();
+      await reloadAll();
     } catch (error) {
       showToast("error", error instanceof Error ? error.message : "导入失败");
     } finally {
@@ -662,7 +941,7 @@ export default function AgentsPage() {
   }
 
   return (
-    <div className="grid grid-2">
+    <div className="grid grid-2 agentsPageGrid">
       {toast ? (
         <div
           className={`toast ${toast.type === "success" ? "toast-success" : "toast-error"}`}
@@ -809,7 +1088,7 @@ export default function AgentsPage() {
           </div>
         </div>
       ) : null}
-      <section className={`panel stack agentEditor ${editingId ? "agentEditorEditing" : ""}`}>
+      <section ref={agentEditorRef} className={`panel stack agentEditor ${editingId ? "agentEditorEditing" : ""}`}>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h2 style={{ margin: 0 }}>{editingId ? "编辑 AI 配置" : "新建 AI 配置"}</h2>
         </div>
@@ -964,6 +1243,63 @@ export default function AgentsPage() {
           />
           <div className="hint">如果只填到域名根路径，服务端会尝试自动补全 /v1。</div>
         </div>
+        <div className="field">
+          <label>限额模式</label>
+          <select
+            value={form.usageControlMode}
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                usageControlMode: event.target.value === "coding_plan" ? "coding_plan" : "none",
+                quotaProfileId: event.target.value === "coding_plan" ? current.quotaProfileId : ""
+              }))
+            }
+          >
+            <option value="none">不控制</option>
+            <option value="coding_plan">Coding Plan</option>
+          </select>
+        </div>
+        {form.usageControlMode === "coding_plan" ? (
+          <div className="field">
+            <label>共享 Coding Plan</label>
+            <select
+              value={form.quotaProfileId}
+              onChange={(event) => setForm((current) => ({ ...current, quotaProfileId: event.target.value }))}
+            >
+              <option value="">请选择计划池</option>
+              {quotaProfiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}
+                </option>
+              ))}
+            </select>
+            <div className="hint">多个 AI 配置绑定同一个计划池时，会共享同一套请求预算。</div>
+            {selectedQuotaProfile ? (
+              <div className="panel stack" style={{ gap: 6 }}>
+                <div>
+                  <strong>{selectedQuotaProfile.name}</strong>
+                </div>
+                <div className="muted">
+                  5 小时：{selectedQuotaProfile.summary.used5h}/{selectedQuotaProfile.summary.limit5h} · 周：
+                  {selectedQuotaProfile.summary.usedWeek}/{selectedQuotaProfile.summary.limitWeek} · 月：
+                  {selectedQuotaProfile.summary.usedMonth}/{selectedQuotaProfile.summary.limitMonth}
+                </div>
+                <div className="muted">
+                  节流：{selectedQuotaProfile.pacingMode === "percent" ? `${selectedQuotaProfile.pacingValue}%` : `${selectedQuotaProfile.pacingValue} 次`}
+                  {" · "}
+                  当前状态：{getQuotaBlockingReasonText(selectedQuotaProfile.summary.blockingReason)}
+                </div>
+                <div className="muted">
+                  {selectedQuotaProfile.summary.nextAvailableAt
+                    ? `下一次可请求：${formatLocalTime(selectedQuotaProfile.summary.nextAvailableAt)}`
+                    : "当前可立即请求"}
+                </div>
+              </div>
+            ) : (
+              <div className="hint">还没有创建计划池时，可先在下方“Coding Plan 池管理”里新增。</div>
+            )}
+          </div>
+        ) : null}
 
         <div className="field">
           <label>API Key</label>
@@ -1014,6 +1350,221 @@ export default function AgentsPage() {
               保存
             </button>
           )}
+        </div>
+      </section>
+
+      <section className="panel stack" style={{ order: 3, gridColumn: "1 / -1" }}>
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+          <h2 style={{ margin: 0 }}>Coding Plan 池管理</h2>
+          <span className="muted">{quotaProfiles.length} 个计划池</span>
+        </div>
+        <div className="row" style={{ gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div className="panel stack" style={{ flex: "1 1 360px", minWidth: 320 }}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <strong>{editingQuotaProfileId ? "编辑计划池" : "新建计划池"}</strong>
+              {editingQuotaProfileId ? (
+                <button className="btn btn-muted" type="button" onClick={() => cancelQuotaProfileEdit()}>
+                  取消
+                </button>
+              ) : null}
+            </div>
+            <div className="field">
+              <label>名称</label>
+              <input
+                value={quotaProfileForm.name}
+                onChange={(event) => setQuotaProfileForm((current) => ({ ...current, name: event.target.value }))}
+                placeholder="例如：Coding Plan Lite"
+              />
+            </div>
+            <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+              <div className="field" style={{ flex: 1, minWidth: 180 }}>
+                <label>5 小时限额</label>
+                <input
+                  value={quotaProfileForm.requestLimit5h}
+                  onChange={(event) =>
+                    setQuotaProfileForm((current) => ({ ...current, requestLimit5h: event.target.value }))
+                  }
+                />
+              </div>
+              <div className="field" style={{ flex: 1, minWidth: 180 }}>
+                <label>周限额</label>
+                <input
+                  value={quotaProfileForm.requestLimitWeek}
+                  onChange={(event) =>
+                    setQuotaProfileForm((current) => ({ ...current, requestLimitWeek: event.target.value }))
+                  }
+                />
+              </div>
+              <div className="field" style={{ flex: 1, minWidth: 180 }}>
+                <label>月限额</label>
+                <input
+                  value={quotaProfileForm.requestLimitMonth}
+                  onChange={(event) =>
+                    setQuotaProfileForm((current) => ({ ...current, requestLimitMonth: event.target.value }))
+                  }
+                />
+              </div>
+            </div>
+            <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+              <div className="field" style={{ flex: 1, minWidth: 180 }}>
+                <label>节流模式</label>
+                <select
+                  value={quotaProfileForm.pacingMode}
+                  onChange={(event) =>
+                    setQuotaProfileForm((current) => ({
+                      ...current,
+                      pacingMode: event.target.value === "absolute" ? "absolute" : "percent"
+                    }))
+                  }
+                >
+                  <option value="percent">百分比</option>
+                  <option value="absolute">固定次数</option>
+                </select>
+              </div>
+              <div className="field" style={{ flex: 1, minWidth: 180 }}>
+                <label>{quotaProfileForm.pacingMode === "percent" ? "节流百分比" : "5 小时固定次数"}</label>
+                <input
+                  value={quotaProfileForm.pacingValue}
+                  onChange={(event) =>
+                    setQuotaProfileForm((current) => ({ ...current, pacingValue: event.target.value }))
+                  }
+                />
+              </div>
+              <div className="field" style={{ flex: 1, minWidth: 180 }}>
+                <label>时区</label>
+                <input
+                  value={quotaProfileForm.resetTimezone}
+                  onChange={(event) =>
+                    setQuotaProfileForm((current) => ({ ...current, resetTimezone: event.target.value }))
+                  }
+                  placeholder="Asia/Shanghai"
+                />
+              </div>
+            </div>
+            <div className="row">
+              <button
+                className="btn btn-primary"
+                type="button"
+                disabled={quotaActionLoading === "save-profile"}
+                onClick={() => void saveQuotaProfile()}
+              >
+                {quotaActionLoading === "save-profile" ? "保存中..." : editingQuotaProfileId ? "保存计划池" : "创建计划池"}
+              </button>
+            </div>
+          </div>
+
+          <div className="panel stack" style={{ flex: "1 1 320px", minWidth: 320 }}>
+            <strong>手工校正外部消耗</strong>
+            <div className="field">
+              <label>目标计划池</label>
+              <select
+                value={adjustmentForm.profileId}
+                onChange={(event) => setAdjustmentForm((current) => ({ ...current, profileId: event.target.value }))}
+              >
+                <option value="">请选择计划池</option>
+                {quotaProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+              <div className="field" style={{ flex: 1, minWidth: 160 }}>
+                <label>窗口</label>
+                <select
+                  value={adjustmentForm.windowType}
+                  onChange={(event) =>
+                    setAdjustmentForm((current) => ({
+                      ...current,
+                      windowType: event.target.value as "rolling_5h" | "week" | "month"
+                    }))
+                  }
+                >
+                  <option value="rolling_5h">5 小时</option>
+                  <option value="week">周</option>
+                  <option value="month">月</option>
+                </select>
+              </div>
+              <div className="field" style={{ flex: 1, minWidth: 160 }}>
+                <label>校正次数</label>
+                <input
+                  value={adjustmentForm.delta}
+                  onChange={(event) => setAdjustmentForm((current) => ({ ...current, delta: event.target.value }))}
+                  placeholder="正数=额外消耗，负数=回退"
+                />
+              </div>
+            </div>
+            <div className="field">
+              <label>备注</label>
+              <input
+                value={adjustmentForm.note}
+                onChange={(event) => setAdjustmentForm((current) => ({ ...current, note: event.target.value }))}
+                placeholder="例如：外部 IDE 已额外消耗 320 次"
+              />
+            </div>
+            <div className="row">
+              <button
+                className="btn"
+                type="button"
+                disabled={quotaActionLoading === "adjust-profile"}
+                onClick={() => void applyQuotaAdjustment()}
+              >
+                {quotaActionLoading === "adjust-profile" ? "提交中..." : "提交校正"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="card-list">
+          {quotaProfiles.map((profile) => (
+            <div className="panel stack" key={profile.id}>
+              <div className="row" style={{ justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                <strong>{profile.name}</strong>
+                <span className="muted">引用 {profile.referencedAgentCount}</span>
+              </div>
+              <div className="muted">
+                5 小时 {profile.summary.used5h}/{profile.summary.limit5h} · 周 {profile.summary.usedWeek}/{profile.summary.limitWeek} · 月{" "}
+                {profile.summary.usedMonth}/{profile.summary.limitMonth}
+              </div>
+              <div className="muted">
+                节流 {profile.pacingMode === "percent" ? `${profile.pacingValue}%` : `${profile.pacingValue} 次`} · 当前状态{" "}
+                {getQuotaBlockingReasonText(profile.summary.blockingReason)}
+              </div>
+              <div className="muted">
+                {profile.summary.nextAvailableAt
+                  ? `下一次可请求：${formatLocalTime(profile.summary.nextAvailableAt)}`
+                  : "当前可立即请求"}
+              </div>
+              <div className="muted">时区：{profile.resetTimezone}</div>
+              <div className="row">
+                <button className="btn" type="button" onClick={() => startQuotaProfileEdit(profile)}>
+                  编辑
+                </button>
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() =>
+                    setAdjustmentForm((current) => ({
+                      ...current,
+                      profileId: profile.id
+                    }))
+                  }
+                >
+                  设为校正目标
+                </button>
+                <button
+                  className="btn btn-danger"
+                  type="button"
+                  disabled={quotaActionLoading === `delete:${profile.id}`}
+                  onClick={() => void deleteQuotaProfile(profile)}
+                >
+                  {quotaActionLoading === `delete:${profile.id}` ? "删除中..." : "删除"}
+                </button>
+              </div>
+            </div>
+          ))}
+          {quotaProfiles.length === 0 ? <div className="muted">还没有创建 Coding Plan 计划池。</div> : null}
         </div>
       </section>
 
@@ -1125,7 +1676,10 @@ export default function AgentsPage() {
         </div>
       ) : null}
 
-      <section className="panel stack">
+      <section
+        className="panel stack agentsListPanel"
+        style={syncedAgentsPanelsHeight ? { minHeight: syncedAgentsPanelsHeight, height: syncedAgentsPanelsHeight } : undefined}
+      >
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h2 style={{ margin: 0 }}>已有配置</h2>
           <button className="btn" onClick={() => setIoOpen(true)}>
@@ -1164,89 +1718,127 @@ export default function AgentsPage() {
             <span className="muted">{disabledAgentsCount}</span>
           </button>
         </div>
-        <div className="card-list">
-          {filteredAgents.map((agent) => (
-            <div
-              className={`panel stack agentCard ${agent.id === editingId ? "agentCardEditing" : ""}`}
-              key={agent.id}
-            >
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <label className="row" style={{ gap: 10 }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedAgentIds.includes(agent.id)}
-                    onChange={() => toggleSelected(agent.id)}
-                  />
-                  <strong>{agent.name}</strong>
-                </label>
-                <span className={`agentStatus ${agent.isActive ? "agentStatusEnabled" : "agentStatusDisabled"}`}>
-                  <span className="agentStatusDot" aria-hidden="true" />
-                  {agent.isActive ? "已启用" : "已禁用"}
-                </span>
-              </div>
-              <div className="muted">{agent.provider}</div>
-              <div className="muted">{agent.model}</div>
+        <div className="card-list agentsListViewport">
+          {filteredAgents.map((agent) => {
+            const agentQuotaProfile =
+              agent.quotaProfileId ? quotaProfiles.find((profile) => profile.id === agent.quotaProfileId) ?? null : null;
+            const connectivityStatusClass =
+              agent.lastConnectivityCheckStatus === "reachable"
+                ? "agentStatusEnabled"
+                : agent.lastConnectivityCheckStatus === "failed"
+                  ? "agentStatusDisabled"
+                  : "";
+            const summaryItems = [
+              agent.contextLength ? `Context ${agent.contextLength.toLocaleString()}` : null,
+              agent.maxInputTokens ? `Input ${agent.maxInputTokens.toLocaleString()}` : null,
+              agent.maxOutputTokens ? `Output ${agent.maxOutputTokens.toLocaleString()}` : null,
+              `限额 ${agent.usageControlMode === "coding_plan" ? "Coding Plan" : "不控制"}`
+            ].filter(Boolean) as string[];
+            const quotaItems = agentQuotaProfile
+              ? [
+                  `计划池 ${agentQuotaProfile.name}`,
+                  `5 小时 ${agentQuotaProfile.summary.used5h}/${agentQuotaProfile.summary.limit5h}`,
+                  `周 ${agentQuotaProfile.summary.usedWeek}/${agentQuotaProfile.summary.limitWeek}`,
+                  agentQuotaProfile.summary.nextAvailableAt
+                    ? `下次可请求 ${formatLocalTime(agentQuotaProfile.summary.nextAvailableAt)}`
+                    : "当前可立即请求",
+                  `限制原因 ${getQuotaBlockingReasonText(agentQuotaProfile.summary.blockingReason)}`
+                ]
+              : [];
+            return (
               <div
-                className="row"
-                style={{ justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}
+                className={`panel agentCard ${agent.id === editingId ? "agentCardEditing" : ""}`}
+                key={agent.id}
               >
-                <span
-                  className={`agentStatus ${
-                    agent.lastConnectivityCheckStatus === "reachable"
-                      ? "agentStatusEnabled"
-                      : agent.lastConnectivityCheckStatus === "failed"
-                        ? "agentStatusDisabled"
-                        : ""
-                  }`}
-                  style={agent.lastConnectivityCheckStatus ? undefined : { color: "var(--muted)" }}
-                  title={agent.lastConnectivityCheckMessage ?? undefined}
-                >
-                  {getConnectivityCheckText(agent)}
-                </span>
-                {agent.lastConnectivityCheckAt ? (
-                  <span className="muted">{formatLocalTime(agent.lastConnectivityCheckAt)}</span>
-                ) : null}
+                <div className="agentCardLayout">
+                  <div className="stack agentCardMain">
+                    <div className="row agentCardHeader">
+                      <label className="row agentCardIdentity">
+                        <input
+                          type="checkbox"
+                          checked={selectedAgentIds.includes(agent.id)}
+                          onChange={() => toggleSelected(agent.id)}
+                          style={{ marginTop: 3, flex: "0 0 auto" }}
+                        />
+                        <span className="stack agentCardIdentityText">
+                          <strong className="agentCardTitle">{agent.name}</strong>
+                          <span className="muted">
+                            {agent.provider} · {agent.model}
+                          </span>
+                        </span>
+                      </label>
+                      <span className={`agentStatus ${agent.isActive ? "agentStatusEnabled" : "agentStatusDisabled"}`}>
+                        <span className="agentStatusDot" aria-hidden="true" />
+                        {agent.isActive ? "已启用" : "已禁用"}
+                      </span>
+                    </div>
+
+                    <div className="agentCardMetrics">
+                      {summaryItems.map((item) => (
+                        <div key={item} className="muted agentCardMetric">
+                          {item}
+                        </div>
+                      ))}
+                      {quotaItems.map((item) => (
+                        <div key={item} className="muted agentCardMetric agentCardMetricQuota">
+                          {item}
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="stack agentCardMeta">
+                      <div className="muted">{agent.baseUrl}</div>
+                      <div className="muted">Key: {agent.apiKeyMasked}</div>
+                    </div>
+                  </div>
+
+                  <div className="stack agentCardAside">
+                    <div className="stack agentCardAsideStatus">
+                      <span
+                        className={`agentStatus ${connectivityStatusClass}`}
+                        style={agent.lastConnectivityCheckStatus ? undefined : { color: "var(--muted)" }}
+                        title={agent.lastConnectivityCheckMessage ?? undefined}
+                      >
+                        {getConnectivityCheckText(agent)}
+                      </span>
+                      <span className="muted">
+                        {agent.lastConnectivityCheckAt ? formatLocalTime(agent.lastConnectivityCheckAt) : "尚无校验时间"}
+                      </span>
+                    </div>
+
+                    <div className="agentCardActions">
+                      <button
+                        className="btn"
+                        disabled={testingAgentId === agent.id}
+                        onClick={() => void testAgent(agent.id)}
+                      >
+                        {testingAgentId === agent.id ? "测试中..." : "测试连接"}
+                      </button>
+                      <button className="btn" disabled={debugLoading} onClick={() => void debugAgent(agent.id, agent.name)}>
+                        返回 JSON
+                      </button>
+                      <button className="btn" onClick={() => startEdit(agent)}>
+                        修改
+                      </button>
+                      <button
+                        className="btn"
+                        disabled={duplicatingAgentId === agent.id}
+                        onClick={() => void duplicateAgent(agent.id)}
+                      >
+                        {duplicatingAgentId === agent.id ? "复制中..." : "复制"}
+                      </button>
+                      <button className="btn" disabled={togglingAgentId === agent.id} onClick={() => openToggleDialog(agent)}>
+                        {togglingAgentId === agent.id ? "处理中..." : agent.isActive ? "禁用" : "启用"}
+                      </button>
+                      <button className="btn btn-danger" onClick={() => void deleteAgent(agent.id)}>
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
-              {agent.contextLength ? <div className="muted">Context: {agent.contextLength.toLocaleString()}</div> : null}
-              {agent.maxInputTokens ? <div className="muted">Max input: {agent.maxInputTokens.toLocaleString()}</div> : null}
-              {agent.maxOutputTokens ? (
-                <div className="muted">Max output: {agent.maxOutputTokens.toLocaleString()}</div>
-              ) : null}
-              <div className="muted">{agent.baseUrl}</div>
-              <div className="muted">Key: {agent.apiKeyMasked}</div>
-              <div className="row">
-                <button
-                  className="btn"
-                  disabled={testingAgentId === agent.id}
-                  onClick={() => void testAgent(agent.id)}
-                >
-                  {testingAgentId === agent.id ? "测试中..." : "测试连接"}
-                </button>
-                <button className="btn" disabled={debugLoading} onClick={() => void debugAgent(agent.id, agent.name)}>
-                  返回 JSON
-                </button>
-                <button className="btn" onClick={() => startEdit(agent)}>
-                  修改
-                </button>
-                <button
-                  className="btn"
-                  disabled={duplicatingAgentId === agent.id}
-                  onClick={() => void duplicateAgent(agent.id)}
-                >
-                  {duplicatingAgentId === agent.id ? "复制中..." : "复制"}
-                </button>
-                <button className="btn" disabled={togglingAgentId === agent.id} onClick={() => openToggleDialog(agent)}>
-                  {togglingAgentId === agent.id ? "处理中..." : agent.isActive ? "禁用" : "启用"}
-                </button>
-                <Link className="btn" href={`/agents/${agent.id}/files`}>
-                  文件
-                </Link>
-                <button className="btn btn-danger" onClick={() => void deleteAgent(agent.id)}>
-                  删除
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
           {filteredAgents.length === 0 ? (
             <div className="muted">
               {agents.length === 0

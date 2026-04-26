@@ -1,19 +1,13 @@
-import { NextResponse } from "next/server";
-
 import { listCatalogModels } from "@/lib/model-catalog";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess } from "@/lib/http";
 
-export async function GET(request: Request) {
-  try {
-    const url = new URL(request.url);
-    const source = url.searchParams.get("source") ?? "openrouter";
-    if (source !== "openrouter") {
-      return NextResponse.json({ success: true, data: [] });
-    }
-    const models = await listCatalogModels("openrouter");
-    return NextResponse.json({ success: true, data: models });
-  } catch (error) {
-    return toErrorResponse(error);
+export const GET = apiRoute({ route: "/api/model-catalog/models", method: "GET" }, async ({ request, setLogMeta }) => {
+  const url = new URL(request.url);
+  const source = url.searchParams.get("source") ?? "openrouter";
+  setLogMeta({ source });
+  if (source !== "openrouter") {
+    return jsonSuccess([]);
   }
-}
-
+  const models = await listCatalogModels("openrouter");
+  return jsonSuccess(models);
+});

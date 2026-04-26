@@ -1,44 +1,31 @@
-import { NextResponse } from "next/server";
-
 import { deleteAgent, getAgentViewById, updateAgent } from "@/lib/agents";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess, readJsonBody } from "@/lib/http";
 
-export async function GET(
-  _request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
-    const agent = await getAgentViewById(id);
-    return NextResponse.json({ success: true, data: agent });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+export const dynamic = "force-dynamic";
 
-export async function PATCH(
-  request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
-    const body = await request.json();
-    const agent = await updateAgent(id, body);
-    return NextResponse.json({ success: true, data: agent });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+const routeMeta = ({ params }: { params: { id: string } }) => ({ agentId: params.id });
 
-export async function DELETE(
-  _request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
-    await deleteAgent(id);
-    return NextResponse.json({ success: true, data: null });
-  } catch (error) {
-    return toErrorResponse(error);
+export const GET = apiRoute<{ id: string }>(
+  { route: "/api/agents/[id]", method: "GET", logMeta: routeMeta },
+  async ({ params }) => {
+    const agent = await getAgentViewById(params.id);
+    return jsonSuccess(agent);
   }
-}
+);
+
+export const PATCH = apiRoute<{ id: string }>(
+  { route: "/api/agents/[id]", method: "PATCH", logMeta: routeMeta },
+  async ({ request, params }) => {
+    const body = await readJsonBody(request);
+    const agent = await updateAgent(params.id, body);
+    return jsonSuccess(agent);
+  }
+);
+
+export const DELETE = apiRoute<{ id: string }>(
+  { route: "/api/agents/[id]", method: "DELETE", logMeta: routeMeta },
+  async ({ params }) => {
+    await deleteAgent(params.id);
+    return jsonSuccess(null);
+  }
+);

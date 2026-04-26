@@ -1,31 +1,24 @@
-import { NextResponse } from "next/server";
-
 import { deleteStrategyFileAccessRule, updateStrategyFileAccessRule } from "@/lib/strategies";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess, readJsonBody } from "@/lib/http";
 
-export async function PATCH(
-  request: Request,
-  context: { params: Promise<{ id: string; ruleId: string }> }
-) {
-  try {
-    const { id, ruleId } = await context.params;
-    const body = await request.json();
-    const rule = await updateStrategyFileAccessRule(id, ruleId, body);
-    return NextResponse.json({ success: true, data: rule });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+const routeMeta = ({ params }: { params: { id: string; ruleId: string } }) => ({
+  strategyId: params.id,
+  ruleId: params.ruleId
+});
 
-export async function DELETE(
-  _request: Request,
-  context: { params: Promise<{ id: string; ruleId: string }> }
-) {
-  try {
-    const { id, ruleId } = await context.params;
-    await deleteStrategyFileAccessRule(id, ruleId);
-    return NextResponse.json({ success: true, data: { deleted: 1 } });
-  } catch (error) {
-    return toErrorResponse(error);
+export const PATCH = apiRoute<{ id: string; ruleId: string }>(
+  { route: "/api/strategies/[id]/file-access-rules/[ruleId]", method: "PATCH", logMeta: routeMeta },
+  async ({ request, params }) => {
+    const body = await readJsonBody(request);
+    const rule = await updateStrategyFileAccessRule(params.id, params.ruleId, body);
+    return jsonSuccess(rule);
   }
-}
+);
+
+export const DELETE = apiRoute<{ id: string; ruleId: string }>(
+  { route: "/api/strategies/[id]/file-access-rules/[ruleId]", method: "DELETE", logMeta: routeMeta },
+  async ({ params }) => {
+    await deleteStrategyFileAccessRule(params.id, params.ruleId);
+    return jsonSuccess({ deleted: 1 });
+  }
+);

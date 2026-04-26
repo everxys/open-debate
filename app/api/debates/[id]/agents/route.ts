@@ -1,22 +1,15 @@
-import { NextResponse } from "next/server";
-
 import { appendAgentToDebate } from "@/lib/debates";
-import { AppError, toErrorResponse } from "@/lib/http";
+import { apiRoute, AppError, jsonSuccess, readJsonBody } from "@/lib/http";
 
-export async function POST(
-  request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
-    const body = (await request.json()) as { agentId?: string };
+export const POST = apiRoute<{ id: string }>(
+  { route: "/api/debates/[id]/agents", method: "POST", logMeta: ({ params }) => ({ debateId: params.id }) },
+  async ({ request, params, setLogMeta }) => {
+    const body = await readJsonBody<{ agentId?: string }>(request);
+    if (body.agentId) setLogMeta({ agentId: body.agentId });
     if (!body.agentId) {
       throw new AppError("VALIDATION_ERROR", 400, "agentId is required");
     }
-    const debate = await appendAgentToDebate(id, body.agentId);
-    return NextResponse.json({ success: true, data: debate });
-  } catch (error) {
-    return toErrorResponse(error);
+    const debate = await appendAgentToDebate(params.id, body.agentId);
+    return jsonSuccess(debate);
   }
-}
-
+);

@@ -111,10 +111,50 @@ export type AiAgentTable = {
   last_connectivity_check_status: string | null;
   last_connectivity_check_at: NullableTimestampString;
   last_connectivity_check_message: string | null;
+  usage_control_mode: string;
+  quota_profile_id: string | null;
   is_active: boolean;
   created_at: TimestampString;
   updated_at: TimestampString;
   deleted_at: NullableTimestampString;
+};
+
+export type AiQuotaProfileTable = {
+  id: Generated<string>;
+  user_id: string;
+  name: string;
+  profile_type: string;
+  request_limit_5h: number;
+  request_limit_week: number;
+  request_limit_month: number;
+  pacing_mode: string;
+  pacing_value: number;
+  reset_timezone: string;
+  next_request_not_before_at: NullableTimestampString;
+  created_at: TimestampString;
+  updated_at: TimestampString;
+  deleted_at: NullableTimestampString;
+};
+
+export type AiQuotaWindowUsageTable = {
+  id: Generated<string>;
+  profile_id: string;
+  window_type: string;
+  window_start_at: TimestampString;
+  window_end_at: TimestampString;
+  internal_request_count: number;
+  manual_adjustment_count: number;
+  created_at: TimestampString;
+  updated_at: TimestampString;
+};
+
+export type AiQuotaAdjustmentTable = {
+  id: Generated<string>;
+  profile_id: string;
+  window_type: string;
+  delta: number;
+  note: string | null;
+  created_at: TimestampString;
 };
 
 export type AiAgentFileTable = {
@@ -186,6 +226,40 @@ export type DebateSummaryWorkerTable = {
   claimed_count: number;
   completed_count: number;
   failed_count: number;
+  updated_at: TimestampString;
+};
+
+export type DebateResumeJobTable = {
+  id: Generated<string>;
+  debate_id: string;
+  profile_id: string;
+  resume_at: TimestampString;
+  reason: string;
+  status: string;
+  locked_by: string | null;
+  locked_at: NullableTimestampString;
+  last_error: string | null;
+  created_at: TimestampString;
+  updated_at: TimestampString;
+  completed_at: NullableTimestampString;
+};
+
+export type PlaygroundToolChecklistTable = {
+  id: Generated<string>;
+  user_id: string;
+  agent_id: string;
+  tool_name: string;
+  status: string;
+  current_stage: string | null;
+  stage_started_at: NullableTimestampString;
+  stage_index: number | null;
+  stage_history: unknown | null;
+  last_progress_message: string | null;
+  last_run_at: NullableTimestampString;
+  last_passed_at: NullableTimestampString;
+  last_error_message: string | null;
+  last_run_trace: unknown | null;
+  created_at: TimestampString;
   updated_at: TimestampString;
 };
 
@@ -268,6 +342,65 @@ export type DebateTurnTable = {
   created_at: TimestampString;
 };
 
+export type DebateTurnMutationTable = {
+  id: string;
+  debate_id: string;
+  debate_agent_id: string;
+  turn_number: number;
+  round_number: number;
+  mutation_kind: string;
+  target_path: string;
+  sequence_number: number;
+  status: string;
+  before_exists: boolean;
+  before_content: string | null;
+  before_version: number | null;
+  before_updated_at: NullableTimestampString;
+  before_created_at: NullableTimestampString;
+  after_exists: boolean;
+  after_content: string | null;
+  after_version: number | null;
+  after_updated_at: NullableTimestampString;
+  action_payload_json: unknown | null;
+  result_json: unknown | null;
+  created_at: TimestampString;
+  committed_at: NullableTimestampString;
+  rolled_back_at: NullableTimestampString;
+};
+
+export type DebateFileVersionTable = {
+  id: string;
+  debate_id: string;
+  path: string;
+  version: number;
+  content: string;
+  mode: string;
+  reason: string | null;
+  base_version: number | null;
+  created_by_debate_agent_id: string | null;
+  created_at: TimestampString;
+};
+
+export type DebateFileActivityLogTable = {
+  id: string;
+  debate_id: string;
+  debate_agent_id: string;
+  turn_number: number;
+  round_number: number;
+  action: string;
+  scope: string;
+  path: string;
+  target_debate_agent_id: string | null;
+  write_mode: string | null;
+  before_version: number | null;
+  after_version: number | null;
+  before_content: string | null;
+  after_content: string | null;
+  target_heading: string | null;
+  reason: string | null;
+  created_at: TimestampString;
+};
+
 export type DebateAgentOverrideTable = {
   debate_agent_id: string;
   system_prompt: string | null;
@@ -322,15 +455,23 @@ export type DebateContextEmbeddingTable = {
 export type OpenDebateDb = {
   ai_agents: AiAgentTable;
   ai_agent_files: AiAgentFileTable;
+  ai_quota_adjustments: AiQuotaAdjustmentTable;
+  ai_quota_profiles: AiQuotaProfileTable;
+  ai_quota_window_usage: AiQuotaWindowUsageTable;
+  playground_tool_checklists: PlaygroundToolChecklistTable;
   debate_agent_files: DebateAgentFileTable;
   debate_agent_overrides: DebateAgentOverrideTable;
   debate_agents: DebateAgentTable;
+  debate_file_activity_logs: DebateFileActivityLogTable;
+  debate_file_versions: DebateFileVersionTable;
   debate_context_chunks: DebateContextChunkTable;
   debate_context_embeddings: DebateContextEmbeddingTable;
   debate_files: DebateFileTable;
+  debate_resume_jobs: DebateResumeJobTable;
   debate_summary_jobs: DebateSummaryJobTable;
   debate_summary_workers: DebateSummaryWorkerTable;
   debate_turns: DebateTurnTable;
+  debate_turn_mutations: DebateTurnMutationTable;
   debates: DebateTable;
   email_verification_codes: EmailVerificationCodeTable;
   rate_limit_counters: RateLimitCounterTable;

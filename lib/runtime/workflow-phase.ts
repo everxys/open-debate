@@ -1,4 +1,5 @@
 import { ensureDb } from "@/lib/db";
+import { resolveProviderRequestedMaxTokens } from "@/lib/token-limits";
 import { sql } from "kysely";
 import type { DebateRecord } from "@/lib/types";
 import type { NormalizedDebateWorkflow } from "@/lib/workflow";
@@ -278,15 +279,16 @@ export function getWorkflowOutputMaxTokens(
   return phaseBudget;
 }
 
-export function resolveRequestedMaxTokens(maxTokens: number | null) {
-  if (typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0) {
-    return Math.floor(maxTokens);
-  }
-  return 65_535;
+export function resolveRequestedMaxTokens(maxTokens: number | null, provider?: "openai" | "anthropic" | null) {
+  return resolveProviderRequestedMaxTokens(provider ?? null, maxTokens);
 }
 
-export function withOptionalMaxTokens<T extends Record<string, unknown>>(body: T, maxTokens: number | null) {
-  return { ...body, max_tokens: resolveRequestedMaxTokens(maxTokens) };
+export function withOptionalMaxTokens<T extends Record<string, unknown>>(
+  body: T,
+  maxTokens: number | null,
+  provider?: "openai" | "anthropic" | null
+) {
+  return { ...body, max_tokens: resolveRequestedMaxTokens(maxTokens, provider ?? null) };
 }
 
 export function hasEnteredWorkflowFinalization(input: {

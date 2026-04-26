@@ -1,260 +1,39 @@
 "use client";
 
-import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 
 import { RoleFilesManagerColumns } from "@/components/strategies/role-files-manager";
 import { StrategySharedFilesManagerColumns } from "@/components/strategies/shared-files-manager";
 import { useAutoDismissToast } from "@/components/ui/use-toast";
-
-type StrategyDetail = {
-  id: string;
-  name: string;
-  description: string | null;
-  isShared: boolean;
-  updatedAt?: string | null;
-  forkedFromStrategyId?: string | null;
-  isFavorited?: boolean;
-  favoriteCount?: number;
-  forkCount?: number;
-  canEdit: boolean;
-  roles: Array<{
-    id: string;
-    name: string;
-    systemPrompt: string | null;
-    roleOrder: number;
-  }>;
-};
-
-type RoleDraft = { clientId: string; id: string; name: string; systemPrompt: string };
-type WorkflowPhasePrompt = {
-  id: string;
-  title: string;
-  kind: "analysis" | "deliberation" | "finalization_vote" | "finalization";
-  description: string | null;
-  minRounds: number | null;
-  injectedPrompt: string;
-    };
-
-type WorkflowPhaseKind = WorkflowPhasePrompt["kind"];
-
-type WorkflowContextAccessRule = {
-  scope: "shared" | "seat";
-  pathPrefix: string;
-  maxFiles: number;
-  maxCharsPerFile: number;
-  recursive: boolean;
-};
-
-type WorkflowPhaseGateRule = WorkflowContextAccessRule & {
-  phaseKind: WorkflowPhaseKind;
-};
-
-type WorkflowContextAccess = {
-  alwaysRead: WorkflowContextAccessRule[];
-  readWhenNeeded: WorkflowContextAccessRule[];
-  unlockAfterPhase: WorkflowPhaseGateRule[];
-};
-
-type WorkflowSummarizer = {
-  enabled: boolean;
-  perTurn: boolean;
-  perRound: boolean;
-  factsBoard: boolean;
-  prompts: {
-    turnSummary: string;
-    roundSummary: string;
-    factsBoard: string;
-  };
-  outputPaths: {
-    turnSummaryDir: string;
-    roundSummaryDir: string;
-    factsBoardPath: string;
-  };
-};
-
-type WorkflowConfigPayload = {
-  workflowVersion?: number;
-  enabled?: boolean;
-  contextAccess?: WorkflowContextAccess;
-  summarizer?: Partial<WorkflowSummarizer> & {
-    prompts?: Partial<WorkflowSummarizer["prompts"]>;
-    outputPaths?: Partial<WorkflowSummarizer["outputPaths"]>;
-  };
-  [key: string]: unknown;
-};
-
-type StrategyFileAccessRule = {
-  id: string;
-  strategyRoleId: string | null;
-  scope: "shared" | "seat";
-  targetType: "file" | "dir";
-  targetPath: string;
-  accessMode: "always_read" | "read_when_needed" | "unlock_after_phase";
-  phaseKind: WorkflowPhaseKind | null;
-};
-
-type WorkflowPromptDialogState =
-  | null
-  | {
-      type: "phase";
-      title: string;
-      description: string;
-      value: string;
-      phaseIndex?: number;
-    };
-
-type FileWithWebkitRelativePath = File & {
-  webkitRelativePath?: string;
-};
-
-type ImportedStrategyManifestPreview = {
-  strategyName: string;
-  roleCount: number;
-  keepRoles: Array<{ id: string; name: string; roleOrder: number }>;
-  deleteRoles: Array<{ id: string; name: string; roleOrder: number }>;
-  newRoles: Array<{ sourceRoleId: string; name: string; roleOrder: number }>;
-};
-
-function createClientId() {
-  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
-}
-
-function stripImportedRootPrefix(paths: string[]) {
-  if (paths.includes("manifest.json")) return paths;
-  const firstSegments = Array.from(new Set(paths.map((item) => item.split("/")[0]).filter(Boolean)));
-  if (firstSegments.length !== 1) return paths;
-  const root = firstSegments[0];
-  if (!paths.includes(`${root}/manifest.json`)) return paths;
-  return paths
-    .filter((item) => item.startsWith(`${root}/`))
-    .map((item) => item.slice(root.length + 1));
-}
-
-function summarizePrompt(value: string) {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (!normalized) return "未配置";
-  return normalized.length > 90 ? `${normalized.slice(0, 90)}...` : normalized;
-}
-
-function formatLocalTime(value: string | null | undefined) {
-  if (!value) return "未知";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "未知";
-  return date.toLocaleString("zh-CN", { hour12: false });
-}
-
-function summarizeRoles(roles: RoleDraft[]) {
-  if (roles.length <= 0) return "暂无角色";
-  const names = roles.map((role) => role.name || "(未命名)");
-  const preview = names.slice(0, 6).join("、");
-  if (names.length <= 6) return `${preview}（共 ${names.length} 个）`;
-  return `${preview} 等 ${names.length} 个`;
-}
-
-function createContextAccessRule(): WorkflowContextAccessRule {
-  return {
-    scope: "shared",
-    pathPrefix: "",
-    maxFiles: 6,
-    maxCharsPerFile: 4000,
-    recursive: true
-  };
-}
-
-function createPhaseGateRule(): WorkflowPhaseGateRule {
-  return {
-    ...createContextAccessRule(),
-    phaseKind: "deliberation"
-  };
-}
-
-function normalizeContextAccessPayload(value: unknown): WorkflowContextAccess {
-  const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-  const normalizeRule = (item: unknown): WorkflowContextAccessRule => {
-    const rule = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : null;
-    return {
-      scope: rule?.scope === "seat" ? "seat" : "shared",
-      pathPrefix: typeof rule?.pathPrefix === "string" ? rule.pathPrefix : "",
-      maxFiles:
-        typeof rule?.maxFiles === "number" && Number.isFinite(rule.maxFiles) && rule.maxFiles > 0
-          ? Math.floor(rule.maxFiles)
-          : 6,
-      maxCharsPerFile:
-        typeof rule?.maxCharsPerFile === "number" && Number.isFinite(rule.maxCharsPerFile) && rule.maxCharsPerFile > 0
-          ? Math.floor(rule.maxCharsPerFile)
-          : 4000,
-      recursive: rule?.recursive === undefined ? true : Boolean(rule.recursive)
-    };
-  };
-
-  const alwaysRead = Array.isArray(obj?.alwaysRead) ? obj.alwaysRead.map((item) => normalizeRule(item)) : [];
-  const readWhenNeeded = Array.isArray(obj?.readWhenNeeded) ? obj.readWhenNeeded.map((item) => normalizeRule(item)) : [];
-  const unlockAfterPhase = Array.isArray(obj?.unlockAfterPhase)
-    ? obj.unlockAfterPhase.map((item) => {
-        const rule = normalizeRule(item);
-        const raw = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : null;
-        const phaseKind: WorkflowPhaseKind =
-          raw?.phaseKind === "analysis" ||
-          raw?.phaseKind === "deliberation" ||
-          raw?.phaseKind === "finalization_vote" ||
-          raw?.phaseKind === "finalization"
-            ? raw.phaseKind
-            : "deliberation";
-        return { ...rule, phaseKind };
-      })
-    : [];
-
-  return { alwaysRead, readWhenNeeded, unlockAfterPhase };
-}
-
-function normalizeSummarizerPayload(value: unknown): WorkflowSummarizer {
-  const obj = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-  const prompts = typeof obj?.prompts === "object" && obj.prompts !== null ? (obj.prompts as Record<string, unknown>) : null;
-  const outputPaths =
-    typeof obj?.outputPaths === "object" && obj.outputPaths !== null
-      ? (obj.outputPaths as Record<string, unknown>)
-      : null;
-  return {
-    enabled: Boolean(obj?.enabled),
-    perTurn: obj?.perTurn === undefined ? true : Boolean(obj?.perTurn),
-    perRound: obj?.perRound === undefined ? true : Boolean(obj?.perRound),
-    factsBoard: obj?.factsBoard === undefined ? true : Boolean(obj?.factsBoard),
-    prompts: {
-      turnSummary: typeof prompts?.turnSummary === "string" ? prompts.turnSummary : "",
-      roundSummary: typeof prompts?.roundSummary === "string" ? prompts.roundSummary : "",
-      factsBoard: typeof prompts?.factsBoard === "string" ? prompts.factsBoard : ""
-    },
-    outputPaths: {
-      turnSummaryDir: typeof outputPaths?.turnSummaryDir === "string" ? outputPaths.turnSummaryDir : "debate/turn_summaries/",
-      roundSummaryDir:
-        typeof outputPaths?.roundSummaryDir === "string" ? outputPaths.roundSummaryDir : "debate/round_summaries/",
-      factsBoardPath: typeof outputPaths?.factsBoardPath === "string" ? outputPaths.factsBoardPath : "facts/board.md"
-    }
-  };
-}
-
-async function readPayload(response: Response) {
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json")) {
-    try {
-      return await response.json();
-    } catch {
-    }
-  }
-
-  let text = "";
-  try {
-    text = await response.text();
-  } catch {
-  }
-
-  return {
-    success: false,
-    error: { message: text || `${response.status} ${response.statusText}`.trim() }
-  };
-}
+import type {
+  FileWithWebkitRelativePath,
+  ImportedStrategyManifestPreview,
+  RoleDraft,
+  StrategyDetail,
+  StrategyPanel,
+  WorkflowConfigPayload,
+  WorkflowContextAccess,
+  WorkflowContextAccessRule,
+  WorkflowPhaseGateRule,
+  WorkflowPhasePrompt,
+  WorkflowPromptDialogState,
+  WorkflowSummarizer
+} from "./strategy-detail-types";
+import {
+  createClientId,
+  createContextAccessRule,
+  createPhaseGateRule,
+  normalizeContextAccessPayload,
+  normalizeStrategyFileAccessRules,
+  normalizeSummarizerPayload,
+  readPayload,
+  stripImportedRootPrefix,
+  summarizePrompt,
+  summarizeRoles
+} from "./strategy-detail-utils";
+import { StrategyAdvancedSection, StrategyOverviewSection, WorkflowPromptDialog } from "./strategy-detail-sections";
+import { useMountedStrategyPanels, useStrategyFileAccessRules } from "./use-strategy-detail-panels";
 
 export default function StrategyDetailPage() {
   const params = useParams<{ id: string }>();
@@ -308,48 +87,14 @@ export default function StrategyDetailPage() {
   const [workflowContextAccessSaving, setWorkflowContextAccessSaving] = useState(false);
   const [workflowSummarizerSaving, setWorkflowSummarizerSaving] = useState(false);
   const folderImportInputRef = useRef<HTMLInputElement | null>(null);
-  const [fileAccessRules, setFileAccessRules] = useState<StrategyFileAccessRule[]>([]);
-  const [fileAccessRulesLoading, setFileAccessRulesLoading] = useState(false);
-  const [strategyPanel, setStrategyPanel] = useState<"shared" | "roleFiles" | "roleEditor" | "phaseUnlock">("shared");
-  const [mountedPanels, setMountedPanels] = useState({ shared: true, roleFiles: false, roleEditor: false, phaseUnlock: false });
-
-  const refreshFileAccessRules = useCallback(async () => {
-    if (!id) return;
-    setFileAccessRulesLoading(true);
-    try {
-      const response = await fetch(`/api/strategies/${id}/file-access-rules`, { cache: "no-store" });
-      const payload = await readPayload(response);
-      if (!response.ok) {
-        showToast("error", payload.error?.message ?? "加载文件读取规则失败");
-        return;
-      }
-      const items = Array.isArray(payload.data) ? payload.data : [];
-      setFileAccessRules(
-        items.map((item: Record<string, unknown>) => ({
-          id: String(item.id ?? ""),
-          strategyRoleId: typeof item.strategyRoleId === "string" ? item.strategyRoleId : null,
-          scope: item.scope === "seat" ? "seat" : "shared",
-          targetType: item.targetType === "file" ? "file" : "dir",
-          targetPath: String(item.targetPath ?? ""),
-          accessMode:
-            item.accessMode === "unlock_after_phase"
-              ? "unlock_after_phase"
-              : item.accessMode === "read_when_needed"
-                ? "read_when_needed"
-                : "always_read",
-          phaseKind:
-            item.phaseKind === "analysis" ||
-            item.phaseKind === "deliberation" ||
-            item.phaseKind === "finalization_vote" ||
-            item.phaseKind === "finalization"
-              ? item.phaseKind
-              : null
-        }))
-      );
-    } finally {
-      setFileAccessRulesLoading(false);
-    }
-  }, [id, showToast]);
+  const [strategyPanel, setStrategyPanel] = useState<StrategyPanel>("shared");
+  const mountedPanels = useMountedStrategyPanels(strategyPanel);
+  const {
+    fileAccessRules,
+    setFileAccessRules,
+    fileAccessRulesLoading,
+    refreshFileAccessRules
+  } = useStrategyFileAccessRules({ strategyId: id, showToast });
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -422,54 +167,17 @@ export default function StrategyDetailPage() {
       if (!fileAccessRulesResponse.ok) {
         showToast("error", fileAccessRulesPayload.error?.message ?? "加载文件读取规则失败");
       } else {
-        const items = Array.isArray(fileAccessRulesPayload.data) ? fileAccessRulesPayload.data : [];
-        setFileAccessRules(
-          items.map((item: Record<string, unknown>) => ({
-            id: String(item.id ?? ""),
-            strategyRoleId: typeof item.strategyRoleId === "string" ? item.strategyRoleId : null,
-            scope: item.scope === "seat" ? "seat" : "shared",
-            targetType: item.targetType === "file" ? "file" : "dir",
-            targetPath: String(item.targetPath ?? ""),
-            accessMode:
-              item.accessMode === "unlock_after_phase"
-                ? "unlock_after_phase"
-                : item.accessMode === "read_when_needed"
-                  ? "read_when_needed"
-                  : "always_read",
-            phaseKind:
-              item.phaseKind === "analysis" ||
-              item.phaseKind === "deliberation" ||
-              item.phaseKind === "finalization_vote" ||
-              item.phaseKind === "finalization"
-                ? item.phaseKind
-                : null
-          }))
-        );
+        setFileAccessRules(normalizeStrategyFileAccessRules(fileAccessRulesPayload.data));
       }
     } finally {
       setWorkflowPhasePromptsLoading(false);
       setWorkflowContextAccessLoading(false);
     }
-  }, [id, showToast]);
+  }, [id, setFileAccessRules, showToast]);
 
   useEffect(() => {
     void load();
   }, [load]);
-
-  useEffect(() => {
-    setMountedPanels((current) => {
-      if (strategyPanel === "shared" && current.shared) return current;
-      if (strategyPanel === "roleFiles" && current.roleFiles) return current;
-      if (strategyPanel === "roleEditor" && current.roleEditor) return current;
-      if (strategyPanel === "phaseUnlock" && current.phaseUnlock) return current;
-      return {
-        shared: current.shared || strategyPanel === "shared",
-        roleFiles: current.roleFiles || strategyPanel === "roleFiles",
-        roleEditor: current.roleEditor || strategyPanel === "roleEditor",
-        phaseUnlock: current.phaseUnlock || strategyPanel === "phaseUnlock"
-      };
-    });
-  }, [strategyPanel]);
 
   async function toggleFavorite() {
     if (!detail || detail.canEdit) return;
@@ -1192,60 +900,13 @@ export default function StrategyDetailPage() {
           {toast.text}
         </div>
       ) : null}
-      {workflowPromptDialog ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setWorkflowPromptDialog(null)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15, 23, 42, 0.45)",
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "center",
-            padding: 24,
-            zIndex: 1000
-          }}
-        >
-          <div
-            className="panel stack"
-            onClick={(event) => event.stopPropagation()}
-            style={{ width: "min(980px, 100%)" }}
-          >
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <div className="stack" style={{ gap: 4 }}>
-                <strong>{workflowPromptDialog.title}</strong>
-                <div className="muted">{workflowPromptDialog.description}</div>
-              </div>
-              <button className="btn" type="button" onClick={() => setWorkflowPromptDialog(null)}>
-                关闭
-              </button>
-            </div>
-            <textarea
-              className="strategyPrompt"
-              value={workflowPromptDialog.value}
-              disabled={!detail?.canEdit}
-              onChange={(event) => updateWorkflowPromptDialogValue(event.target.value)}
-              style={{ height: "60vh", resize: "none", overflowY: "auto" }}
-              autoFocus
-            />
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <span className="muted">{workflowPromptDialog.value.length.toLocaleString()} 字符</span>
-              <div className="row">
-                <button className="btn" type="button" onClick={() => setWorkflowPromptDialog(null)}>
-                  取消
-                </button>
-                {detail?.canEdit ? (
-                  <button className="btn btn-primary" type="button" onClick={applyWorkflowPromptDialog}>
-                    应用修改
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <WorkflowPromptDialog
+        dialog={workflowPromptDialog}
+        canEdit={detail.canEdit}
+        onClose={() => setWorkflowPromptDialog(null)}
+        onChangeValue={updateWorkflowPromptDialogValue}
+        onApply={applyWorkflowPromptDialog}
+      />
 
       <input
         ref={folderImportInputRef}
@@ -1256,79 +917,26 @@ export default function StrategyDetailPage() {
         {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
       />
 
-      <section className="panel stack">
-        <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
-          <div className="stack" style={{ gap: 6 }}>
-            <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-              <h2 style={{ margin: 0 }}>策略概览</h2>
-              <span className="muted">{detail.canEdit ? "可编辑" : "只读（来自社区分享）"}</span>
-            </div>
-            <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
-              <span className="muted">最近更新：{formatLocalTime(detail.updatedAt)}</span>
-              <span className="muted">共享状态：{isShared ? "已共享" : "未共享"}</span>
-              {detail.isShared ? (
-                <span className="muted">收藏 {detail.favoriteCount ?? 0} · Fork {detail.forkCount ?? 0}</span>
-              ) : null}
-            </div>
-          </div>
-          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-            <Link className="btn" href="/strategies">
-              返回
-            </Link>
-            <Link className="btn btn-primary" href={`/workspaces/new?strategyId=${detail.id}`}>
-              创建工作台
-            </Link>
-            {detail.canEdit ? (
-              <button
-                className="btn btn-primary"
-                disabled={
-                  !canSave ||
-                  isSavingAll ||
-                  isSaving ||
-                  workflowPhasePromptsSaving ||
-                  workflowContextAccessSaving ||
-                  workflowSummarizerSaving
-                }
-                onClick={() => void saveAll()}
-              >
-                {isSavingAll || isSaving || workflowPhasePromptsSaving || workflowContextAccessSaving || workflowSummarizerSaving
-                  ? "保存中..."
-                  : "保存全部"}
-              </button>
-            ) : (
-              <>
-                <button className="btn" disabled={isFavoriting} onClick={() => void toggleFavorite()}>
-                  {isFavoriting ? "处理中..." : detail.isFavorited ? "取消收藏" : "收藏"}
-                </button>
-                <button className="btn" disabled={isForking} onClick={() => void forkOne()}>
-                  {isForking ? "Fork 中..." : "Fork"}
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-
-        <div className="grid" style={{ gap: 12 }}>
-          <div className="field">
-            <label>策略名称</label>
-            <input value={name} disabled={!detail.canEdit} onChange={(event) => setName(event.target.value)} />
-          </div>
-          <div className="field">
-            <label>描述（可选）</label>
-            <textarea value={description} disabled={!detail.canEdit} onChange={(event) => setDescription(event.target.value)} />
-          </div>
-        </div>
-
-        <label className="row" style={{ alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            checked={isShared}
-            disabled={!detail.canEdit}
-            onChange={(event) => setIsShared(event.target.checked)}
-          />
-          <span>分享到社区</span>
-        </label>
-      </section>
+      <StrategyOverviewSection
+        detail={detail}
+        name={name}
+        description={description}
+        isShared={isShared}
+        canSave={canSave}
+        isSavingAll={isSavingAll}
+        isSaving={isSaving}
+        workflowPhasePromptsSaving={workflowPhasePromptsSaving}
+        workflowContextAccessSaving={workflowContextAccessSaving}
+        workflowSummarizerSaving={workflowSummarizerSaving}
+        isFavoriting={isFavoriting}
+        isForking={isForking}
+        onChangeName={setName}
+        onChangeDescription={setDescription}
+        onChangeShared={setIsShared}
+        onSaveAll={() => void saveAll()}
+        onToggleFavorite={() => void toggleFavorite()}
+        onFork={() => void forkOne()}
+      />
 
       <details className="panel" open>
         <summary
@@ -1848,36 +1456,15 @@ export default function StrategyDetailPage() {
         </div>
       </details>
 
-      <details className="panel">
-        <summary
-          className="row"
-          style={{ cursor: "pointer", justifyContent: "space-between", alignItems: "center", gap: 12 }}
-        >
-          <div className="row" style={{ gap: 8, alignItems: "center" }}>
-            <strong>导入 / 导出 / 高级操作</strong>
-            <span className="muted">备份与覆盖</span>
-          </div>
-          <span className="muted">{detail.canEdit ? "查看 / 编辑" : "查看"}</span>
-        </summary>
-        <div className="stack" style={{ marginTop: 12 }}>
-          <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
-            <button className="btn" disabled={isExportingFolder} onClick={() => void downloadStrategyFolder()}>
-              {isExportingFolder ? "导出中..." : "下载文件夹"}
-            </button>
-            {detail.canEdit ? (
-              <button className="btn" disabled={isImportingFolder} onClick={openStrategyFolderImport}>
-                {isImportingFolder ? "导入中..." : "上传文件夹覆盖"}
-              </button>
-            ) : null}
-            {detail.canEdit ? (
-              <button className="btn btn-danger" disabled={isDeleting} onClick={() => void deleteOne()}>
-                {isDeleting ? "删除中..." : "删除策略"}
-              </button>
-            ) : null}
-          </div>
-          <div className="muted">覆盖前先备份。</div>
-        </div>
-      </details>
+      <StrategyAdvancedSection
+        canEdit={detail.canEdit}
+        isExportingFolder={isExportingFolder}
+        isImportingFolder={isImportingFolder}
+        isDeleting={isDeleting}
+        onDownloadFolder={() => void downloadStrategyFolder()}
+        onOpenFolderImport={openStrategyFolderImport}
+        onDelete={() => void deleteOne()}
+      />
     </div>
   );
 }

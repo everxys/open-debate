@@ -1,3 +1,5 @@
+import { createServerLogger } from "@/lib/logger/server";
+
 type VerificationEmail = {
   email: string;
   code: string;
@@ -18,6 +20,8 @@ type SendCloudResponse =
       message?: string;
       errors?: unknown;
     };
+
+const emailLogger = createServerLogger("email");
 
 function getRequiredEnv(name: string) {
   const value = process.env[name];
@@ -86,7 +90,10 @@ export async function sendVerificationEmail(payload: VerificationEmail) {
     return;
   }
 
-  console.info(
-    `[verification:${payload.purpose}] to=${payload.email} code=${payload.code} expires=${payload.expiresInMinutes}m`
-  );
+  emailLogger.info("verification email console delivery", {
+    purpose: payload.purpose,
+    to: payload.email,
+    code: payload.code,
+    expiresInMinutes: payload.expiresInMinutes
+  });
 }

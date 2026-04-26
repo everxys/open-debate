@@ -41,7 +41,7 @@
     ],
     "transitionRules": {
       "finalization": {
-        "autoOpenVote": true,
+        "autoOpenVote": false,
         "requireUnanimousVote": true,
         "reopenUntilPassed": true,
         "discussionRoundsBetweenVotes": 1,
@@ -50,10 +50,6 @@
     }
   },
   "voting": {
-    "custom": {
-      "minOptions": 2,
-      "maxOptions": null
-    },
     "governance": {
       "tieBreaker": "revote",
       "maxTieRounds": 2

@@ -1,23 +1,13 @@
-import { NextResponse } from "next/server";
-
 import { createWorkspace, listWorkspaces } from "@/lib/workspaces";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess, readJsonBody } from "@/lib/http";
 
-export async function GET() {
-  try {
-    const items = await listWorkspaces();
-    return NextResponse.json({ success: true, data: items });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+export const GET = apiRoute({ route: "/api/workspaces", method: "GET" }, async () => {
+  const items = await listWorkspaces();
+  return jsonSuccess(items);
+});
 
-export async function POST(request: Request) {
-  try {
-    const body = await request.json();
-    const item = await createWorkspace(body);
-    return NextResponse.json({ success: true, data: item }, { status: 201 });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+export const POST = apiRoute({ route: "/api/workspaces", method: "POST" }, async ({ request }) => {
+  const body = await readJsonBody(request);
+  const item = await createWorkspace(body);
+  return jsonSuccess(item, 201);
+});

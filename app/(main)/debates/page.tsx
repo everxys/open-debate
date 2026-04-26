@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { createBrowserLogger } from "@/lib/logger/client";
+
 type Debate = {
   id: string;
   question: string;
@@ -12,13 +14,15 @@ type Debate = {
   tokenUsed: number;
   consensusReached: boolean;
   isShared: boolean;
-  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | null;
+  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | "quota_wait" | null;
   runtimeNoticeMessage: string | null;
   runtimeNoticeAt: string | null;
   isOwner?: boolean;
   agentCount: number;
   createdAt: string;
 };
+
+const debatesListLogger = createBrowserLogger("ui.debates.list");
 
 function formatTime(value: string) {
   const date = new Date(value);
@@ -27,7 +31,7 @@ function formatTime(value: string) {
 }
 
 function RecoveryBadge(props: {
-  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | null;
+  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | "quota_wait" | null;
   runtimeNoticeMessage: string | null;
   runtimeNoticeAt: string | null;
 }) {
@@ -35,13 +39,13 @@ function RecoveryBadge(props: {
   const badgeClass =
     props.runtimeNoticeKind === "recovering"
       ? "badge-recovering"
-      : props.runtimeNoticeKind === "interrupted"
+      : props.runtimeNoticeKind === "interrupted" || props.runtimeNoticeKind === "quota_wait"
         ? "badge-paused"
         : "badge-recovered";
   const label =
     props.runtimeNoticeKind === "recovering"
       ? "恢复中"
-      : props.runtimeNoticeKind === "interrupted"
+      : props.runtimeNoticeKind === "interrupted" || props.runtimeNoticeKind === "quota_wait"
         ? "已自动暂停"
         : "已自动恢复";
   const title = props.runtimeNoticeAt
@@ -86,7 +90,10 @@ export default function DebatesPage() {
       const nextDebates = Array.isArray(debatesPayload.data) ? debatesPayload.data : [];
       setDebates(nextDebates);
     } catch (error) {
-      console.error(error);
+      debatesListLogger.error("failed to load debates list", {
+        scope: nextScope,
+        error
+      });
       setDebates([]);
       setLoadError("加载失败");
     }

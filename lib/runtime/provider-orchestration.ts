@@ -1,12 +1,11 @@
 import { decryptSecret } from "@/lib/crypto";
+import { ensureDb } from "@/lib/db";
 import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type DebateParticipantRoleType } from "@/lib/debate-role-types";
 import { emitDebateLiveEvent, setDebateLiveProgress } from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
+import { ensureQuotaReservationOrDelay, type QuotaReservationInput } from "@/lib/quota-control";
 import { retrieveRelevantHistory } from "@/lib/retrieval";
-import {
-  MAX_TOOL_ROUNDS,
-  PROMPT_HARD_MAX_CHARS_ANTHROPIC
-} from "@/lib/runtime/constants";
+import { PROMPT_HARD_MAX_CHARS_ANTHROPIC } from "@/lib/runtime/constants";
 import {
   buildContextAccessSummaryLines,
   buildRelevantHistoryInline,
@@ -21,10 +20,7 @@ import {
   loadOpenVote,
   loadOpenVoteInline,
   loadQuestionDiffInline,
-  loadVoteAnnouncementInline,
-  toolVoteCast,
-  toolVoteClose,
-  toolVoteOpen
+  loadVoteAnnouncementInline
 } from "@/lib/runtime/tools";
 import {
   openAiChatOnce,
@@ -33,10 +29,7 @@ import {
   resolveChatUrl
 } from "@/lib/runtime/provider-openai";
 import {
-  buildAnthropicTools,
   buildBaseSystemPrompt,
-  buildFileToolInstructions,
-  buildOpenAiTools,
   buildResponseFormatInstructions,
   clipMessagesToInputLimit,
   describeRuntimeError,
@@ -47,16 +40,32 @@ import {
   summarizeOptionText
 } from "@/lib/runtime/provider-shared";
 import {
+  buildRuntimeActionInstructions,
+  buildRuntimeActionWorkingSetInline,
+  detectRuntimeActionLoop,
+  executeRuntimeHarnessAction,
+  loadRuntimeSeatWorkingSet,
+  makeRuntimeActionLoopRecord,
+  mergeRuntimeSharedFilesIntoWorkingSet,
+  parseRuntimeHarnessAction,
+  pushRuntimeActionLoopRecord,
+  rollbackRuntimeTurnMutationsByIds,
+  resolveRuntimeActionPolicy,
+  type RuntimeHarnessAction,
+  type RuntimeActionLoopState,
+  type RuntimeSeatWorkingSet
+} from "@/lib/runtime/runtime-action-harness";
+import {
   getWorkflowOutputMaxTokens,
   isOfficialVotingAllowed,
   listMissingRequiredDeliverables,
   loadDebateWorkflow,
-  type OfficialVote,
   resolveCurrentWorkflowPhase,
   resolveRequestedMaxTokens,
   withOptionalMaxTokens
 } from "@/lib/runtime/workflow-phase";
 import type { AgentRecord, DebateRecord } from "@/lib/types";
+import type { WorkflowPhaseKind } from "@/lib/workflow";
 import {
   buildWorkflowPhaseInline,
   formatRecentTurnsInline,
@@ -71,15 +80,8 @@ import {
   loadRecentTurnRows,
   loadSharedFactsBoardInline,
   loadWorkflowIdeaBankInline,
-  maybeGenerateVoteAnnouncementWithSeat1,
   recordImplicitFileReads,
   resolveDebateIdeaBankPaths,
-  toolDebateFilesStat,
-  toolDebateFilesWrite,
-  toolListFiles,
-  toolReadDebateFile,
-  toolReadFile,
-  toolSearchFiles,
   type DebateFileActivityAudit
 } from "@/lib/runtime-main";
 
@@ -103,6 +105,99 @@ async function getWorkflowAllowedOutputPaths(input: {
   return Array.from(paths);
 }
 
+async function getWorkflowReadableSharedPaths(input: {
+  workflow: Awaited<ReturnType<typeof loadDebateWorkflow>>;
+  userId: string;
+  debateId: string;
+  currentPhaseKind: WorkflowPhaseKind | null;
+  allowedOutputPaths: string[];
+}) {
+  const paths = new Set(input.allowedOutputPaths.map((item) => normalizeRuntimePath(item)).filter(Boolean));
+  const db = await ensureDb();
+  const rows = await db
+    .selectFrom("debate_files as f")
+    .innerJoin("debates as d", "d.id", "f.debate_id")
+    .select(["f.path"])
+    .where("f.debate_id", "=", input.debateId)
+    .where("d.user_id", "=", input.userId)
+    .orderBy("f.path", "asc")
+    .execute();
+  for (const row of rows) {
+    const path = normalizeRuntimePath(String(row.path ?? ""));
+    if (!path) continue;
+    if (isContextPathReadable(input.workflow, input.currentPhaseKind, "shared", path)) {
+      paths.add(path);
+    }
+  }
+  return Array.from(paths);
+}
+
+type RuntimePromptSharedFile = {
+  path: string;
+  content: string;
+  version: number | null;
+  updatedAt: string | null;
+};
+
+function normalizeRuntimePath(path: string | null | undefined) {
+  return String(path ?? "").replace(/\\/g, "/").replace(/^\/+/, "").trim();
+}
+
+function formatRuntimeTimestamp(value: unknown) {
+  if (typeof value === "string") return value;
+  if (value instanceof Date) return value.toISOString();
+  return null;
+}
+
+function isRuntimeWritableSharedPath(input: {
+  path: string;
+  workflow: Awaited<ReturnType<typeof loadDebateWorkflow>>;
+}) {
+  const normalized = normalizeRuntimePath(input.path);
+  if (!normalized.startsWith("debate/")) return false;
+  if (normalized.startsWith("debate/answers/")) return false;
+  if (normalized.startsWith("debate/turn_summaries/")) return false;
+  if (normalized.startsWith("debate/round_summaries/")) return false;
+  if (normalized.split("/").pop() === "raw-idea-bank.md") return false;
+  const configuredRawIdeaBankPath = normalizeRuntimePath(input.workflow?.ideaBank.rawIdeaBankPath ?? null);
+  if (configuredRawIdeaBankPath && normalized === configuredRawIdeaBankPath) return false;
+  return true;
+}
+
+function buildRuntimeAllowedOutputPaths(input: {
+  baseAllowedOutputPaths: string[];
+  workingSet: RuntimeSeatWorkingSet;
+  workflow: Awaited<ReturnType<typeof loadDebateWorkflow>>;
+}) {
+  const paths = new Set(input.baseAllowedOutputPaths.map((item) => normalizeRuntimePath(item)));
+  for (const ref of [
+    ...input.workingSet.recentlyWrittenFiles,
+    ...input.workingSet.canonicalSourceFiles,
+    ...input.workingSet.recentlyReadFiles
+  ]) {
+    if (ref.source !== "shared") continue;
+    if (!isRuntimeWritableSharedPath({ path: ref.path, workflow: input.workflow })) continue;
+    paths.add(normalizeRuntimePath(ref.path));
+  }
+  return Array.from(paths).filter(Boolean);
+}
+
+function buildRuntimeReadableSharedPaths(input: {
+  baseReadableSharedPaths: string[];
+  workingSet: RuntimeSeatWorkingSet;
+}) {
+  const paths = new Set(input.baseReadableSharedPaths.map((item) => normalizeRuntimePath(item)).filter(Boolean));
+  for (const ref of [
+    ...input.workingSet.recentlyWrittenFiles,
+    ...input.workingSet.canonicalSourceFiles,
+    ...input.workingSet.recentlyReadFiles
+  ]) {
+    if (ref.source !== "shared") continue;
+    paths.add(normalizeRuntimePath(ref.path));
+  }
+  return Array.from(paths).filter(Boolean);
+}
+
 type ProviderUsageSummary = {
   promptTokens: number | null;
   completionTokens: number | null;
@@ -114,6 +209,7 @@ type ProviderExecutionResult = {
   usage: ProviderUsageSummary;
   promptChars: number;
   estimatedPromptTokens: number | null;
+  mutationJournalIds: string[];
   diagnostics: {
     provider: string;
     model: string;
@@ -147,6 +243,7 @@ type ProviderPromptContext = ProviderCallInput & {
   currentOutputMaxTokens: number | null;
   enableVotingTools: boolean;
   allowedOutputPaths: string[];
+  readableSharedPaths: string[];
   requiredDeliverables: NonNullable<Awaited<ReturnType<typeof loadDebateWorkflow>>>["deliverables"]["requiredFiles"] | [];
   pendingDeliverables: Awaited<ReturnType<typeof listMissingRequiredDeliverables>>;
   contextAccessLines: string[];
@@ -161,6 +258,19 @@ type ProviderTextAssertionContext = {
   finishReason?: string | null;
   toolCallsCount?: number;
 };
+
+function buildDebateQuotaRequest(context: ProviderPromptContext): QuotaReservationInput {
+  return {
+    userId: context.userId,
+    usageControlMode: context.agent.usageControlMode,
+    quotaProfileId: context.agent.quotaProfileId,
+    requestKind: "debate_runtime",
+    agentId: context.agent.id,
+    agentName: context.agent.name,
+    debateId: context.debate.id,
+    debateAgentId: context.debateAgentId
+  };
+}
 
 export function assertProviderApiKeyEnabled(apiKey: string) {
   if (apiKey.startsWith("demo-")) {
@@ -205,24 +315,6 @@ function createLiveStageUpdater(input: ProviderCallInput) {
       at: new Date().toISOString()
     });
   };
-}
-
-async function handleVoteCloseSideEffects(context: ProviderCallInput, result: unknown) {
-  const closedVote =
-    result && typeof result === "object" && "closed" in result && (result as { closed?: unknown }).closed
-      ? ((result as { closed: OfficialVote }).closed as OfficialVote)
-      : null;
-  if (!closedVote) return;
-  try {
-    await maybeGenerateVoteAnnouncementWithSeat1({
-      userId: context.userId,
-      debate: context.debate,
-      participantCount: context.participantCount,
-      closed: closedVote
-    });
-  } catch (error) {
-    await logRuntimeEvent("warn", "vote announce after close failed", { error: describeRuntimeError(error) });
-  }
 }
 
 function normalizeOpenAiUsage(usage: unknown): ProviderUsageSummary {
@@ -293,12 +385,19 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
     latestVote,
     persistedPhaseKind: input.debate.workflowPhaseKind
   });
+  const readableSharedPaths = await getWorkflowReadableSharedPaths({
+    workflow,
+    userId: input.userId,
+    debateId: input.debate.id,
+    currentPhaseKind: currentPhase?.kind ?? null,
+    allowedOutputPaths
+  });
   const currentOutputMaxTokens = getWorkflowOutputMaxTokens(workflow, currentPhase?.kind ?? null, input.agent.maxOutputTokens);
   const contextAccessLines = buildContextAccessSummaryLines({
     workflow,
     currentPhaseKind: currentPhase?.kind ?? null
   });
-  const requestedMaxTokens = resolveRequestedMaxTokens(currentOutputMaxTokens);
+  const requestedMaxTokens = resolveRequestedMaxTokens(currentOutputMaxTokens, input.agent.provider);
   const workflowPhaseInline = buildWorkflowPhaseInline({
     workflow,
     debate: input.debate,
@@ -345,7 +444,7 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
     openVote && openVote.status === "open" && !alreadyVoted
       ? [
           "VOTING REQUIRED: An official vote is open and you haven't voted yet.",
-          "- First: call tool debate_vote_cast with { choice: '<one option exactly>', reason?: '...' }.",
+          '- First: emit one harness debate-action block like { "action": "vote_cast", "choice": "<one option exactly>", "reason": "optional" }.',
           "- Then: you may add a short message (1-3 sentences)."
         ].join("\n")
       : null;
@@ -481,6 +580,7 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
     currentOutputMaxTokens,
     enableVotingTools,
     allowedOutputPaths,
+    readableSharedPaths,
     requiredDeliverables,
     pendingDeliverables,
     contextAccessLines,
@@ -489,18 +589,40 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
   };
 }
 
-async function buildSharedSystemParts(context: ProviderPromptContext, overrideSystemPrompt: string | null) {
-  const systemParts = [
-    buildBaseSystemPrompt(context.agent, overrideSystemPrompt),
-    buildFileToolInstructions({
-      enableVoting: context.enableVotingTools,
-      allowedOutputPaths: context.allowedOutputPaths,
-      requiredFiles: context.requiredDeliverables,
-      currentRoleType: context.currentRoleType,
-      pendingRequiredFiles: context.pendingDeliverables,
-      contextAccessLines: context.contextAccessLines
-    })
-  ];
+async function loadPromptVisibleSharedFilesForTurn(context: ProviderPromptContext): Promise<RuntimePromptSharedFile[]> {
+  const db = await ensureDb();
+  const rows = await db
+    .selectFrom("debate_file_activity_logs as log")
+    .innerJoin("debates as d", "d.id", "log.debate_id")
+    .innerJoin("debate_files as f", (join) => join.onRef("f.debate_id", "=", "log.debate_id").onRef("f.path", "=", "log.path"))
+    .select(["log.path", "f.content", "f.version", "f.updated_at"])
+    .where("log.debate_id", "=", context.debate.id)
+    .where("d.user_id", "=", context.userId)
+    .where("log.debate_agent_id", "=", context.debateAgentId)
+    .where("log.turn_number", "=", context.messageNumber)
+    .where("log.round_number", "=", context.roundNumber)
+    .where("log.scope", "=", "debate")
+    .where("log.action", "=", "read")
+    .orderBy("log.created_at", "asc")
+    .execute();
+  const seen = new Set<string>();
+  const result: RuntimePromptSharedFile[] = [];
+  for (const row of rows) {
+    const path = normalizeRuntimePath(row.path);
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    result.push({
+      path,
+      content: String(row.content ?? ""),
+      version: typeof row.version === "number" && Number.isFinite(row.version) ? Math.floor(row.version) : null,
+      updatedAt: formatRuntimeTimestamp(row.updated_at)
+    });
+  }
+  return result;
+}
+
+async function loadSharedSystemPromptParts(context: ProviderPromptContext) {
+  const systemParts: string[] = [];
   const agentFilesInline = await loadDebateAgentFilesInline(
     context.userId,
     context.debateAgentId,
@@ -529,168 +651,66 @@ async function buildSharedSystemParts(context: ProviderPromptContext, overrideSy
       if (sharedInline) systemParts.push(sharedInline);
     }
   }
-  systemParts.push(buildResponseFormatInstructions());
   return systemParts;
 }
 
-async function executeProviderToolCall(input: {
-  provider: "openai" | "anthropic";
-  toolName: string;
-  rawArgs: unknown;
-  toolCallId?: string;
+function buildHarnessAuthorityInline() {
+  return [
+    "Harness authority (IMPORTANT):",
+    "- Only the latest HARNESS_ACTION_RESULT is the source of truth for file state.",
+    "- Do not claim a file was created or updated unless that result confirmed ok:true for the exact path.",
+    "- If a harness write returns an error, treat the target file as unchanged and either retry with a new allowed action or explicitly say it was not written."
+  ].join("\n");
+}
+
+function buildSharedSystemInline(input: {
   context: ProviderPromptContext;
-  updateLiveStage: ReturnType<typeof createLiveStageUpdater>;
+  overrideSystemPrompt: string | null;
+  workingSet: RuntimeSeatWorkingSet;
+  actionPolicy: ReturnType<typeof resolveRuntimeActionPolicy>;
+  allowedOutputPaths: string[];
+  sharedPromptParts: string[];
 }) {
-  input.updateLiveStage("running_tools", `执行工具：${input.toolName}`);
+  const systemParts = [
+    buildBaseSystemPrompt(input.context.agent, input.overrideSystemPrompt),
+    buildRuntimeActionInstructions({
+      policy: input.actionPolicy,
+      allowedOutputPaths: input.allowedOutputPaths
+    })
+  ];
+  const workingSetInline = buildRuntimeActionWorkingSetInline(input.workingSet);
+  if (workingSetInline) systemParts.push(workingSetInline);
+  systemParts.push(buildHarnessAuthorityInline());
+  systemParts.push(...input.sharedPromptParts);
+  systemParts.push(buildResponseFormatInstructions());
+  return systemParts.join("\n\n");
+}
 
-  let result: unknown;
-  const toolNow = new Date().toISOString();
-  const toolPolicy = {
-    workflow: input.context.workflow,
-    currentPhaseKind: input.context.currentPhase?.kind ?? null
-  };
-  const toolAudit = {
-    debateId: input.context.debate.id,
-    turnNumber: input.context.messageNumber,
-    roundNumber: input.context.roundNumber,
-    now: toolNow
-  };
-
-  if (input.toolName === "agent_files_list") {
-    const prefix = typeof (input.rawArgs as { prefix?: unknown }).prefix === "string" ? String((input.rawArgs as { prefix: string }).prefix) : undefined;
-    result = await toolListFiles(
-      input.context.userId,
-      input.context.debateAgentId,
-      input.context.agent.id,
-      prefix,
-      toolAudit,
-      toolPolicy
+function buildHarnessResultMessage(input: {
+  action: RuntimeHarnessAction;
+  result: unknown;
+  allowedActions: string[];
+  workingSet: RuntimeSeatWorkingSet;
+}) {
+  const lines = ["HARNESS_ACTION_RESULT"];
+  lines.push(typeof input.result === "string" ? input.result : JSON.stringify(input.result));
+  if (input.action.action === "write_replace" || input.action.action === "write_append" || input.action.action === "write_section") {
+    const ok = typeof input.result === "object" && input.result && "ok" in input.result && input.result.ok === true;
+    lines.push(
+      ok
+        ? `AUTHORITATIVE_FILE_STATE: ${input.action.path} is confirmed written by the harness.`
+        : `AUTHORITATIVE_FILE_STATE: ${input.action.path} is not confirmed written; treat it as unchanged.`
     );
-  } else if (input.toolName === "agent_files_read") {
-    const path = String((input.rawArgs as { path?: unknown }).path ?? "");
-    result = await toolReadFile(
-      input.context.userId,
-      input.context.debateAgentId,
-      input.context.agent.id,
-      path,
-      toolAudit,
-      toolPolicy
-    );
-  } else if (input.toolName === "agent_files_search") {
-    const queryText = String((input.rawArgs as { query?: unknown }).query ?? "");
-    result = await toolSearchFiles(
-      input.context.userId,
-      input.context.debateAgentId,
-      input.context.agent.id,
-      queryText,
-      toolAudit,
-      toolPolicy
-    );
-  } else if (input.toolName === "debate_files_read") {
-    const path = String((input.rawArgs as { path?: unknown }).path ?? "");
-    result = await toolReadDebateFile(
-      input.context.userId,
-      input.context.debateAgentId,
-      input.context.debate.id,
-      path,
-      toolNow,
-      input.context.messageNumber,
-      input.context.roundNumber,
-      toolPolicy
-    );
-  } else if (input.toolName === "debate_files_stat") {
-    const path = String((input.rawArgs as { path?: unknown }).path ?? "");
-    result = await toolDebateFilesStat({
-      debateAgentId: input.context.debateAgentId,
-      debateId: input.context.debate.id,
-      turnNumber: input.context.messageNumber,
-      roundNumber: input.context.roundNumber,
-      path,
-      now: toolNow,
-      allowedOutputPaths: input.context.allowedOutputPaths
-    });
-  } else if (input.toolName === "debate_files_write") {
-    const path = String((input.rawArgs as { path?: unknown }).path ?? "");
-    const content = String((input.rawArgs as { content?: unknown }).content ?? "");
-    const rawMode = (input.rawArgs as { mode?: unknown }).mode;
-    const rawBaseVersion = (input.rawArgs as { baseVersion?: unknown }).baseVersion;
-    const rawBaseUpdatedAt = (input.rawArgs as { baseUpdatedAt?: unknown }).baseUpdatedAt;
-    const rawReason = (input.rawArgs as { reason?: unknown }).reason;
-    const rawTargetHeading = (input.rawArgs as { targetHeading?: unknown }).targetHeading;
-    const rawAllowShrink = (input.rawArgs as { allowShrink?: unknown }).allowShrink;
-    result = await toolDebateFilesWrite({
-      userId: input.context.userId,
-      debateAgentId: input.context.debateAgentId,
-      debateId: input.context.debate.id,
-      turnNumber: input.context.messageNumber,
-      roundNumber: input.context.roundNumber,
-      path,
-      content,
-      mode: typeof rawMode === "string" ? rawMode : null,
-      baseVersion: typeof rawBaseVersion === "number" ? rawBaseVersion : null,
-      baseUpdatedAt: typeof rawBaseUpdatedAt === "string" ? rawBaseUpdatedAt : null,
-      reason: typeof rawReason === "string" ? rawReason : null,
-      targetHeading: typeof rawTargetHeading === "string" ? rawTargetHeading : null,
-      allowShrink: rawAllowShrink === true,
-      now: toolNow,
-      allowedOutputPaths: input.context.allowedOutputPaths
-    });
-  } else if (input.toolName === "debate_vote_open") {
-    const kind = String((input.rawArgs as { kind?: unknown }).kind ?? "custom");
-    const title = String((input.rawArgs as { title?: unknown }).title ?? "投票");
-    const promptText =
-      typeof (input.rawArgs as { prompt?: unknown }).prompt === "string"
-        ? String((input.rawArgs as { prompt: string }).prompt)
-        : undefined;
-    const options = Array.isArray((input.rawArgs as { options?: unknown }).options)
-      ? ((input.rawArgs as { options: unknown[] }).options as unknown[]).map((item) => String(item))
-      : undefined;
-    result = await toolVoteOpen({
-      userId: input.context.userId,
-      debateId: input.context.debate.id,
-      participantCount: input.context.participantCount,
-      roundNumber: input.context.roundNumber,
-      title,
-      kind: kind === "finalization" ? "finalization" : "custom",
-      prompt: promptText,
-      options
-    });
-  } else if (input.toolName === "debate_vote_cast") {
-    const choice =
-      typeof (input.rawArgs as { choice?: unknown }).choice === "string"
-        ? String((input.rawArgs as { choice: string }).choice)
-        : undefined;
-    const reason =
-      typeof (input.rawArgs as { reason?: unknown }).reason === "string"
-        ? String((input.rawArgs as { reason: string }).reason)
-        : undefined;
-    result = await toolVoteCast({
-      userId: input.context.userId,
-      debateId: input.context.debate.id,
-      participantCount: input.context.participantCount,
-      debateAgentId: input.context.debateAgentId,
-      voterName: input.context.agent.name,
-      choice,
-      reason
-    });
-  } else if (input.toolName === "debate_vote_close") {
-    result = await toolVoteClose({
-      userId: input.context.userId,
-      debateId: input.context.debate.id,
-      participantCount: input.context.participantCount
-    });
-    await handleVoteCloseSideEffects(input.context, result);
-  } else {
-    result = { error: `Unknown tool: ${input.toolName}` };
   }
-
-  const serialized = typeof result === "string" ? result : JSON.stringify(result);
-  const toolMessage =
-    input.provider === "openai"
-      ? { role: "tool", tool_call_id: String(input.toolCallId ?? ""), content: serialized }
-      : { type: "tool_result", tool_use_id: String(input.toolCallId ?? ""), content: serialized };
-
-  return { result, toolMessage };
+  lines.push(`NEXT_ALLOWED_ACTIONS: ${input.allowedActions.join(", ") || "none"}`);
+  const workingSetInline = buildRuntimeActionWorkingSetInline(input.workingSet);
+  if (workingSetInline) {
+    lines.push("UPDATED_WORKING_SET");
+    lines.push(workingSetInline);
+  }
+  lines.push("Do not describe file writes beyond the authoritative state line above.");
+  lines.push("If another action is needed, output exactly one new ```debate-action``` block. Otherwise return the final Markdown answer.");
+  return lines.join("\n\n");
 }
 
 async function runOpenAiProviderLoop(
@@ -699,12 +719,44 @@ async function runOpenAiProviderLoop(
   overrideSystemPrompt: string | null
 ): Promise<ProviderExecutionResult> {
   let totalToolCalls = 0;
-  const tools = buildOpenAiTools({
-    enableVoting: context.enableVotingTools,
+  const mutationJournalIds: string[] = [];
+  let workingSet = await loadRuntimeSeatWorkingSet({
+    userId: context.userId,
+    debateId: context.debate.id,
+    debateAgentId: context.debateAgentId,
+    agentId: context.agent.id,
     allowedOutputPaths: context.allowedOutputPaths
   });
-  const systemParts = await buildSharedSystemParts(context, overrideSystemPrompt);
-  const systemInline = systemParts.join("\n\n");
+  const sharedPromptParts = await loadSharedSystemPromptParts(context);
+  const promptVisibleSharedFiles = await loadPromptVisibleSharedFilesForTurn(context);
+  workingSet = mergeRuntimeSharedFilesIntoWorkingSet(workingSet, promptVisibleSharedFiles);
+  let runtimeReadableSharedPaths = buildRuntimeReadableSharedPaths({
+    baseReadableSharedPaths: context.readableSharedPaths,
+    workingSet
+  });
+  let runtimeAllowedOutputPaths = buildRuntimeAllowedOutputPaths({
+    baseAllowedOutputPaths: context.allowedOutputPaths,
+    workingSet,
+    workflow: context.workflow
+  });
+  let dynamicOpenVote = context.openVote;
+  let actionPolicy = resolveRuntimeActionPolicy({
+    roleType: context.currentRoleType,
+    pendingDeliverables: context.pendingDeliverables,
+    openVote: dynamicOpenVote,
+    debateAgentId: context.debateAgentId,
+    workingSet,
+    readableSharedPaths: runtimeReadableSharedPaths,
+    allowedOutputPaths: runtimeAllowedOutputPaths
+  });
+  const systemInline = buildSharedSystemInline({
+    context,
+    overrideSystemPrompt,
+    workingSet,
+    actionPolicy,
+    allowedOutputPaths: runtimeAllowedOutputPaths,
+    sharedPromptParts
+  });
   const promptChars = systemInline.length + context.prompt.length;
   const estimatedPromptTokens = estimatePromptTokensFromChars(promptChars);
   const rawMessages: Array<Record<string, unknown>> = [
@@ -713,14 +765,16 @@ async function runOpenAiProviderLoop(
   ];
   const effectiveMaxInputTokens = context.agent.maxInputTokens ?? context.agent.contextLength;
   const messages = clipMessagesToInputLimit(rawMessages, effectiveMaxInputTokens, OPENAI_COMPAT_MAX_INPUT_CHARS);
+  let loopState: RuntimeActionLoopState = { records: [] };
 
-  for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
-    updateLiveStage(
-      round === 0 ? "calling_model" : "running_tools",
-      round === 0 ? `请求模型：${context.eventAgentName}` : `继续生成（工具轮次 ${round}）：${context.eventAgentName}`
-    );
+  try {
+    for (let round = 0; ; round += 1) {
+      updateLiveStage(
+        round === 0 ? "calling_model" : "running_tools",
+        round === 0 ? `请求模型：${context.eventAgentName}` : `继续执行 harness action（第 ${round} 轮）：${context.eventAgentName}`
+      );
 
-    let streamed:
+      let streamed:
       | {
           content: string;
           toolCalls: Array<{ id: string; type?: string; function: { name: string; arguments: string } }>;
@@ -728,9 +782,9 @@ async function runOpenAiProviderLoop(
           finishReason?: string | null;
         }
       | null = null;
-    try {
-      updateLiveStage("calling_model", `等待模型返回：${context.eventAgentName}`);
-      streamed = await openAiChatStream({
+      try {
+        updateLiveStage("calling_model", `等待模型返回：${context.eventAgentName}`);
+        streamed = await openAiChatStream({
         debateId: context.debate.id,
         messageNumber: context.messageNumber,
         roundNumber: context.roundNumber,
@@ -738,162 +792,131 @@ async function runOpenAiProviderLoop(
         baseRoleName: context.baseRoleName,
         url: context.url,
         apiKey: context.apiKey,
-        body: withOptionalMaxTokens(
-          {
-            model: context.agent.model,
-            tools,
-            tool_choice: "auto",
-            messages
-          },
-          context.currentOutputMaxTokens
-        )
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error ?? "");
-      if (looksLikeToolsUnsupported(message)) break;
-      throw error;
-    }
-
-    const toolCalls = streamed.toolCalls;
-    const assistantContent = streamed.content ?? "";
-    const usage =
-      normalizeOpenAiUsage(streamed.usage) ??
-      normalizeOpenAiUsage(
-        await openAiUsageProbe({
-          url: context.url,
-          apiKey: context.apiKey,
-          body: { model: context.agent.model, tools, tool_choice: "auto", messages }
-        }).catch(() => null)
-      );
-
-    if (streamed.finishReason === "tool_calls" && (!toolCalls || toolCalls.length === 0)) {
-      updateLiveStage("parsing", `检测到伪工具调用，转纯文本重试：${context.eventAgentName}`);
-      const noToolRetry = await openAiChatOnce({
-        url: context.url,
-        apiKey: context.apiKey,
+        quotaRequest: buildDebateQuotaRequest(context),
         body: withOptionalMaxTokens(
           {
             model: context.agent.model,
             messages
           },
-          context.currentOutputMaxTokens
+          context.currentOutputMaxTokens,
+          context.agent.provider
         )
-      }).catch(() => null);
-      const retryText = String(noToolRetry?.content ?? "").trim();
-      const fallbackText = retryText || assistantContent;
-      if (fallbackText.trim()) {
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error ?? "");
+        if (looksLikeToolsUnsupported(message)) {
+          throw new AppError("AI_API_ERROR", 502, `Provider does not support tool calling for this request. ${message}`.trim());
+        }
+        throw error;
+      }
+
+      const assistantContent = streamed.content ?? "";
+      const usage =
+        normalizeOpenAiUsage(streamed.usage) ??
+        normalizeOpenAiUsage(
+          await openAiUsageProbe({
+            url: context.url,
+            apiKey: context.apiKey,
+            quotaRequest: buildDebateQuotaRequest(context),
+            body: { model: context.agent.model, messages }
+          }).catch(() => null)
+        );
+
+      const parsedAction = parseRuntimeHarnessAction(assistantContent, actionPolicy.allowedActions);
+      if ("error" in parsedAction) {
+        throw new AppError("AI_ACTION_PROTOCOL_ERROR", 502, String(parsedAction.error));
+      }
+      if (!parsedAction.action) {
         return {
-          raw: assertNonEmptyProviderText(fallbackText, {
+          raw: assertNonEmptyProviderText(assistantContent, {
             provider: context.agent.provider,
             model: context.agent.model,
-            stage: "openai.tool_calls_without_payload_retry",
-            finishReason: noToolRetry?.finishReason ?? streamed.finishReason ?? null,
+            stage: "openai.final_text_response",
+            finishReason: streamed.finishReason ?? null,
             toolCallsCount: totalToolCalls
           }),
-          usage: normalizeOpenAiUsage(noToolRetry?.usage) ?? usage,
+          usage,
           promptChars,
           estimatedPromptTokens,
+          mutationJournalIds,
           diagnostics: {
             provider: context.agent.provider,
             model: context.agent.model,
             requestedMaxTokens: context.requestedMaxTokens,
-            finishReason: noToolRetry?.finishReason ?? "tool_calls_retry_none",
+            finishReason: streamed.finishReason ?? null,
             toolCallsCount: totalToolCalls
           }
         };
       }
-    }
 
-    if (!toolCalls || toolCalls.length === 0) {
-      return {
-        raw: assertNonEmptyProviderText(assistantContent, {
-          provider: context.agent.provider,
-          model: context.agent.model,
-          stage: "openai.final_text_response",
-          finishReason: streamed.finishReason ?? null,
-          toolCallsCount: totalToolCalls
-        }),
-        usage,
-        promptChars,
-        estimatedPromptTokens,
-        diagnostics: {
-          provider: context.agent.provider,
-          model: context.agent.model,
-          requestedMaxTokens: context.requestedMaxTokens,
-          finishReason: streamed.finishReason ?? null,
-          toolCallsCount: totalToolCalls
-        }
-      };
-    }
-
-    totalToolCalls += toolCalls.length;
-    messages.push({
-      role: "assistant",
-      tool_calls: toolCalls.map((call) => ({
-        id: call.id,
-        type: "function",
-        function: call.function
-      })),
-      content: assistantContent
-    });
-
-    for (const call of toolCalls) {
-      let parsedArgs: unknown = {};
-      try {
-        parsedArgs = JSON.parse(call.function.arguments || "{}");
-      } catch {
+      totalToolCalls += 1;
+      const loopRecord = makeRuntimeActionLoopRecord(parsedAction.action);
+      const repeatedPattern = detectRuntimeActionLoop(loopState, loopRecord);
+      if (repeatedPattern) {
+        throw new AppError("AI_TOOL_LOOP_DETECTED", 502, `Repeated harness action pattern detected: ${repeatedPattern}`);
       }
-      const execution = await executeProviderToolCall({
-        provider: "openai",
-        toolName: call.function.name,
-        rawArgs: parsedArgs,
-        toolCallId: call.id,
-        context,
-        updateLiveStage
+      loopState = pushRuntimeActionLoopRecord(loopState, loopRecord);
+      messages.push({
+        role: "assistant",
+        content: assistantContent
       });
-      messages.push(execution.toolMessage);
+      updateLiveStage("running_tools", `执行 harness action：${parsedAction.action.action}`);
+      const execution = await executeRuntimeHarnessAction({
+        userId: context.userId,
+        debateId: context.debate.id,
+        debateAgentId: context.debateAgentId,
+        agentId: context.agent.id,
+        readableSharedPaths: runtimeReadableSharedPaths,
+        allowedOutputPaths: runtimeAllowedOutputPaths,
+        readTargetPaths: actionPolicy.knownTargetPaths,
+        action: parsedAction.action,
+        participantCount: context.participantCount,
+        voterName: context.agent.name,
+        turnNumber: context.messageNumber,
+        roundNumber: context.roundNumber,
+        now: new Date().toISOString(),
+        currentWorkingSet: workingSet,
+        mutationSequenceNumber: totalToolCalls
+      });
+      workingSet = execution.workingSet;
+      if (execution.mutationJournalId) {
+        mutationJournalIds.push(execution.mutationJournalId);
+      }
+      if (parsedAction.action.action === "vote_cast" && typeof execution.result === "object" && execution.result) {
+        dynamicOpenVote = ((execution.result as { vote?: unknown }).vote as typeof dynamicOpenVote) ?? dynamicOpenVote;
+      }
+      runtimeReadableSharedPaths = buildRuntimeReadableSharedPaths({
+        baseReadableSharedPaths: context.readableSharedPaths,
+        workingSet
+      });
+      runtimeAllowedOutputPaths = buildRuntimeAllowedOutputPaths({
+        baseAllowedOutputPaths: context.allowedOutputPaths,
+        workingSet,
+        workflow: context.workflow
+      });
+      actionPolicy = resolveRuntimeActionPolicy({
+        roleType: context.currentRoleType,
+        pendingDeliverables: context.pendingDeliverables,
+        openVote: dynamicOpenVote,
+        debateAgentId: context.debateAgentId,
+        workingSet,
+        readableSharedPaths: runtimeReadableSharedPaths,
+        allowedOutputPaths: runtimeAllowedOutputPaths
+      });
+      messages.push({
+        role: "user",
+        content: buildHarnessResultMessage({
+          action: parsedAction.action,
+          result: execution.result,
+          allowedActions: actionPolicy.allowedActions,
+          workingSet
+        })
+      });
     }
+  } catch (error) {
+    await rollbackRuntimeTurnMutationsByIds(mutationJournalIds, new Date().toISOString()).catch(() => null);
+    throw error;
   }
-
-  updateLiveStage("calling_model", `模型重试（无工具模式）：${context.eventAgentName}`);
-  const fallback = await openAiChatStream({
-    debateId: context.debate.id,
-    messageNumber: context.messageNumber,
-    roundNumber: context.roundNumber,
-    agentName: context.eventAgentName,
-    baseRoleName: context.baseRoleName,
-    url: context.url,
-    apiKey: context.apiKey,
-    body: withOptionalMaxTokens({ model: context.agent.model, messages }, context.currentOutputMaxTokens)
-  });
-  const usage =
-    normalizeOpenAiUsage(fallback.usage) ??
-    normalizeOpenAiUsage(
-      await openAiUsageProbe({
-        url: context.url,
-        apiKey: context.apiKey,
-        body: { model: context.agent.model, messages }
-      }).catch(() => null)
-    );
-  return {
-    raw: assertNonEmptyProviderText(fallback.content, {
-      provider: context.agent.provider,
-      model: context.agent.model,
-      stage: "openai.no_tools_fallback",
-      finishReason: fallback.finishReason ?? null,
-      toolCallsCount: totalToolCalls
-    }),
-    usage,
-    promptChars,
-    estimatedPromptTokens,
-    diagnostics: {
-      provider: context.agent.provider,
-      model: context.agent.model,
-      requestedMaxTokens: context.requestedMaxTokens,
-      finishReason: fallback.finishReason ?? null,
-      toolCallsCount: totalToolCalls
-    }
-  };
 }
 
 async function runAnthropicProviderLoop(
@@ -902,24 +925,59 @@ async function runAnthropicProviderLoop(
   overrideSystemPrompt: string | null
 ): Promise<ProviderExecutionResult> {
   let totalToolCalls = 0;
-  const tools = buildAnthropicTools({
-    enableVoting: context.enableVotingTools,
+  const mutationJournalIds: string[] = [];
+  let workingSet = await loadRuntimeSeatWorkingSet({
+    userId: context.userId,
+    debateId: context.debate.id,
+    debateAgentId: context.debateAgentId,
+    agentId: context.agent.id,
     allowedOutputPaths: context.allowedOutputPaths
   });
-  const systemParts = await buildSharedSystemParts(context, overrideSystemPrompt);
-  const systemInline = systemParts.join("\n\n");
+  const sharedPromptParts = await loadSharedSystemPromptParts(context);
+  const promptVisibleSharedFiles = await loadPromptVisibleSharedFilesForTurn(context);
+  workingSet = mergeRuntimeSharedFilesIntoWorkingSet(workingSet, promptVisibleSharedFiles);
+  let runtimeReadableSharedPaths = buildRuntimeReadableSharedPaths({
+    baseReadableSharedPaths: context.readableSharedPaths,
+    workingSet
+  });
+  let runtimeAllowedOutputPaths = buildRuntimeAllowedOutputPaths({
+    baseAllowedOutputPaths: context.allowedOutputPaths,
+    workingSet,
+    workflow: context.workflow
+  });
+  let dynamicOpenVote = context.openVote;
+  let actionPolicy = resolveRuntimeActionPolicy({
+    roleType: context.currentRoleType,
+    pendingDeliverables: context.pendingDeliverables,
+    openVote: dynamicOpenVote,
+    debateAgentId: context.debateAgentId,
+    workingSet,
+    readableSharedPaths: runtimeReadableSharedPaths,
+    allowedOutputPaths: runtimeAllowedOutputPaths
+  });
+  const systemInline = buildSharedSystemInline({
+    context,
+    overrideSystemPrompt,
+    workingSet,
+    actionPolicy,
+    allowedOutputPaths: runtimeAllowedOutputPaths,
+    sharedPromptParts
+  });
   const promptChars = systemInline.length + context.prompt.length;
   const estimatedPromptTokens = estimatePromptTokensFromChars(promptChars);
   const rawMessages: Array<Record<string, unknown>> = [{ role: "user", content: context.prompt }];
   const effectiveMaxInputTokens = context.agent.maxInputTokens ?? context.agent.contextLength;
   const messages = clipMessagesToInputLimit(rawMessages, effectiveMaxInputTokens, PROMPT_HARD_MAX_CHARS_ANTHROPIC);
+  let loopState: RuntimeActionLoopState = { records: [] };
 
-  for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+  try {
+    for (let round = 0; ; round += 1) {
     updateLiveStage(
       round === 0 ? "calling_model" : "running_tools",
-      round === 0 ? `请求模型：${context.eventAgentName}` : `继续生成（工具轮次 ${round}）：${context.eventAgentName}`
+      round === 0 ? `请求模型：${context.eventAgentName}` : `继续执行 harness action（第 ${round} 轮）：${context.eventAgentName}`
     );
     updateLiveStage("calling_model", `等待模型返回：${context.eventAgentName}`);
+    await ensureQuotaReservationOrDelay(buildDebateQuotaRequest(context));
     const response = await fetch(context.url, {
       method: "POST",
       headers: {
@@ -932,10 +990,10 @@ async function runAnthropicProviderLoop(
           {
             model: context.agent.model,
             system: systemInline,
-            tools,
             messages
           },
-          context.currentOutputMaxTokens
+          context.currentOutputMaxTokens,
+          context.agent.provider
         )
       )
     });
@@ -943,20 +1001,24 @@ async function runAnthropicProviderLoop(
 
     if (!response.ok) {
       const text = JSON.stringify(payload).slice(0, 400);
-      if (looksLikeToolsUnsupported(text)) break;
+      if (looksLikeToolsUnsupported(text)) {
+        throw new AppError("AI_API_ERROR", 502, `Provider does not support tool calling for this request. ${text}`.trim());
+      }
       throw new AppError("AI_API_ERROR", 502, text);
     }
 
     const contentBlocks = (payload.content ?? []) as Array<Record<string, unknown>>;
-    const toolUses = contentBlocks.filter((block) => block.type === "tool_use") as Array<{
-      id: string;
-      name: string;
-      input: unknown;
-    }>;
+    const text = contentBlocks
+      .filter((block) => block.type === "text")
+      .map((block) => String((block as { text?: unknown }).text ?? ""))
+      .join("\n");
+    const parsedAction = parseRuntimeHarnessAction(text, actionPolicy.allowedActions);
+    if ("error" in parsedAction) {
+      throw new AppError("AI_ACTION_PROTOCOL_ERROR", 502, String(parsedAction.error));
+    }
 
-    if (toolUses.length === 0) {
-      const textBlock = contentBlocks.find((block) => block.type === "text") as { text?: string } | undefined;
-      const content = assertNonEmptyProviderText(textBlock?.text, {
+      if (!parsedAction.action) {
+        const content = assertNonEmptyProviderText(text, {
         provider: context.agent.provider,
         model: context.agent.model,
         stage: "anthropic.final_text_response",
@@ -964,11 +1026,12 @@ async function runAnthropicProviderLoop(
         toolCallsCount: totalToolCalls
       });
       await emitChunks(context.debate.id, context.messageNumber, context.eventAgentName, context.baseRoleName, content);
-      return {
+        return {
         raw: content,
         usage: normalizeAnthropicUsage(payload?.usage ?? null),
         promptChars,
         estimatedPromptTokens,
+        mutationJournalIds,
         diagnostics: {
           provider: context.agent.provider,
           model: context.agent.model,
@@ -976,70 +1039,79 @@ async function runAnthropicProviderLoop(
           finishReason: typeof payload?.stop_reason === "string" ? payload.stop_reason : null,
           toolCallsCount: totalToolCalls
         }
-      };
-    }
+        };
+      }
 
-    totalToolCalls += toolUses.length;
-    messages.push({ role: "assistant", content: contentBlocks });
-
-    const toolResults: Array<Record<string, unknown>> = [];
-    for (const use of toolUses) {
-      const execution = await executeProviderToolCall({
-        provider: "anthropic",
-        toolName: use.name,
-        rawArgs: use.input,
-        toolCallId: use.id,
-        context,
-        updateLiveStage
+      totalToolCalls += 1;
+      const loopRecord = makeRuntimeActionLoopRecord(parsedAction.action);
+      const repeatedPattern = detectRuntimeActionLoop(loopState, loopRecord);
+      if (repeatedPattern) {
+        throw new AppError("AI_TOOL_LOOP_DETECTED", 502, `Repeated harness action pattern detected: ${repeatedPattern}`);
+      }
+      loopState = pushRuntimeActionLoopRecord(loopState, loopRecord);
+      messages.push({ role: "assistant", content: [{ type: "text", text }] });
+      updateLiveStage("running_tools", `执行 harness action：${parsedAction.action.action}`);
+      const execution = await executeRuntimeHarnessAction({
+        userId: context.userId,
+        debateId: context.debate.id,
+        debateAgentId: context.debateAgentId,
+        agentId: context.agent.id,
+        readableSharedPaths: runtimeReadableSharedPaths,
+        allowedOutputPaths: runtimeAllowedOutputPaths,
+        readTargetPaths: actionPolicy.knownTargetPaths,
+        action: parsedAction.action,
+        participantCount: context.participantCount,
+        voterName: context.agent.name,
+        turnNumber: context.messageNumber,
+        roundNumber: context.roundNumber,
+        now: new Date().toISOString(),
+        currentWorkingSet: workingSet,
+        mutationSequenceNumber: totalToolCalls
       });
-      toolResults.push(execution.toolMessage);
+      workingSet = execution.workingSet;
+      if (execution.mutationJournalId) {
+        mutationJournalIds.push(execution.mutationJournalId);
+      }
+      if (parsedAction.action.action === "vote_cast" && typeof execution.result === "object" && execution.result) {
+        dynamicOpenVote = ((execution.result as { vote?: unknown }).vote as typeof dynamicOpenVote) ?? dynamicOpenVote;
+      }
+      runtimeReadableSharedPaths = buildRuntimeReadableSharedPaths({
+        baseReadableSharedPaths: context.readableSharedPaths,
+        workingSet
+      });
+      runtimeAllowedOutputPaths = buildRuntimeAllowedOutputPaths({
+        baseAllowedOutputPaths: context.allowedOutputPaths,
+        workingSet,
+        workflow: context.workflow
+      });
+      actionPolicy = resolveRuntimeActionPolicy({
+        roleType: context.currentRoleType,
+        pendingDeliverables: context.pendingDeliverables,
+        openVote: dynamicOpenVote,
+        debateAgentId: context.debateAgentId,
+        workingSet,
+        readableSharedPaths: runtimeReadableSharedPaths,
+        allowedOutputPaths: runtimeAllowedOutputPaths
+      });
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: buildHarnessResultMessage({
+              action: parsedAction.action,
+              result: execution.result,
+              allowedActions: actionPolicy.allowedActions,
+              workingSet
+            })
+          }
+        ]
+      });
     }
-    messages.push({ role: "user", content: toolResults });
+  } catch (error) {
+    await rollbackRuntimeTurnMutationsByIds(mutationJournalIds, new Date().toISOString()).catch(() => null);
+    throw error;
   }
-
-  const fallbackResponse = await fetch(context.url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": context.apiKey,
-      "anthropic-version": "2023-06-01"
-    },
-    body: JSON.stringify(
-      withOptionalMaxTokens(
-        {
-          model: context.agent.model,
-          system: systemInline,
-          messages: [{ role: "user", content: context.prompt }]
-        },
-        context.currentOutputMaxTokens
-      )
-    )
-  });
-  const fallbackPayload = await fallbackResponse.json();
-  if (!fallbackResponse.ok) {
-    throw new AppError("AI_API_ERROR", 502, JSON.stringify(fallbackPayload).slice(0, 400));
-  }
-  const content = assertNonEmptyProviderText(fallbackPayload.content?.[0]?.text, {
-    provider: context.agent.provider,
-    model: context.agent.model,
-    stage: "anthropic.no_tools_fallback",
-    finishReason: typeof fallbackPayload?.stop_reason === "string" ? fallbackPayload.stop_reason : null,
-    toolCallsCount: totalToolCalls
-  });
-  await emitChunks(context.debate.id, context.messageNumber, context.eventAgentName, context.baseRoleName, content);
-  return {
-    raw: content,
-    usage: normalizeAnthropicUsage(fallbackPayload?.usage ?? null),
-    promptChars,
-    estimatedPromptTokens,
-    diagnostics: {
-      provider: context.agent.provider,
-      model: context.agent.model,
-      requestedMaxTokens: context.requestedMaxTokens,
-      finishReason: typeof fallbackPayload?.stop_reason === "string" ? fallbackPayload.stop_reason : null,
-      toolCallsCount: totalToolCalls
-    }
-  };
 }
 
 export async function callProvider(

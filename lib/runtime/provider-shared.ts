@@ -1,7 +1,7 @@
 import { type DebateParticipantRoleType } from "@/lib/debate-role-types";
 import { emitDebateLiveEvent } from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
-import { appendServerLog } from "@/lib/server-log";
+import { writeServerLog } from "@/lib/logger/server";
 import type { AgentRecord } from "@/lib/types";
 import {
   formatRequiredDeliverableSummary,
@@ -38,16 +38,7 @@ export async function logRuntimeEvent(
   message: string,
   meta?: Record<string, unknown>
 ) {
-  if (level === "error") {
-    console.error(message, meta ?? "");
-  } else {
-    console.warn(message, meta ?? "");
-  }
-  try {
-    await appendServerLog(level, message, meta);
-  } catch (error) {
-    console.error("runtime log persistence failed", error);
-  }
+  await writeServerLog(level, "runtime", message, meta);
 }
 
 export function estimatePromptTokensFromChars(chars: number) {

@@ -496,6 +496,28 @@ export async function scheduleDebateSummaryJobRetry(input: {
   return normalizeSummaryJobRow(result.rows[0]);
 }
 
+export async function deferDebateSummaryJobUntil(input: {
+  id: string;
+  runAfter: string;
+  reason?: string | null;
+}) {
+  const db = await ensureDb();
+  const now = new Date().toISOString();
+  const result = await db.executeQuery<SummaryJobRow>(sql`
+    update debate_summary_jobs
+       set status = 'queued',
+           run_after = ${input.runAfter},
+           next_retry_at = null,
+           locked_by = null,
+           locked_at = null,
+           last_error = ${input.reason ?? null},
+           updated_at = ${now}
+     where id = ${input.id}
+     returning *
+  `.compile(db));
+  return normalizeSummaryJobRow(result.rows[0]);
+}
+
 export async function completeDebateSummaryJob(id: string) {
   const now = new Date().toISOString();
   const db = await ensureDb();

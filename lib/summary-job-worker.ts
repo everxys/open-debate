@@ -3,7 +3,9 @@ import type { PoolClient } from "pg";
 
 import { sql } from "kysely";
 
+import { processDueDebateResumeJobs } from "@/lib/debate-resume-jobs";
 import { ensureDb, getPool } from "@/lib/db";
+import { createServerLogger } from "@/lib/logger/server";
 import { logRuntimeEvent, runSummaryJobByRecord } from "@/lib/runtime-main";
 import {
   claimRunnableDebateSummaryJobs,
@@ -29,7 +31,7 @@ type SummaryWorkerTickInput = {
 const SUMMARY_WORKER_DEFAULT_CONCURRENCY = 3;
 const SUMMARY_WORKER_MAX_CONCURRENCY = 8;
 
-function parseSummaryWorkerConcurrency() {
+export function parseSummaryWorkerConcurrency() {
   const raw = Number(process.env.OPEN_DEBATE_SUMMARY_WORKER_CONCURRENCY ?? SUMMARY_WORKER_DEFAULT_CONCURRENCY);
   if (!Number.isFinite(raw)) return SUMMARY_WORKER_DEFAULT_CONCURRENCY;
   return Math.max(1, Math.min(SUMMARY_WORKER_MAX_CONCURRENCY, Math.floor(raw)));
@@ -47,6 +49,8 @@ const workerGlobal = globalThis as typeof globalThis & {
   openDebateSummaryWorkerWakeClient?: PoolClient | null;
   openDebateSummaryWorkerWakeListenerPromise?: Promise<void>;
 };
+
+const summaryWorkerLogger = createServerLogger("summary-worker");
 
 async function releaseSummaryWorkerWakeClient(client: PoolClient | null | undefined) {
   if (!client) return;
@@ -85,10 +89,11 @@ async function logRecoveredSummaryJobs(reason: string, recovered: Awaited<Return
   });
 }
 
-function isDatabaseConnectionError(error: unknown) {
+export function isDatabaseConnectionError(error: unknown) {
   const codes = new Set<string>();
   flattenErrorCodes(error, codes);
   return (
+    codes.has("ECONNRESET") ||
     codes.has("ECONNREFUSED") ||
     codes.has("57P01") ||
     codes.has("57P02") ||
@@ -142,9 +147,10 @@ async function runJobWithLeaseHeartbeat(input: SummaryWorkerTickInput, job: Deba
       }
     })().catch((error) => {
       if (isDatabaseConnectionError(error)) return;
-      console.warn("summary job lease heartbeat failed", {
+      summaryWorkerLogger.warn("summary job lease heartbeat failed", {
         debateId: job.debateId,
-        jobKey: job.jobKey
+        jobKey: job.jobKey,
+        error
       });
     });
   }, SUMMARY_JOB_LEASE_HEARTBEAT_MS);
@@ -179,7 +185,10 @@ async function startSummaryWorkerWakeListener(input: SummaryWorkerTickInput) {
       workerGlobal.openDebateSummaryWorkerWakeListenerPromise = undefined;
       void releaseSummaryWorkerWakeClient(client).catch(() => null);
       if (workerGlobal.openDebateSummaryWorkerStopped) return;
-      console.warn("summary worker wake listener lost database connection", error);
+      summaryWorkerLogger.warn("summary worker wake listener lost database connection", {
+        workerId: input.workerId,
+        error
+      });
       setTimeout(() => {
         void startSummaryWorkerWakeListener(input).catch(() => null);
       }, 5_000).unref?.();
@@ -221,6 +230,13 @@ async function tickSummaryJobWorker(input: SummaryWorkerTickInput) {
     const recovered = await recoverStaleDebateSummaryJobs();
     workerGlobal.openDebateSummaryWorkerFailureCount = 0;
     await logRecoveredSummaryJobs(input.reason, recovered);
+    const resumed = await processDueDebateResumeJobs({
+      workerId: input.workerId,
+      limit: Math.max(1, Math.ceil(concurrency / 2))
+    });
+    if (resumed.length > 0) {
+      nextDelayMs = 500;
+    }
 
     const claimed = await claimRunnableDebateSummaryJobs({
       workerId: input.workerId,
@@ -257,11 +273,12 @@ async function tickSummaryJobWorker(input: SummaryWorkerTickInput) {
   } catch (error) {
     nextDelayMs = getNextTickDelay(error);
     if (isDatabaseConnectionError(error)) {
-      console.warn("summary job worker tick skipped: database unavailable", {
-        delayMs: nextDelayMs
+      summaryWorkerLogger.warn("summary job worker tick skipped: database unavailable", {
+        delayMs: nextDelayMs,
+        error
       });
     } else {
-      console.error("summary job worker tick failed", error);
+      summaryWorkerLogger.error("summary job worker tick failed", { error });
     }
   } finally {
     workerGlobal.openDebateSummaryWorkerTickRunning = false;
@@ -300,7 +317,10 @@ export function startSummaryJobWorkerLoop(options?: {
     };
     void startSummaryWorkerWakeListener(tickInput).catch((error) => {
       if (isDatabaseConnectionError(error)) return;
-      console.warn("summary worker wake listener failed", error);
+      summaryWorkerLogger.warn("summary worker wake listener failed", {
+        workerId,
+        error
+      });
     });
     scheduleSummaryWorkerTick(tickInput, 0);
     return { workerId };

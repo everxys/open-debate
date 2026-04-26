@@ -1,9 +1,5 @@
 {
     "voting": {
-        "custom": {
-            "maxOptions": null,
-            "minOptions": 2
-        },
         "governance": {
             "tieBreaker": "revote",
             "maxTieRounds": 2
@@ -165,7 +161,7 @@
         ],
         "transitionRules": {
             "finalization": {
-                "autoOpenVote": true,
+                "autoOpenVote": false,
                 "reopenUntilPassed": true,
                 "requireUnanimousVote": true,
                 "requirePhaseForCompletion": true,

@@ -108,7 +108,6 @@ export function resolveContextAccessRules(
 
   for (const rule of activeWorkflow.contextAccess.unlockAfterPhase) {
     if (isPhaseUnlocked(currentPhaseKind, rule.phaseKind)) {
-      autoRead.push({ ...rule, category: "unlockAfterPhase" });
       readable.push({ ...rule, category: "unlockAfterPhase" });
       continue;
     }

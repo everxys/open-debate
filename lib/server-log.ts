@@ -1,7 +1,7 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 
-type ServerLogLevel = "info" | "warn" | "error";
+type ServerLogLevel = "debug" | "info" | "warn" | "error";
 
 function getLogFilePath(now: Date) {
   const year = now.getFullYear();

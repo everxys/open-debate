@@ -164,7 +164,7 @@ common_files as (
         "discussionRoundsBetweenVotes": 1
       },
       "finalization": {
-        "autoOpenVote": true,
+        "autoOpenVote": false,
         "requireUnanimousVote": true,
         "reopenUntilPassed": true,
         "discussionRoundsBetweenVotes": 1,
@@ -178,7 +178,6 @@ common_files as (
     "speakingOrder": { "firstRole": "Host", "lastRole": "Supervisor" }
   },
   "voting": {
-    "custom": { "minOptions": 2, "maxOptions": null },
     "announcement": {
       "announcer": { "type": "role", "role": "Host" },
       "fallback": { "type": "seat", "seat": 1 }
@@ -701,9 +700,9 @@ $f$
 
 建议结构：
 - ## 投票
-  - 使用官方工具投票（推荐）：调用 `debate_vote_cast`
-    - selections: { "Host": "Seat-X", "Supervisor": "Seat-Y" }
-    - reason: "一句理由"
+  - 使用官方投票动作（推荐）：输出一个 ` ```debate-action``` ` JSON block
+    - `{ "action": "vote_cast", "choice": "<与当前官方选项完全一致的选项文本>", "reason": "一句理由" }`
+    - 不要再写旧版工具调用或 `selections` 这类多字段投票结构；官方计票与结果发布由 runtime 后续处理
 - ## 理由（简短）
 
 ## Phase 3（轮换模式）建议：

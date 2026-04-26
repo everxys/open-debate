@@ -79,6 +79,9 @@ export async function POST(request: Request) {
       }
     });
   } catch (error) {
-    return toErrorResponse(error);
+    return toErrorResponse(error, {
+      route: "/api/auth/verification/send",
+      method: "POST"
+    });
   }
 }

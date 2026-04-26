@@ -65,11 +65,6 @@ export type DebateWorkflowConfig = {
   };
 
   voting?: {
-    custom?: {
-      // null/undefined means "no explicit limit" (defaults to participantCount)
-      minOptions?: number | null;
-      maxOptions?: number | null;
-    };
     governance?: {
       tieBreaker?: "revote" | "seat_order";
       maxTieRounds?: number;
@@ -149,10 +144,6 @@ export type NormalizedDebateWorkflow = {
     };
   };
   voting: {
-    custom: {
-      minOptions: number | null;
-      maxOptions: number | null;
-    };
     governance: {
       tieBreaker: "revote" | "seat_order";
       maxTieRounds: number;
@@ -278,7 +269,6 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
       }
     },
     voting: {
-      custom: { minOptions: 2, maxOptions: null },
       governance: {
         tieBreaker: "revote",
         maxTieRounds: 2
@@ -422,7 +412,6 @@ function normalizeContextAccessPath(value: unknown, targetType: WorkflowContextA
 function normalizeVoting(value: unknown): NormalizedDebateWorkflow["voting"] {
   if (typeof value !== "object" || value === null) {
     return {
-      custom: { minOptions: null as number | null, maxOptions: null as number | null },
       governance: {
         tieBreaker: "revote" as const,
         maxTieRounds: 2
@@ -430,10 +419,6 @@ function normalizeVoting(value: unknown): NormalizedDebateWorkflow["voting"] {
     };
   }
   const obj = value as Record<string, unknown>;
-  const customRaw = obj.custom;
-  const customObj = typeof customRaw === "object" && customRaw !== null ? (customRaw as Record<string, unknown>) : null;
-  const minOptions = toPositiveIntOrNull(customObj?.minOptions);
-  const maxOptions = toPositiveIntOrNull(customObj?.maxOptions);
   const governanceRaw = obj.governance;
   const governanceObj =
     typeof governanceRaw === "object" && governanceRaw !== null ? (governanceRaw as Record<string, unknown>) : null;
@@ -441,7 +426,6 @@ function normalizeVoting(value: unknown): NormalizedDebateWorkflow["voting"] {
   const tieBreaker = tieBreakerRaw === "seat_order" ? "seat_order" : "revote";
   const maxTieRounds = toPositiveInt(governanceObj?.maxTieRounds) ?? 2;
   return {
-    custom: { minOptions, maxOptions },
     governance: { tieBreaker, maxTieRounds }
   };
 }
@@ -924,10 +908,6 @@ export function toCanonicalWorkflowConfig(input: unknown): DebateWorkflowConfig 
       }
     },
     voting: {
-      custom: {
-        minOptions: normalized.voting.custom.minOptions,
-        maxOptions: normalized.voting.custom.maxOptions
-      },
       governance: {
         tieBreaker: normalized.voting.governance.tieBreaker as "revote" | "seat_order",
         maxTieRounds: normalized.voting.governance.maxTieRounds

@@ -1,5 +1,6 @@
 import { emitDebateLiveEvent } from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
+import { ensureQuotaReservationOrDelay, type QuotaReservationInput } from "@/lib/quota-control";
 import type { AgentRecord } from "@/lib/types";
 
 export function resolveChatUrl(agent: AgentRecord) {
@@ -92,8 +93,12 @@ export async function openAiChatStream(args: {
   url: string;
   apiKey: string;
   body: Record<string, unknown>;
+  quotaRequest?: QuotaReservationInput;
 }) {
   const body = normalizeOpenAiChatBody(args.body);
+  if (args.quotaRequest) {
+    await ensureQuotaReservationOrDelay(args.quotaRequest);
+  }
   const response = await fetch(args.url, {
     method: "POST",
     headers: {
@@ -180,7 +185,15 @@ export async function openAiChatStream(args: {
   return { content: contentParts.join(""), toolCalls, usage: lastUsage, finishReason: lastFinishReason };
 }
 
-export async function openAiChatOnce(args: { url: string; apiKey: string; body: Record<string, unknown> }) {
+export async function openAiChatOnce(args: {
+  url: string;
+  apiKey: string;
+  body: Record<string, unknown>;
+  quotaRequest?: QuotaReservationInput;
+}) {
+  if (args.quotaRequest) {
+    await ensureQuotaReservationOrDelay(args.quotaRequest);
+  }
   const response = await fetch(args.url, {
     method: "POST",
     headers: {
@@ -212,8 +225,16 @@ export async function openAiChatOnce(args: { url: string; apiKey: string; body: 
   return { content, toolCalls, usage, finishReason };
 }
 
-export async function openAiUsageProbe(args: { url: string; apiKey: string; body: Record<string, unknown> }) {
+export async function openAiUsageProbe(args: {
+  url: string;
+  apiKey: string;
+  body: Record<string, unknown>;
+  quotaRequest?: QuotaReservationInput;
+}) {
   const body = normalizeOpenAiChatBody(args.body);
+  if (args.quotaRequest) {
+    await ensureQuotaReservationOrDelay(args.quotaRequest);
+  }
   const response = await fetch(args.url, {
     method: "POST",
     headers: {

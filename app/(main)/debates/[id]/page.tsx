@@ -15,23 +15,29 @@ import {
   useRef,
   useState
 } from "react";
-import { Tree, type NodeApi } from "react-arborist";
+import { type NodeApi } from "react-arborist";
 
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 import { MarkdownView } from "@/components/ui/markdown";
-import { createFsTreeModel, type FsNode, normalizeFsPath } from "@/lib/fs-tree";
+import type { FsNode } from "@/lib/fs-tree";
 import { buildLineDiffRows, type LineDiffRow } from "@/lib/line-diff";
+import { createBrowserLogger } from "@/lib/logger/client";
 import {
   formatRequiredDeliverableSummary,
   normalizeDebateWorkflow,
   type NormalizedDebateWorkflow
 } from "@/lib/workflow";
 
+import { DebateFilesPanel, type DebateFilesContextMenuValue } from "./debate-files-panel";
+import { DebateSidebarRail, InjectedPromptDialog, type DebateLeftTabIconName } from "./debate-detail-layout";
+import { useDebateAllFilesTree, useEscapeKeyClose } from "./use-debate-all-files-tree";
+
 type Agent = {
   id: string;
   name: string;
   provider: string;
   model: string;
+  isActive: boolean;
 };
 
 type DebateAgent = {
@@ -65,7 +71,7 @@ type Debate = {
   workflowPhaseKind: "analysis" | "deliberation" | "finalization_vote" | "finalization" | null;
   workflowPhaseTitle: string | null;
   workflowPhaseRound: number | null;
-  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | null;
+  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | "quota_wait" | null;
   runtimeNoticeMessage: string | null;
   runtimeNoticeAt: string | null;
   lastErrorCode: string | null;
@@ -77,6 +83,8 @@ type Debate = {
   stoppedReason: string | null;
   agents: DebateAgent[];
 };
+
+const debateDetailLogger = createBrowserLogger("ui.debates.detail");
 
 type TurnSummary = {
   id: string;
@@ -246,8 +254,6 @@ type DebateRoundDirectoryItemProps = {
 
 type LeftTab = "status" | "participants" | "workflow" | "memory" | "file_activity";
 
-type LeftTabIconName = "status" | "participants" | "workflow" | "memory" | "file_activity";
-
 type WorkflowRulesState = {
   markdown: string;
   loading: boolean;
@@ -265,6 +271,7 @@ type TurnsListResponse<T> = {
 type TurnDetailResponse = {
   success?: boolean;
   data?: TurnDetail;
+  error?: unknown;
 };
 
 type DebateViewerState =
@@ -296,19 +303,71 @@ type AllFilesContextMenuState =
         | { type: "node"; path: string; nodeType: FsNode["type"] };
     };
 
-type AllFilesContextMenuValue = NonNullable<AllFilesContextMenuState>;
-
 type AllFilesDownloadProgress = {
   loadedBytes: number;
   totalBytes: number | null;
 };
 
+type AllFileStatusSummary = {
+  scope: "debate" | "agent";
+  path: string;
+  debateAgentId: string | null;
+  version: number | null;
+  createdAt: string;
+  updatedAt: string;
+  lastReadAt: string | null;
+  lastReadBy: string | null;
+  lastWrittenAt: string | null;
+  lastWrittenBy: string | null;
+  readCount: number;
+  writeCount: number;
+  lastEventType: "read" | "write" | null;
+  lastEventAt: string | null;
+};
+
+type AllFileInfoEvent = {
+  id: string;
+  type: "created" | "written" | "read";
+  at: string;
+  actorName: string | null;
+  actorRoleType: string | null;
+  roundNumber: number | null;
+  turnNumber: number | null;
+  beforeVersion: number | null;
+  afterVersion: number | null;
+  targetHeading: string | null;
+  reason: string | null;
+};
+
+type AllFileVersionEntry = {
+  version: number | null;
+  at: string;
+  actorName: string | null;
+  actorRoleType: string | null;
+  baseVersion: number | null;
+  mode: string | null;
+  reason: string | null;
+};
+
 type AllFileInfoState = {
+  scope: "debate" | "agent";
+  debateAgentId: string | null;
   displayPath: string;
   charCount: number;
   byteSize: number;
+  version: number | null;
+  totalVersions: number | null;
   createdAt: string;
   updatedAt: string;
+  createdBy: string | null;
+  lastWrittenAt: string | null;
+  lastWrittenBy: string | null;
+  lastReadAt: string | null;
+  lastReadBy: string | null;
+  readCount: number;
+  writeCount: number;
+  versions: AllFileVersionEntry[];
+  events: AllFileInfoEvent[];
 };
 
 type QuestionDiffRow = LineDiffRow;
@@ -561,6 +620,16 @@ function getFileActivityLoadMoreFilter(
   const nodeFilter = getFileActivityNodeFilter(groups, selection);
   if (!beforeId || !nodeFilter) return null;
   return { beforeId, ...nodeFilter };
+}
+
+function formatFileActivityScopeKey(action: FileActivityAction, filter: FileActivityNodeFilter | null) {
+  if (!filter) return `${action}:`;
+  return [
+    action,
+    filter.debateAgentId ?? "",
+    typeof filter.roundNumber === "number" ? filter.roundNumber : "",
+    typeof filter.turnNumber === "number" ? filter.turnNumber : ""
+  ].join(":");
 }
 
 function FileActivityEntryCard(props: {
@@ -1526,6 +1595,74 @@ async function fetchAllFileInfoPayload(input: {
   return { response, payload };
 }
 
+async function fetchAllFileStatusesPayload(debateId: string) {
+  const response = await fetch(`/api/debates/${debateId}/file-statuses`, { cache: "no-store" });
+  const payload = await response.json().catch(() => ({}));
+  return { response, payload };
+}
+
+function toStatusLookupKey(input: { scope: "debate" | "agent"; path: string; debateAgentId?: string | null }) {
+  return [input.scope, input.debateAgentId ?? "", input.path].join("|");
+}
+
+function buildAllFileStatusByVirtualPath(
+  items: unknown[],
+  metaByVirtualPath: Record<string, AllFilesMeta>
+) {
+  const statusByLookupKey = new Map<string, AllFileStatusSummary>();
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const scope = row.scope === "agent" ? "agent" : "debate";
+    const path = String(row.path ?? "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!path) continue;
+    const debateAgentId = scope === "agent" ? String(row.debateAgentId ?? "").trim() || null : null;
+    statusByLookupKey.set(toStatusLookupKey({ scope, path, debateAgentId }), {
+      scope,
+      path,
+      debateAgentId,
+      version: typeof row.version === "number" ? row.version : row.version === null ? null : Number(row.version ?? 0) || null,
+      createdAt: String(row.createdAt ?? ""),
+      updatedAt: String(row.updatedAt ?? ""),
+      lastReadAt: row.lastReadAt ? String(row.lastReadAt) : null,
+      lastReadBy: row.lastReadBy ? String(row.lastReadBy) : null,
+      lastWrittenAt: row.lastWrittenAt ? String(row.lastWrittenAt) : null,
+      lastWrittenBy: row.lastWrittenBy ? String(row.lastWrittenBy) : null,
+      readCount: Number(row.readCount ?? 0) || 0,
+      writeCount: Number(row.writeCount ?? 0) || 0,
+      lastEventType: row.lastEventType === "read" || row.lastEventType === "write" ? row.lastEventType : null,
+      lastEventAt: row.lastEventAt ? String(row.lastEventAt) : null
+    });
+  }
+
+  const next: Record<string, AllFileStatusSummary> = {};
+  for (const [virtualPath, meta] of Object.entries(metaByVirtualPath)) {
+    const lookupKey = toStatusLookupKey({
+      scope: meta.scope,
+      path: meta.path,
+      debateAgentId: meta.scope === "agent" ? meta.debateAgentId : null
+    });
+    const status = statusByLookupKey.get(lookupKey);
+    if (!status) continue;
+    next[virtualPath] = status;
+  }
+  return next;
+}
+
+function formatAllFileStatusLine(status: AllFileStatusSummary | null | undefined) {
+  if (!status) return "暂无状态";
+  const parts: string[] = [];
+  if (status.version) parts.push(`v${status.version}`);
+  if (status.lastReadAt) {
+    parts.push(`读 ${formatDateTime(status.lastReadAt).slice(-8, -3) || formatDateTime(status.lastReadAt)}`);
+  } else {
+    parts.push("未读");
+  }
+  const updateText = formatDateTime(status.updatedAt);
+  if (updateText) parts.push(`更 ${updateText.slice(-8, -3) || updateText}`);
+  return parts.join(" · ");
+}
+
 async function postJsonWithFetchFallback(url: string) {
   try {
     const response = await fetch(url, { method: "POST", credentials: "same-origin" });
@@ -1673,17 +1810,19 @@ const AllFilesTreeRow = memo(
     style: CSSProperties;
     activeVirtualPath: string;
     selectedVirtualPaths: ReadonlySet<string>;
+    statusByVirtualPath: Record<string, AllFileStatusSummary>;
     actionsRef: MutableRefObject<{
       openVirtualPath: (virtualPath: string) => void;
       clickVirtualPath: (node: NodeApi<FsNode>, event: ReactMouseEvent<HTMLDivElement>) => void;
       openContextMenu: (node: NodeApi<FsNode>, event: ReactMouseEvent<HTMLDivElement>) => void;
     }>;
   }) {
-    const { node, style, activeVirtualPath, selectedVirtualPaths, actionsRef } = props;
+    const { node, style, activeVirtualPath, selectedVirtualPaths, statusByVirtualPath, actionsRef } = props;
     const data = node.data;
     const isDir = data.type === "dir";
     const isActive = data.path === activeVirtualPath;
     const isSelected = selectedVirtualPaths.has(data.path);
+    const status = !isDir ? statusByVirtualPath[data.path] ?? null : null;
 
     return (
       <div
@@ -1699,7 +1838,14 @@ const AllFilesTreeRow = memo(
         ) : (
           <span className="treeIcon treeIconFile" aria-hidden="true" />
         )}
-        <span className={`treeLabel ${isDir ? "treeDirLabel" : ""}`}>{isDir ? `${data.name}/` : data.name}</span>
+        <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+          <span className={`treeLabel ${isDir ? "treeDirLabel" : ""}`}>{isDir ? `${data.name}/` : data.name}</span>
+          {!isDir ? (
+            <span className="muted" style={{ fontSize: 11, lineHeight: 1.2, overflowWrap: "anywhere" }}>
+              {formatAllFileStatusLine(status)}
+            </span>
+          ) : null}
+        </span>
       </div>
     );
   },
@@ -1736,10 +1882,14 @@ function FileInfoDialog(props: {
         padding: 24,
         zIndex: 1001
       }}
-    >
-      <div className="panel stack" onClick={(event) => event.stopPropagation()} style={{ width: "min(560px, 100%)" }}>
+      >
+      <div
+        className="panel stack"
+        onClick={(event) => event.stopPropagation()}
+        style={{ width: "min(860px, 100%)", maxHeight: "min(88vh, 920px)", overflow: "hidden" }}
+      >
         <div className="row debateModalHeader" style={{ justifyContent: "space-between", gap: 8 }}>
-          <strong>文件信息</strong>
+          <strong>文件状态与时间线</strong>
           <button className="btn" type="button" onClick={props.onClose}>
             关闭
           </button>
@@ -1747,7 +1897,7 @@ function FileInfoDialog(props: {
         {props.loading ? (
           <div className="muted">读取中...</div>
         ) : props.info ? (
-          <div className="stack" style={{ gap: 10 }}>
+          <div className="stack" style={{ gap: 10, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
             <div className="panel">
               <div className="muted" style={{ marginBottom: 6 }}>
                 路径
@@ -1764,6 +1914,14 @@ function FileInfoDialog(props: {
                 <strong>{props.info.byteSize.toLocaleString()} bytes</strong>
               </div>
               <div className="panel stack" style={{ gap: 6 }}>
+                <span className="muted">当前版本</span>
+                <strong>{props.info.version ? `v${props.info.version}` : "-"}</strong>
+              </div>
+              <div className="panel stack" style={{ gap: 6 }}>
+                <span className="muted">累计版本</span>
+                <strong>{props.info.totalVersions ? props.info.totalVersions.toLocaleString() : "-"}</strong>
+              </div>
+              <div className="panel stack" style={{ gap: 6 }}>
                 <span className="muted">创建时间</span>
                 <strong>{formatDateTime(props.info.createdAt) || "-"}</strong>
               </div>
@@ -1771,6 +1929,102 @@ function FileInfoDialog(props: {
                 <span className="muted">修改时间</span>
                 <strong>{formatDateTime(props.info.updatedAt) || "-"}</strong>
               </div>
+            </div>
+            <div className="grid grid-2" style={{ gap: 10 }}>
+              <div className="panel stack" style={{ gap: 6 }}>
+                <span className="muted">创建者</span>
+                <strong>{props.info.createdBy ?? "-"}</strong>
+              </div>
+              <div className="panel stack" style={{ gap: 6 }}>
+                <span className="muted">最近写入</span>
+                <strong>{props.info.lastWrittenBy ?? "-"}</strong>
+                <span className="muted">{formatDateTime(props.info.lastWrittenAt) || "暂无"}</span>
+              </div>
+              <div className="panel stack" style={{ gap: 6 }}>
+                <span className="muted">最近读取</span>
+                <strong>{props.info.lastReadBy ?? "-"}</strong>
+                <span className="muted">{formatDateTime(props.info.lastReadAt) || "暂无"}</span>
+              </div>
+              <div className="panel stack" style={{ gap: 6 }}>
+                <span className="muted">读取 / 写入次数</span>
+                <strong>
+                  {props.info.readCount.toLocaleString()} / {props.info.writeCount.toLocaleString()}
+                </strong>
+              </div>
+            </div>
+            <div className="panel stack" style={{ gap: 10 }}>
+              <strong style={{ fontSize: 14 }}>版本记录</strong>
+              {props.info.versions.length === 0 ? (
+                <div className="muted">暂无可用版本记录</div>
+              ) : (
+                <div className="stack" style={{ gap: 8 }}>
+                  {props.info.versions.map((item, index) => (
+                    <div
+                      key={`${item.version ?? "none"}:${item.at}:${index}`}
+                      className="softBox"
+                      style={{ display: "grid", gap: 4 }}
+                    >
+                      <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                        <strong>{item.version ? `v${item.version}` : "未记录版本号"}</strong>
+                        <span className="muted">{formatDateTime(item.at) || "-"}</span>
+                      </div>
+                      <div className="muted">
+                        {item.actorName ?? "Unknown"}
+                        {item.baseVersion ? ` · 基于 v${item.baseVersion}` : ""}
+                        {item.mode ? ` · ${item.mode}` : ""}
+                      </div>
+                      {item.reason ? <div className="muted" style={{ overflowWrap: "anywhere" }}>原因：{item.reason}</div> : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="panel stack" style={{ gap: 10 }}>
+              <strong style={{ fontSize: 14 }}>时间线</strong>
+              {props.info.events.length === 0 ? (
+                <div className="muted">暂无时间线记录</div>
+              ) : (
+                <div className="stack" style={{ gap: 8 }}>
+                  {props.info.events.map((event) => {
+                    const eventLabel =
+                      event.type === "created" ? "创建" : event.type === "written" ? "修改" : "读取";
+                    const versionLabel =
+                      event.beforeVersion !== null || event.afterVersion !== null
+                        ? ` · v${event.beforeVersion ?? 0} -> v${event.afterVersion ?? 0}`
+                        : "";
+                    const turnLabel =
+                      typeof event.roundNumber === "number" && typeof event.turnNumber === "number"
+                        ? ` · Round ${event.roundNumber} / Turn ${event.turnNumber}`
+                        : "";
+                    return (
+                      <div
+                        key={event.id}
+                        className="softBox"
+                        style={{ display: "grid", gap: 4, borderLeft: "3px solid rgba(37, 99, 235, 0.45)" }}
+                      >
+                        <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                          <strong>
+                            {eventLabel}
+                            {versionLabel}
+                            {turnLabel}
+                          </strong>
+                          <span className="muted">{formatDateTime(event.at) || "-"}</span>
+                        </div>
+                        <div className="muted">
+                          {event.actorName ?? "系统"}
+                          {event.actorRoleType ? ` · ${event.actorRoleType}` : ""}
+                        </div>
+                        {event.targetHeading ? <div className="muted">目标段落：{event.targetHeading}</div> : null}
+                        {event.reason ? (
+                          <div className="muted" style={{ overflowWrap: "anywhere" }}>
+                            原因：{event.reason}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         ) : (
@@ -1853,174 +2107,6 @@ function WorkflowRulesPanel(props: {
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
         <MarkdownView className="md-compact" value={props.markdown || "**讨论规则**\n\n- 读取中..."} />
       </div>
-    </div>
-  );
-}
-
-function DebateFilesToolbar(props: {
-  selectedCount: number;
-  downloading: boolean;
-  loading: boolean;
-  onDownload: () => void;
-  onRefresh: () => void;
-}) {
-  const downloadLabel = props.downloading
-    ? "下载中..."
-    : `下载选中${props.selectedCount > 0 ? `（${props.selectedCount}）` : ""}`;
-  return (
-    <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-      <strong>辩论文件</strong>
-      <div className="row" style={{ gap: 8 }}>
-        <button
-          className="btn debateFilesAction"
-          type="button"
-          disabled={props.selectedCount === 0 || props.downloading}
-          onClick={props.onDownload}
-        >
-          <span className="debateFilesActionLabel" data-label={downloadLabel}>
-            {downloadLabel}
-          </span>
-        </button>
-        <button className="btn debateFilesAction" type="button" disabled={props.loading} onClick={props.onRefresh}>
-          <span className="debateFilesActionLabel" data-label="刷新">
-            刷新
-          </span>
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function DebateFilesContextMenu(props: {
-  menu: AllFilesContextMenuValue | null;
-  selectedCount: number;
-  downloading: boolean;
-  onClose: () => void;
-  onOpenFileInfo: (virtualPath: string) => void;
-  onDownload: () => void;
-}) {
-  if (!props.menu) return null;
-  const menu = props.menu;
-
-  const canOpenFileInfo = menu.target.type === "node" && menu.target.nodeType === "file";
-
-  return (
-    <div className="contextOverlay" onClick={props.onClose}>
-      <div
-        className="contextMenu"
-        style={{ left: menu.x, top: menu.y }}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <button
-          className="contextMenuItem"
-          type="button"
-          disabled={!canOpenFileInfo}
-          onClick={() => {
-            if (!canOpenFileInfo) return;
-            if (menu.target.type !== "node") return;
-            props.onOpenFileInfo(menu.target.path);
-          }}
-        >
-          获取文件信息
-        </button>
-        <button
-          className="contextMenuItem"
-          type="button"
-          disabled={props.selectedCount === 0 || props.downloading}
-          onClick={props.onDownload}
-        >
-          {props.downloading
-            ? "下载中..."
-            : props.selectedCount > 0
-              ? `下载选中项（${props.selectedCount}）`
-              : "下载选中项"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function DebateFilesPanel(props: {
-  selectedCount: number;
-  downloading: boolean;
-  loading: boolean;
-  hasFiles: boolean;
-  tree: FsNode[];
-  renderNode: (props: { node: NodeApi<FsNode>; style: CSSProperties }) => ReactElement;
-  contextMenu: AllFilesContextMenuValue | null;
-  onDownload: () => void;
-  onRefresh: () => void;
-  onRootContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
-  onCloseContextMenu: () => void;
-  onOpenFileInfo: (virtualPath: string) => void;
-}) {
-  const treeRootRef = useRef<HTMLDivElement | null>(null);
-  const [treeHeight, setTreeHeight] = useState(320);
-
-  useEffect(() => {
-    const element = treeRootRef.current;
-    if (!element) return;
-
-    const syncHeight = () => {
-      const nextHeight = Math.max(240, Math.floor(element.clientHeight));
-      setTreeHeight((current) => (current === nextHeight ? current : nextHeight));
-    };
-
-    syncHeight();
-    const observer = new ResizeObserver(() => syncHeight());
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-
-  return (
-    <div
-      style={{
-        flex: 1,
-        minHeight: 0,
-        height: "100%",
-        display: "grid",
-        gridTemplateRows: "auto 1fr",
-        gap: 12,
-        overflow: "hidden"
-      }}
-    >
-      <div className="softBox">
-        <DebateFilesToolbar
-          selectedCount={props.selectedCount}
-          downloading={props.downloading}
-          loading={props.loading}
-          onDownload={props.onDownload}
-          onRefresh={props.onRefresh}
-        />
-      </div>
-      {props.loading ? (
-        <div className="softBox muted" style={{ minHeight: 0 }}>
-          读取中...
-        </div>
-      ) : !props.hasFiles ? (
-        <div className="softBox muted" style={{ minHeight: 0 }}>
-          暂无文件（通常需要至少一轮发言后才会逐步生成）。
-        </div>
-      ) : (
-        <div
-          ref={treeRootRef}
-          className="softBox treeRoot"
-          style={{ minHeight: 0, height: "100%", maxHeight: "none", overflow: "hidden", padding: 0 }}
-          onContextMenu={props.onRootContextMenu}
-        >
-          <Tree<FsNode> data={props.tree} width="100%" height={treeHeight} indent={18} rowHeight={34} openByDefault={false}>
-            {props.renderNode}
-          </Tree>
-        </div>
-      )}
-      <DebateFilesContextMenu
-        menu={props.contextMenu}
-        selectedCount={props.selectedCount}
-        downloading={props.downloading}
-        onClose={props.onCloseContextMenu}
-        onOpenFileInfo={props.onOpenFileInfo}
-        onDownload={props.onDownload}
-      />
     </div>
   );
 }
@@ -2231,19 +2317,19 @@ function StatusSummaryPanel(props: {
   const runtimeNoticeBadgeClass =
     props.debate.runtimeNoticeKind === "recovering"
       ? "badge-recovering"
-      : props.debate.runtimeNoticeKind === "interrupted"
+      : props.debate.runtimeNoticeKind === "interrupted" || props.debate.runtimeNoticeKind === "quota_wait"
         ? "badge-paused"
         : "badge-recovered";
   const runtimeNoticeCardClass =
     props.debate.runtimeNoticeKind === "recovering"
       ? "runtimeNoticeCardRecovering"
-      : props.debate.runtimeNoticeKind === "interrupted"
+      : props.debate.runtimeNoticeKind === "interrupted" || props.debate.runtimeNoticeKind === "quota_wait"
         ? "runtimeNoticeCardRecovering"
         : "runtimeNoticeCardRecovered";
   const runtimeNoticeTitle =
     props.debate.runtimeNoticeKind === "recovering"
       ? "恢复中"
-      : props.debate.runtimeNoticeKind === "interrupted"
+      : props.debate.runtimeNoticeKind === "interrupted" || props.debate.runtimeNoticeKind === "quota_wait"
         ? "已自动暂停"
         : "已自动恢复";
   const summaryCounts = props.summaryJobs.reduce(
@@ -2292,10 +2378,10 @@ function StatusSummaryPanel(props: {
       : "先手动武装，之后只在下一次 failed 时自动接管一次。";
   const runtimeErrorPreview = runtimeError?.message ? runtimeError.message.replace(/\s+/g, " ").trim() : "";
   return (
-    <Fragment>
+    <div className="statusSummaryStack">
       {props.debate.status === "running" ? (
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <strong>
+        <div className="statusLiveRow">
+          <strong className="statusLiveCurrent">
             当前：{props.liveAgentName || "未知"}
             {props.liveDisplayRound ? ` · 第 ${props.liveDisplayRound} 轮` : ""}
             {props.liveDisplayMessage
@@ -2306,7 +2392,7 @@ function StatusSummaryPanel(props: {
                 })()
               : ""}
           </strong>
-          <span className="muted">{props.liveStatus || "运行中"}</span>
+          <span className="muted statusLiveMessage">{props.liveStatus || "运行中"}</span>
         </div>
       ) : null}
       <div className="statusMetaList">
@@ -2447,7 +2533,7 @@ function StatusSummaryPanel(props: {
           </div>
         </details>
       ) : null}
-    </Fragment>
+    </div>
   );
 }
 
@@ -2584,65 +2670,6 @@ function DebateViewerPanel(props: {
   );
 }
 
-function LeftTabIcon({ name }: { name: LeftTabIconName }) {
-  const baseProps = {
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 1.7,
-    strokeLinecap: "round",
-    strokeLinejoin: "round"
-  } as const;
-
-  if (name === "status") {
-    return (
-      <svg {...baseProps}>
-        <circle cx="12" cy="12" r="8" />
-        <path d="M12 8v4" />
-        <path d="M12 16h.01" />
-      </svg>
-    );
-  }
-  if (name === "participants") {
-    return (
-      <svg {...baseProps}>
-        <circle cx="9" cy="9" r="3" />
-        <path d="M4.5 18c0-2.8 2.6-5 5.5-5s5.5 2.2 5.5 5" />
-        <circle cx="17" cy="10" r="2.5" />
-        <path d="M15.5 18c0-1.8 1.6-3.2 3.5-3.2 1.2 0 2.3.6 3 1.5" />
-      </svg>
-    );
-  }
-  if (name === "workflow") {
-    return (
-      <svg {...baseProps}>
-        <rect x="4" y="4" width="6" height="6" rx="1.2" />
-        <rect x="14" y="14" width="6" height="6" rx="1.2" />
-        <path d="M10 7h4" />
-        <path d="M14 7v7" />
-      </svg>
-    );
-  }
-  if (name === "file_activity") {
-    return (
-      <svg {...baseProps}>
-        <circle cx="12" cy="12" r="8" />
-        <path d="M12 8v4l3 2" />
-        <path d="M8 4.5v3" />
-        <path d="M16 4.5v3" />
-      </svg>
-    );
-  }
-  return (
-    <svg {...baseProps}>
-      <path d="M6 5h9l3 3v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" />
-      <path d="M9 9h6" />
-      <path d="M9 13h6" />
-      <path d="M9 17h4" />
-    </svg>
-  );
-}
-
 type OfficialVoteClosed =
   | {
       status: "closed";
@@ -2767,21 +2794,35 @@ function summarizeGenerationDiagnostic(entry: GenerationDiagnosticEntry): Genera
     };
   }
 
-  if (
-    entry.toolCallsCount > 0 ||
-    finishReason === "tool_calls" ||
-    finishReason === "function_call"
-  ) {
-    if (finishReason === "tool_calls" && entry.toolCallsCount === 0) {
-      evidence.push("模型返回了 tool_calls 停止原因，但没有任何真实工具调用。");
-      evidence.push(`原始正文 ${rawChars} 字，最终落库 ${persistedChars} 字。`);
+  if (finishReason === "tool_calls" && entry.toolCallsCount === 0) {
+    evidence.push("模型返回了 tool_calls 停止原因，但没有任何真实工具调用。");
+    evidence.push(`原始正文 ${rawChars} 字，最终落库 ${persistedChars} 字。`);
       return {
         title: "疑似伪工具调用",
         tone: "warn",
-        conclusion: "这更像是 provider 的兼容返回问题，不是真正执行了工具；系统现在会自动尝试一次禁用工具的纯文本重试。",
+        conclusion: "这更像是 provider 的兼容返回问题，不是真正执行了工具；运行时现在会直接判失败，不再自动切到无工具模式重试。",
         evidence
       };
+  }
+
+  if (entry.toolCallsCount > 0 && ["stop", "end_turn"].includes(finishReason)) {
+    evidence.push(`本轮触发了 ${entry.toolCallsCount} 次工具调用。`);
+    if (entry.finishReason) {
+      evidence.push(`模型停止原因：${entry.finishReason}。`);
     }
+    evidence.push(`原始正文 ${rawChars} 字，最终落库 ${persistedChars} 字。`);
+    if (persistedChars === rawChars) {
+      evidence.push("原始正文已完整落库，没有发现工具流程造成的正文丢失。");
+    }
+    return {
+      title: "工具后正常结束",
+      tone: "good",
+      conclusion: "本轮确实使用过工具，但模型在工具结果后正常收尾；这不是工具打断。",
+      evidence
+    };
+  }
+
+  if (finishReason === "tool_calls" || finishReason === "function_call") {
     evidence.push(`本轮触发了 ${entry.toolCallsCount} 次工具调用。`);
     if (entry.finishReason) {
       evidence.push(`模型停止原因：${entry.finishReason}。`);
@@ -3275,6 +3316,7 @@ function FileActivityPanel(props: {
     () => getFileActivityLoadMoreFilter(groups, selectedNode, selectedEntries),
     [groups, selectedEntries, selectedNode]
   );
+  const lastAppliedScopeKeyRef = useRef("");
 
   useEffect(() => {
     const allAgentKeys = groups.map((group) => group.key);
@@ -3294,6 +3336,15 @@ function FileActivityPanel(props: {
       if (next.size === existing.size && Array.from(next).every((key) => existing.has(key))) return current;
       return { ...current, [props.action]: next };
     });
+    if (isFileActivitySelectionValid(selectedNode, groups)) {
+      const filter = getFileActivityNodeFilter(groups, selectedNode);
+      const scopeKey = formatFileActivityScopeKey(props.action, filter);
+      if (filter && lastAppliedScopeKeyRef.current !== scopeKey) {
+        lastAppliedScopeKeyRef.current = scopeKey;
+        onSelectScope(filter);
+      }
+      return;
+    }
     if (!isFileActivitySelectionValid(selectedNode, groups)) {
       const nextSelection = getDefaultFileActivitySelection(groups);
       if (!nextSelection) {
@@ -3302,7 +3353,10 @@ function FileActivityPanel(props: {
       }
       setSelectionByAction((current) => ({ ...current, [props.action]: nextSelection }));
       const filter = getFileActivityNodeFilter(groups, nextSelection);
-      if (filter) onSelectScope(filter);
+      if (filter) {
+        lastAppliedScopeKeyRef.current = formatFileActivityScopeKey(props.action, filter);
+        onSelectScope(filter);
+      }
     }
   }, [groups, onSelectScope, props.action, selectedNode]);
 
@@ -3310,7 +3364,10 @@ function FileActivityPanel(props: {
     (selection: FileActivitySelection) => {
       setSelectionByAction((current) => ({ ...current, [props.action]: selection }));
       const filter = getFileActivityNodeFilter(groups, selection);
-      if (filter) onSelectScope(filter);
+      if (filter) {
+        lastAppliedScopeKeyRef.current = formatFileActivityScopeKey(props.action, filter);
+        onSelectScope(filter);
+      }
     },
     [groups, onSelectScope, props.action]
   );
@@ -3981,6 +4038,7 @@ export default function DebateDetailPage() {
   const [fileActivityDetailLoading, setFileActivityDetailLoading] = useState(false);
   const [fileActivityDetail, setFileActivityDetail] = useState<FileActivityDetail | null>(null);
   const fileActivityItemsRef = useRef<FileActivityListItem[]>([]);
+  const fileActivityActionRef = useRef<FileActivityAction>("write");
   const [saveSuccessOpen, setSaveSuccessOpen] = useState(false);
   const [saveSuccessVersion, setSaveSuccessVersion] = useState<number | null>(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -4011,6 +4069,9 @@ export default function DebateDetailPage() {
   const [allFilesLoading, setAllFilesLoading] = useState(false);
   const [allFilesMetaByVirtualPath, setAllFilesMetaByVirtualPath] = useState<
     Record<string, AllFilesMeta>
+  >({});
+  const [allFileStatusByVirtualPath, setAllFileStatusByVirtualPath] = useState<
+    Record<string, AllFileStatusSummary>
   >({});
   const [activeAllFileVirtualPath, setActiveAllFileVirtualPath] = useState("");
   const [selectedAllFileVirtualPaths, setSelectedAllFileVirtualPaths] = useState<string[]>([]);
@@ -4205,7 +4266,11 @@ export default function DebateDetailPage() {
       setOldestLoadedTurnNumber(nextOldestTurnNumber);
       setHasOlderTurns(shouldKeepOlderTurnsButton(nextOldestTurnNumber, payload.meta?.hasMore));
     } catch (error) {
-      console.error(error);
+      debateDetailLogger.error("failed to load older turn summaries", {
+        debateId: id,
+        beforeTurnNumber: oldestLoadedTurnNumber,
+        error
+      });
       showToast("error", "网络错误：加载更早发言失败");
     } finally {
       setLoadingOlderTurns(false);
@@ -4223,6 +4288,15 @@ export default function DebateDetailPage() {
     try {
       const { response, payload } = await fetchTurnDetail({ debateId: id, turnNumber: summary.turnNumber });
       if (!response.ok || !payload.data) {
+        debateDetailLogger.error("failed to load turn detail response", {
+          action: "load_turn_detail",
+          debateId: id,
+          turnId: summary.id,
+          turnNumber: summary.turnNumber,
+          responseStatus: response.status,
+          responseOk: response.ok,
+          error: payload.error ?? (!payload.data ? "missing turn detail payload data" : null)
+        });
         showToast("error", "读取发言正文失败");
         return;
       }
@@ -4240,7 +4314,13 @@ export default function DebateDetailPage() {
         return nextOrder;
       });
     } catch (error) {
-      console.error(error);
+      debateDetailLogger.error("failed to load turn detail", {
+        action: "load_turn_detail",
+        debateId: id,
+        turnId: summary.id,
+        turnNumber: summary.turnNumber,
+        error
+      });
       showToast("error", "网络错误：读取发言正文失败");
     } finally {
       setTurnDetailLoadingId((current) => (current === summary.id ? "" : current));
@@ -4373,7 +4453,11 @@ export default function DebateDetailPage() {
       showToast("success", "已开始新会话（该席位）");
       void loadContextUsageTotals();
     } catch (error) {
-      console.error(error);
+      debateDetailLogger.error("failed to reset agent usage session", {
+        debateId: id,
+        debateAgentId,
+        error
+      });
       showToast("error", "网络错误：重置失败");
     } finally {
       setResettingUsageByDebateAgentId((cur) => ({ ...cur, [debateAgentId]: false }));
@@ -4458,12 +4542,13 @@ export default function DebateDetailPage() {
     setMemoryContent("");
     setMemoryLoading(false);
     setMemoryTarget(null);
-    setMemoryTail(false);
-    setMemoryMaxChars(null);
-    setMemoryTruncation(null);
-    setAllFilesMetaByVirtualPath({});
-    setActiveAllFileVirtualPath("");
-    setOpenRoundsByNumber({});
+      setMemoryTail(false);
+      setMemoryMaxChars(null);
+      setMemoryTruncation(null);
+      setAllFilesMetaByVirtualPath({});
+      setAllFileStatusByVirtualPath({});
+      setActiveAllFileVirtualPath("");
+      setOpenRoundsByNumber({});
   }, [closeMemoryDialog, id, updateTurnWindow]);
 
   const loadQuestionVersionMeta = useCallback(async () => {
@@ -4718,7 +4803,11 @@ export default function DebateDetailPage() {
       setDebate(payload.data ?? null);
       showToast("success", nextEnabled ? "已启用失败后自动恢复一次" : "已取消自动恢复一次");
     } catch (error) {
-      console.error(error);
+      debateDetailLogger.error("failed to update auto recover flag", {
+        debateId: id,
+        nextEnabled,
+        error
+      });
       showToast("error", "网络错误：自动恢复设置失败");
     } finally {
       setAutoRecoverArmBusy(false);
@@ -4742,7 +4831,10 @@ export default function DebateDetailPage() {
       setDebate(payload.data ?? null);
       showToast("success", "已忽略当前失败原因");
     } catch (error) {
-      console.error(error);
+      debateDetailLogger.error("failed to ignore runtime error", {
+        debateId: id,
+        error
+      });
       showToast("error", "网络错误：忽略失败");
     } finally {
       setRuntimeErrorIgnoreBusy(false);
@@ -4877,6 +4969,7 @@ export default function DebateDetailPage() {
   const loadFileActivity = useCallback(
     async (mode: "reset" | "more" = "reset", filter?: FileActivityRequestFilter) => {
       if (!id) return;
+      const requestedAction = fileActivityAction;
       const isScopedReset = mode === "reset" && Boolean(filter);
       const beforeId = mode === "more" ? filter?.beforeId ?? fileActivityItemsRef.current.at(-1)?.id ?? "" : "";
       if (mode === "more" && !beforeId) return;
@@ -4889,7 +4982,7 @@ export default function DebateDetailPage() {
       }
       try {
         const query = new URLSearchParams({
-          action: fileActivityAction,
+          action: requestedAction,
           limit: "40"
         });
         if (beforeId) query.set("beforeId", beforeId);
@@ -4898,6 +4991,7 @@ export default function DebateDetailPage() {
         if (typeof filter?.turnNumber === "number") query.set("turnNumber", String(filter.turnNumber));
         const response = await fetch(`/api/debates/${id}/file-activity?${query.toString()}`, { cache: "no-store" });
         const payload = await response.json().catch(() => ({}));
+        if (fileActivityActionRef.current !== requestedAction) return;
         if (!response.ok) {
           if (mode === "reset") {
             if (!isScopedReset) setFileActivityError(payload.error?.message ?? "加载失败");
@@ -4936,13 +5030,15 @@ export default function DebateDetailPage() {
 
   const loadFileActivityNav = useCallback(async () => {
     if (!id) return;
+    const requestedAction = fileActivityAction;
     try {
       const query = new URLSearchParams({
-        action: fileActivityAction,
+        action: requestedAction,
         mode: "nav"
       });
       const response = await fetch(`/api/debates/${id}/file-activity?${query.toString()}`, { cache: "no-store" });
       const payload = await response.json().catch(() => ({}));
+      if (fileActivityActionRef.current !== requestedAction) return;
       if (!response.ok) {
         setFileActivityNavGroups([]);
         return;
@@ -4956,7 +5052,7 @@ export default function DebateDetailPage() {
         });
       }
     } catch {
-      setFileActivityNavGroups([]);
+      if (fileActivityActionRef.current === requestedAction) setFileActivityNavGroups([]);
     }
   }, [fileActivityAction, id]);
 
@@ -5022,6 +5118,10 @@ export default function DebateDetailPage() {
   useEffect(() => {
     fileActivityItemsRef.current = fileActivityItems;
   }, [fileActivityItems]);
+
+  useEffect(() => {
+    fileActivityActionRef.current = fileActivityAction;
+  }, [fileActivityAction]);
 
   useEffect(() => {
     const debateStatus = debate?.status ?? "";
@@ -5208,7 +5308,11 @@ export default function DebateDetailPage() {
       }
       await loadDebate();
     } catch (error) {
-      console.error(error);
+      debateDetailLogger.error("failed to submit debate action", {
+        debateId: id,
+        action: name,
+        error
+      });
       showToast("error", "网络错误：操作失败");
     }
   }
@@ -5227,8 +5331,13 @@ export default function DebateDetailPage() {
     if (allFilesLoadedRef.current && !force) return null;
     setAllFilesLoading(true);
     try {
-      const response = await fetch(`/api/debates/${id}/all-files`, { cache: "no-store" });
-      const payload = await response.json().catch(() => ({}));
+      const [{ response, payload }, { response: statusResponse, payload: statusPayload }] = await Promise.all([
+        fetch(`/api/debates/${id}/all-files`, { cache: "no-store" }).then(async (res) => ({
+          response: res,
+          payload: await res.json().catch(() => ({}))
+        })),
+        fetchAllFileStatusesPayload(id)
+      ]);
       if (!response.ok) {
         showToast("error", payload.error?.message ?? "读取文件列表失败");
         return null;
@@ -5236,12 +5345,20 @@ export default function DebateDetailPage() {
 
       const list = Array.isArray(payload.data) ? (payload.data as unknown[]) : [];
       const next = buildAllFilesMetaByVirtualPath(list);
+      const nextStatus = statusResponse.ok
+        ? buildAllFileStatusByVirtualPath(Array.isArray(statusPayload.data) ? (statusPayload.data as unknown[]) : [], next)
+        : {};
 
       allFilesLoadedRef.current = true;
       setAllFilesMetaByVirtualPath(next);
+      setAllFileStatusByVirtualPath(nextStatus);
       return next;
     } catch (error) {
-      console.error(error);
+      debateDetailLogger.error("failed to load all files index", {
+        debateId: id,
+        force: Boolean(force),
+        error
+      });
       showToast("error", "网络错误：读取文件列表失败");
       return null;
     } finally {
@@ -5332,7 +5449,13 @@ export default function DebateDetailPage() {
       }
     } catch (error) {
       if (abortController.signal.aborted) return;
-      console.error(error);
+      debateDetailLogger.error("failed to read debate file content", {
+        debateId: id,
+        target: input.target,
+        tail: input.tail,
+        maxChars: input.maxChars,
+        error
+      });
       setMemoryContent("网络错误：读取失败");
       showToast("error", "网络错误：读取失败");
     } finally {
@@ -5359,7 +5482,11 @@ export default function DebateDetailPage() {
           : null;
       setDiagnosticsDialog({ turnNumber, entry, loading: false });
     } catch (error) {
-      console.error(error);
+      debateDetailLogger.error("failed to load generation diagnostics", {
+        debateId: id,
+        turnNumber,
+        error
+      });
       setDiagnosticsDialog({ turnNumber, entry: null, loading: false });
     }
   }
@@ -5681,14 +5808,11 @@ export default function DebateDetailPage() {
     }
   }, [activeLive, liveAvailable]);
 
-  const allFilesTreeModel = useMemo(
-    () =>
-      createFsTreeModel({
-        normalizePath: normalizeFsPath
-      }),
-    []
-  );
-  const [allFilesTree, setAllFilesTree] = useState<FsNode[]>([]);
+  const { allFilesTree } = useDebateAllFilesTree({
+    allFilesMetaByVirtualPath,
+    setSelectedAllFileVirtualPaths,
+    setAllFilesSelectionAnchor
+  });
   const allFilesActionsRef = useRef<{
     openVirtualPath: (virtualPath: string) => void;
     clickVirtualPath: (node: NodeApi<FsNode>, event: ReactMouseEvent<HTMLDivElement>) => void;
@@ -5699,45 +5823,9 @@ export default function DebateDetailPage() {
     openContextMenu: () => {}
   });
   const selectedAllFilesSet = useMemo(() => new Set(selectedAllFileVirtualPaths), [selectedAllFileVirtualPaths]);
+  const closeAllFilesContextMenu = useCallback(() => setAllFilesContextMenu(null), []);
 
-  useEffect(() => {
-    allFilesTreeModel.sync(Object.keys(allFilesMetaByVirtualPath));
-    setAllFilesTree(allFilesTreeModel.getTree());
-  }, [allFilesMetaByVirtualPath, allFilesTreeModel]);
-
-  const allFilesTreePaths = useMemo(() => {
-    const paths = new Set<string>();
-    const stack = [...allFilesTree];
-    while (stack.length > 0) {
-      const node = stack.pop();
-      if (!node) continue;
-      paths.add(node.path);
-      if (node.children?.length) {
-        for (const child of node.children) stack.push(child);
-      }
-    }
-    return paths;
-  }, [allFilesTree]);
-
-  useEffect(() => {
-    setSelectedAllFileVirtualPaths((current) => current.filter((path) => allFilesTreePaths.has(path)));
-    setAllFilesSelectionAnchor((current) => (current && allFilesTreePaths.has(current) ? current : ""));
-  }, [allFilesTreePaths]);
-
-  useEffect(() => {
-    if (!allFilesContextMenu) return;
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setAllFilesContextMenu(null);
-      }
-    }
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [allFilesContextMenu]);
+  useEscapeKeyClose(Boolean(allFilesContextMenu), closeAllFilesContextMenu);
 
   const updateAllFilesSelection = useCallback(
     (node: NodeApi<FsNode>, event: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }, mode: "click" | "contextmenu") => {
@@ -5792,7 +5880,11 @@ export default function DebateDetailPage() {
       window.setTimeout(() => URL.revokeObjectURL(href), 1000);
       showToast("success", "已开始下载");
     } catch (error) {
-      console.error(error);
+      debateDetailLogger.error("failed to download selected files", {
+        debateId: id,
+        selectedCount: selectedAllFileVirtualPaths.length,
+        error
+      });
       showToast("error", "网络错误：下载失败");
     } finally {
       setAllFilesDownloading(false);
@@ -5817,22 +5909,103 @@ export default function DebateDetailPage() {
     setAllFileInfoLoading(true);
     setAllFileInfo(null);
 
-    try {
-      const { response, payload } = await fetchAllFileInfoPayload({ debateId: id, meta });
-      if (!response.ok) {
-        showToast("error", payload.error?.message ?? "读取文件信息失败");
-        setAllFileInfoOpen(false);
+      try {
+        const { response, payload } = await fetchAllFileInfoPayload({ debateId: id, meta });
+        if (!response.ok) {
+          showToast("error", payload.error?.message ?? "读取文件信息失败");
+          setAllFileInfoOpen(false);
         return;
       }
-      setAllFileInfo({
-        displayPath,
-        charCount: Number(payload.data?.charCount ?? 0) || 0,
-        byteSize: Number(payload.data?.byteSize ?? 0) || 0,
-        createdAt: String(payload.data?.createdAt ?? ""),
-        updatedAt: String(payload.data?.updatedAt ?? "")
-      });
+        setAllFileInfo({
+          scope: meta.scope,
+          debateAgentId: meta.scope === "agent" ? meta.debateAgentId : null,
+          displayPath,
+          charCount: Number(payload.data?.charCount ?? 0) || 0,
+          byteSize: Number(payload.data?.byteSize ?? 0) || 0,
+          version:
+            typeof payload.data?.version === "number"
+              ? payload.data.version
+              : payload.data?.version === null
+                ? null
+                : Number(payload.data?.version ?? 0) || null,
+          totalVersions:
+            typeof payload.data?.totalVersions === "number"
+              ? payload.data.totalVersions
+              : payload.data?.totalVersions === null
+                ? null
+                : Number(payload.data?.totalVersions ?? 0) || null,
+          createdAt: String(payload.data?.createdAt ?? ""),
+          updatedAt: String(payload.data?.updatedAt ?? ""),
+          createdBy: payload.data?.createdBy ? String(payload.data.createdBy) : null,
+          lastWrittenAt: payload.data?.lastWrittenAt ? String(payload.data.lastWrittenAt) : null,
+          lastWrittenBy: payload.data?.lastWrittenBy ? String(payload.data.lastWrittenBy) : null,
+          lastReadAt: payload.data?.lastReadAt ? String(payload.data.lastReadAt) : null,
+          lastReadBy: payload.data?.lastReadBy ? String(payload.data.lastReadBy) : null,
+          readCount: Number(payload.data?.readCount ?? 0) || 0,
+          writeCount: Number(payload.data?.writeCount ?? 0) || 0,
+          versions: Array.isArray(payload.data?.versions)
+            ? (payload.data.versions as Array<Record<string, unknown>>).map((item) => ({
+                version:
+                  typeof item.version === "number"
+                    ? item.version
+                    : item.version === null
+                      ? null
+                      : Number(item.version ?? 0) || null,
+                at: String(item.at ?? ""),
+                actorName: item.actorName ? String(item.actorName) : null,
+                actorRoleType: item.actorRoleType ? String(item.actorRoleType) : null,
+                baseVersion:
+                  typeof item.baseVersion === "number"
+                    ? item.baseVersion
+                    : item.baseVersion === null
+                      ? null
+                      : Number(item.baseVersion ?? 0) || null,
+                mode: item.mode ? String(item.mode) : null,
+                reason: item.reason ? String(item.reason) : null
+              }))
+            : [],
+          events: Array.isArray(payload.data?.events)
+            ? (payload.data.events as Array<Record<string, unknown>>).map((item) => ({
+                id: String(item.id ?? ""),
+                type: item.type === "created" || item.type === "written" || item.type === "read" ? item.type : "read",
+                at: String(item.at ?? ""),
+                actorName: item.actorName ? String(item.actorName) : null,
+                actorRoleType: item.actorRoleType ? String(item.actorRoleType) : null,
+                roundNumber:
+                  typeof item.roundNumber === "number"
+                    ? item.roundNumber
+                    : item.roundNumber === null
+                      ? null
+                      : Number(item.roundNumber ?? 0) || null,
+                turnNumber:
+                  typeof item.turnNumber === "number"
+                    ? item.turnNumber
+                    : item.turnNumber === null
+                      ? null
+                      : Number(item.turnNumber ?? 0) || null,
+                beforeVersion:
+                  typeof item.beforeVersion === "number"
+                    ? item.beforeVersion
+                    : item.beforeVersion === null
+                      ? null
+                      : Number(item.beforeVersion ?? 0) || null,
+                afterVersion:
+                  typeof item.afterVersion === "number"
+                    ? item.afterVersion
+                    : item.afterVersion === null
+                      ? null
+                      : Number(item.afterVersion ?? 0) || null,
+                targetHeading: item.targetHeading ? String(item.targetHeading) : null,
+                reason: item.reason ? String(item.reason) : null
+              }))
+            : []
+        });
     } catch (error) {
-      console.error(error);
+      debateDetailLogger.error("failed to load file info", {
+        debateId: id,
+        virtualPath,
+        error
+      });
       showToast("error", "网络错误：读取文件信息失败");
       setAllFileInfoOpen(false);
     } finally {
@@ -5840,18 +6013,19 @@ export default function DebateDetailPage() {
     }
   }
 
-  const renderAllFilesNode = useCallback(
-    (props: { node: NodeApi<FsNode>; style: CSSProperties }) => (
-      <AllFilesTreeRow
-        node={props.node}
-        style={props.style}
-        activeVirtualPath={activeAllFileVirtualPath}
-        selectedVirtualPaths={selectedAllFilesSet}
-        actionsRef={allFilesActionsRef}
-      />
-    ),
-    [activeAllFileVirtualPath, selectedAllFilesSet]
-  );
+    const renderAllFilesNode = useCallback(
+      (props: { node: NodeApi<FsNode>; style: CSSProperties }) => (
+        <AllFilesTreeRow
+          node={props.node}
+          style={props.style}
+          activeVirtualPath={activeAllFileVirtualPath}
+          selectedVirtualPaths={selectedAllFilesSet}
+          statusByVirtualPath={allFileStatusByVirtualPath}
+          actionsRef={allFilesActionsRef}
+        />
+      ),
+      [activeAllFileVirtualPath, allFileStatusByVirtualPath, selectedAllFilesSet]
+    );
 
   if (!debate) {
     return <div className="panel">加载中...</div>;
@@ -5865,13 +6039,13 @@ export default function DebateDetailPage() {
         )
       : null;
 
-  const availableAgents = agents;
+  const availableAgents = agents.filter((agent) => agent.isActive);
   const canAddAgent =
     debate.isOwner &&
     ["running", "paused"].includes(debate.status) &&
     availableAgents.length > 0;
 
-  const leftTabs: Array<{ id: LeftTab; label: string; icon: LeftTabIconName }> = [
+  const leftTabs: Array<{ id: LeftTab; label: string; icon: DebateLeftTabIconName }> = [
     { id: "status", label: "辩论状态", icon: "status" },
     { id: "participants", label: "参与者", icon: "participants" },
     { id: "workflow", label: "规则", icon: "workflow" },
@@ -5920,42 +6094,7 @@ export default function DebateDetailPage() {
           {toast.text}
         </div>
       ) : null}
-      {injectedPromptDialog ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setInjectedPromptDialog(null)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15, 23, 42, 0.45)",
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "center",
-            padding: 24,
-            zIndex: 1000
-          }}
-        >
-          <div
-            className="panel stack"
-            onClick={(event) => event.stopPropagation()}
-            style={{ width: "min(980px, 100%)" }}
-          >
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <div className="stack" style={{ gap: 4 }}>
-                <strong>{injectedPromptDialog.phaseTitle} · 注入提示词</strong>
-                <div className="muted">第 {injectedPromptDialog.round} 轮进入该阶段时自动注入到运行时 Prompt。</div>
-              </div>
-              <button className="btn" type="button" onClick={() => setInjectedPromptDialog(null)}>
-                关闭
-              </button>
-            </div>
-            <div className="panel" style={{ whiteSpace: "pre-wrap", maxHeight: "65vh", overflowY: "auto" }}>
-              {injectedPromptDialog.prompt}
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <InjectedPromptDialog dialog={injectedPromptDialog} onClose={() => setInjectedPromptDialog(null)} />
       <DiagnosticsDialog dialog={diagnosticsDialog} onClose={() => setDiagnosticsDialog(null)} />
       <SaveSuccessDialog
         open={saveSuccessOpen}
@@ -6051,45 +6190,13 @@ export default function DebateDetailPage() {
         }}
       />
 
-      <nav
-        className="panel debateSidebarRail debateViewportPanel"
-        aria-label="左侧栏"
-        style={{
-          padding: 6,
-          overflowY: "auto"
-        }}
-      >
-        <div className="stack" style={{ gap: 6 }}>
-          {leftTabs.map((tab) => {
-            const selected = leftTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                className="btn leftTabButton"
-                type="button"
-                title={tab.label}
-                aria-label={tab.label}
-                aria-current={selected ? "page" : undefined}
-                onClick={() => setLeftTab(tab.id)}
-                style={{
-                  borderColor: selected ? "rgba(38, 99, 235, 0.55)" : undefined,
-                  background: selected ? "rgba(38, 99, 235, 0.08)" : undefined
-                }}
-              >
-                <span className="leftTabIcon" aria-hidden="true">
-                  <LeftTabIcon name={tab.icon} />
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </nav>
+      <DebateSidebarRail tabs={leftTabs} activeTab={leftTab} onSelectTab={setLeftTab} />
 
       <section
-        className="panel stack debateSidebarPanel debateViewportPanel debateFilesPanel"
+        className={`panel stack debateSidebarPanel debateViewportPanel debateFilesPanel ${leftTab === "memory" ? "debateSidebarPanelMemory debateSidebarPanelFiles" : ""}`}
         style={{ overflow: "hidden", minHeight: 0, gridColumn: leftTab === "file_activity" ? "2 / -1" : undefined }}
       >
-        <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="debateSidebarHeader">
           <strong style={{ fontSize: 14 }}>{leftTabTitle[leftTab]}</strong>
           <Link className="btn" href="/debates">
             返回列表
@@ -6098,7 +6205,7 @@ export default function DebateDetailPage() {
 
         {!debate.isOwner ? <div className="muted">公开辩论（只读）</div> : null}
 
-        <div className="debateSidebarContent">
+        <div className={`debateSidebarContent ${leftTab === "memory" ? "debateSidebarContentLocked" : ""}`}>
           {leftTab === "status" ? (
             <Fragment>
               <div>
@@ -6172,7 +6279,12 @@ export default function DebateDetailPage() {
                 hasMore={fileActivityHasMore}
                 loadingMore={fileActivityLoadingMore}
                 onChangeAction={(action) => {
+                  fileActivityActionRef.current = action;
                   setFileActivityAction(action);
+                  setFileActivityNavGroups([]);
+                  setFileActivityItems([]);
+                  setFileActivityHasMore(false);
+                  setFileActivityError("");
                   setSelectedFileActivityId("");
                   setFileActivityDetail(null);
                 }}

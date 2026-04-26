@@ -1,19 +1,15 @@
-import { NextResponse } from "next/server";
-
 import { testAgentConnection, testAgentConnectionDebug } from "@/lib/agents";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess } from "@/lib/http";
 
-export async function POST(
-  request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
+export const dynamic = "force-dynamic";
+
+export const POST = apiRoute<{ id: string }>(
+  { route: "/api/agents/[id]/test", method: "POST", logMeta: ({ params }) => ({ agentId: params.id }) },
+  async ({ request, params, setLogMeta }) => {
     const url = new URL(request.url);
     const debug = url.searchParams.get("debug") === "1";
-    const result = debug ? await testAgentConnectionDebug(id) : await testAgentConnection(id);
-    return NextResponse.json({ success: true, data: result });
-  } catch (error) {
-    return toErrorResponse(error);
+    if (debug) setLogMeta({ debug: true });
+    const result = debug ? await testAgentConnectionDebug(params.id) : await testAgentConnection(params.id);
+    return jsonSuccess(result);
   }
-}
+);

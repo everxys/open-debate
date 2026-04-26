@@ -1,3 +1,91 @@
+## 2026-04-26
+
+- 重构辩论详情“文件”页的顶部结构：`app/(main)/debates/[id]/debate-files-panel.tsx` 里的文件工具栏不再用会互相挤压的 grid/纵向摘要布局，而是改成独立的“主信息区 + 按钮区” header，统计信息用单行 chip 式文本展示，宽度不足时按钮区整体下移而不是把标题和计数挤成竖排；`app/globals.css` 同步重写了这块 header 样式与文件页页头样式，并继续保留文件树卡片脱离全局 `treeRoot` 拉伸、按内容高度驱动滚动的布局。
+- 继续收口小说工作台的 harness 修复边界：保留通用修复（`unlockAfterPhase` 只做解锁后按需可读、workflow-level writable target bootstrap、`HARNESS_ACTION_RESULT` 作为文件状态唯一真相），但撤回了 runtime 里对 `debate/ideas/*.md` 的全局默认猜测；现在 `resolveDebateIdeaBankPaths` 只认 workflow 显式 `ideaBank.*Path`，并新增测试锁定这一点，避免把某个工作台的目录约定硬编码进所有辩论的通用 runtime。与此同时也已核实当前“神作小说工作台”对应策略与其 workspace 下已有 debates 的持久化 `workflow.json` 本身就已经是显式 `ideaBank` 配置，因此这次不需要再额外回填数据库。
+- 修正 `docker/seed_democratic_centralism_strategy.sql` 里 Phase 1.5 的投票示例：不再教模型调用旧的 `debate_vote_cast` + `selections` 结构，改为与主 runtime 一致的 harness `vote_cast` debate-action 协议，避免 reseed / 导入后把过时投票语义重新注入 prompt。
+- 收口 harness 的读写面与目标推进链：runtime 现在把 shared readable surface 和 writable surface 分开计算，`list/search` 返回的路径会直接写回 seat working set，下一轮 policy 能从 `list/search` 正常推进到 `read`；`read` 也改成只允许读取当前已知 target，不再借 `allowedOutputPaths` 扩大到整个 shared 写入面。
+- 完成主 runtime 的投票语义迁移收尾：`provider-orchestration` 不再保留未接入主链路的 provider-native tool 执行分支，投票提示统一改成通过 harness `vote_cast` action 发 ballot，并由 runtime 自己负责后续 official close/result 发布，不再提示模型手动 `debate_vote_close`。
+- 删除死掉的 workflow `voting.custom.minOptions/maxOptions` 配置：`lib/workflow.ts` 的 schema/default/normalize/canonical 输出与示例 workflow 文件现在都只保留仍然生效的 `voting.governance`，避免 GUI/JSON 继续暴露一组根本不会影响 runtime 的伪配置。
+
+## 2026-04-25
+
+- Playground 工具验收台把“全选测试集”从整行复选项收成了标题区小按钮，减少占位，同时保留一键选满和回退默认测试集的逻辑。
+- 修复 Playground checklist 运行时落库失败：`playground_tool_checklists.tool_name` 的数据库 check constraint 之前还停留在旧工具名单，新增的 `harness_read / harness_write / harness_vote_cast` 会直接触发约束错误；现在 `lib/db.ts` 启动时会自动重建 `playground_tool_checklists_tool_name_check` 到新名单，`docker/init.sql` 也已同步，老库和新库都能正常记录 harness checklist 结果。
+- 让 AI 配置页左右两栏高度做成真正的同步关系：`app/(main)/agents/page.tsx` 现在用 `ResizeObserver` 监听左侧编辑面板高度，并把同一高度显式施加给右侧“已有配置”面板；右侧内部列表区继续只在自己的 viewport 里滚动，因此以后左栏新增字段、提示文案或额外配置项时，右栏会自动等高跟随，而不是再依赖 CSS 拉伸碰运气。
+- 继续修正辩论“文件”页与 AI 配置页的空白高度问题：文件页不再默认把树面板撑到剩余整块高度，`app/(main)/debates/[id]/debate-files-panel.tsx` 现在按树节点数量估算内容高度、到视口上限后再滚动，并把移动/窄屏下的 `debateSidebarPanelMemory` 改为自动高度，避免单列模式被 `debateViewportPanel` 固定高度强行拉出大空白；AI 配置页则把外层 grid 改为顶部对齐、右侧列表 panel 不再被左侧编辑器拉伸，同时取消卡片右侧灰色栏的整卡拉伸，解决列表底部和右侧栏内部反复出现的大块留白。
+- 继续收紧 AI 配置页卡片布局：把 `app/(main)/agents/page.tsx` 里的 AI 条目改成明确的 `main / aside / metric pills` 结构，并把样式收口到 `app/globals.css`；右侧状态/操作栏现在使用固定合理宽度并拉满整卡高度，不再出现“右栏下面一大块空白”，左侧信息区改为自适应更紧凑的指标网格，也修掉了 P2 类配置在右侧浪费大量横向空间的问题。
+- 修复辩论详情“文件”页树面板高度反复塌缩、下方出现大块空白的问题：把文件树视口从 `app/(main)/debates/[id]/page.tsx` 抽到新的 `app/(main)/debates/[id]/debate-files-panel.tsx`，由专门组件统一管理 toolbar / context menu / `react-arborist` 高度观察；同时把文件页的父容器改为锁定外层滚动、只让文件树自身接管剩余高度，避免 `debateSidebarContent` 和树视口双重滚动/量高互相打架，后续这块布局问题不再需要在主页面里散改。
+- 修复 harness action 与 turn 落库之间的“一半成功”窗口：新增 `debate_turn_mutations` journal（见 `docker/init.sql` / `lib/db-schema.ts`），共享文件写入与 `vote_cast` 现在会先记录 pending before/after 快照；provider 回合异常时会即时回滚本轮 pending mutation，turn 真正落库成功后再立刻标记 committed；`runDebate` 在每次当前 turn 开始前还会自动 reconcile 残留 pending journal，避免出现“文件/投票已改，但对应发言没落库”的脏状态。
+- 把 debate runtime 的主契约切到 harness action protocol：新增 `lib/runtime/runtime-action-harness.ts`，现在 provider 主循环会优先要求模型输出单个 ` ```debate-action``` ` JSON block，由 harness 自己解析并执行 `list / search / read / write_replace / write_append / write_section / vote_cast`，不再把 provider-native `tool_calls` 当作唯一正确路径。
+- 新增 seat 级 working set 持久化：每个席位会把最近读写文件和 canonical source files 写入 `context/working_set.json`，恢复对话时会把这批目标直接注入 prompt，并据此按 runtime state 缩小可见 action 面，避免每次 resumed turn 都重新全树探索。
+- 新增 harness 侧写入瘦身与语义循环检测：模型侧写入动作只需要给出 path/content/heading，版本校验和安全写入仍由底层 safe-write engine 自动补齐；同时 provider 主循环会对重复 `search/read/list`、同路径近似重复写入、`list <-> search` 振荡直接报 `AI_TOOL_LOOP_DETECTED`。
+- Playground 新增第二层 harness capability check：基础/投票测试集现在额外包含 `Harness Read / Harness Write / Harness Vote Cast`，校验模型是否能按新 action 协议完成闭环，而原有 provider-native checklist 继续保留为 smoke 测试。
+- 新增 `tests/runtime-action-harness.test.ts`，并扩展 `tests/playground-checklist.test.ts` 覆盖 harness case；`npx tsc --noEmit --pretty false` 与 `npm test` 已通过。
+
+- 把 `TODO.md` 收口成只保留 tool harness 重构这一项，删除了此前其他已完成或次优先级的历史条目，避免后续讨论继续发散。
+- 把下一阶段的 tool harness 重构方案写进了 `TODO.md`：不再把 provider-native `tool_calls` 视为唯一正确路径，后续改造将围绕 harness 自有 action protocol、按 runtime state 缩小动作面、seat working set、瘦身写入语义、语义型循环检测，以及让 Playground 对齐 harness 合同而不是只测 provider 原生 tool-calling。
+- 去掉了 provider 的“无工具模式”补救和固定 `MAX_TOOL_ROUNDS = 3` 限制：OpenAI / Anthropic 运行时现在不再在工具链后偷偷切纯文本重试，也不再用固定 3 轮截断工具循环；遇到伪 `tool_calls` 或 provider 不支持工具时会直接报错暴露真实问题，辩论详情页的诊断文案也同步改成“不再自动切到无工具模式重试”。
+- 关闭了这套小说 workflow 的 `finalization.autoOpenVote`：`docs/NOVEL_GODMODE_WORKFLOW.json`、`docs/WORKFLOW_TUTORIAL.md`、`docker/seed_democratic_centralism_strategy.sql` 以及本地 `output/workflow.json` 现在都改为默认不自动发起收束前表决；同时已把本地数据库里“民主集中制共识算法（先赛马，再相马）”策略及其 workspace 下已有 debate 的持久化 `workflow.json` 一并回填为 `false`，避免第 3 轮再自动跳进 Phase 2.5。
+- 回滚了测试集勾选区过重的整块蓝色高亮，改为只加强下方工具卡片的选中态；当前选中项现在用更克制的浅蓝底、细内描边和轻阴影区分，避免把测试集 checkbox 区做得过满过硬。
+- Playground 测试集勾选态高亮加强：测试集 checkbox 卡片现在在选中时会有更明显的蓝色边框、浅蓝底色和阴影，不再只靠小 checkbox 本身提示“当前已选中”。
+- Playground checklist 批量测试提速：`全部测试` 后端改成按 3 项一批的限流并发执行，前端“补测未过项”也改成并发发起单项补测，明显减少等待时间，同时避免一次性把所有 case 全并发打满 provider。
+- 把 Playground checklist 的投票工具约束改回“直接本地 SQL 定义”：`docker/init.sql` 与 `lib/db.ts` 的 `playground_tool_checklists` 建表定义现在直接包含 `debate_vote_open / debate_vote_cast / debate_vote_close`，并删掉了我此前临时加的运行时 `drop/add constraint` 单次修补逻辑。
+- Playground 工具验收台的批量补测逻辑改成覆盖“失败 + 未测”两类项，按钮文案收成 `补测未过项`，避免用户误以为它只会处理已失败项而漏掉还没跑过的工具。
+- Playground checklist 现在支持按“测试集”运行：新增 `基础测试集` 与 `投票测试集`，前端改为可见 checkbox 列表且默认只勾选基础集；左侧工具项与右侧详情会显示所属测试集，`全部测试` 只跑当前勾选的 suite。后端 checklist 定义改成 suite-aware，tool schema 与 DB 约束补上 `debate_vote_open / debate_vote_cast / debate_vote_close`，playground sandbox 也新增了最小投票开票/投票/关票模拟与结果文件落盘。
+- Playground checklist 测试补强：新增 suite 默认值、suite -> case 展开、runtime tool coverage drift 保护，以及投票关票 evaluator 校验，避免以后 runtime 已暴露工具但 checklist/test 没跟上。
+- 把 Playground checklist 下一阶段需求整理进 `TODO.md`：明确改成“测试集”模型，要求 `基础测试集` 默认勾选、`投票测试集` 可选勾选，并补上 suite-aware 后端结构、UI 勾选列表、coverage drift 测试、基础文件工具强化校验等执行项，避免后续直接开做时目标继续漂。
+- Playground 右侧“当前状态”进度条现在直接显示每段阶段名称：详情区的 5 段状态条改成“标签 + 进度段”结构，`请求模型 / 接收输出 / 工具执行 / 文件变动 / 结果校验` 会直接展示在条上方，不再只靠颜色猜当前分段。
+- 修正 Playground 工具验收台未测卡片的高度不一致：`idle` 状态不再额外渲染一行重复的“未测”阶段摘要，避免 p1 这类未测展示比 p2 终态卡片更高、看起来不齐。
+- Playground checklist 改成真实 SSE 阶段流：新增 `queued / requesting_model / receiving_model_output / executing_tools / sandbox_changed / validating_result / passed / failed` 阶段模型，`playground_tool_checklists` 现在会持久化当前阶段、阶段开始时间、阶段索引、最近一次阶段轨迹和最近进度消息；新增 `/api/agents/playground/checklist/stream` SSE route 与 `lib/playground/live.ts` 轻量订阅中心，Playground 页面改用 `EventSource` 实时接收 `snapshot / checklist_progress / checklist_finished`，左侧每个工具项显示紧凑阶段进度条与当前阶段文案，右侧详情新增“当前状态”和“阶段轨迹”，同时失败项会保留真实卡住阶段而不是一律覆盖成通用 failed。
+- 继续收口 Playground 进度 UI：已通过/失败这类终态不再在同一块里重复显示多次；每个阶段进度段新增 hover tooltip，可直接看到该绿条/红条对应的具体阶段，左侧 meta 信息也改成更紧凑的单行分隔显示。
+- 继续压缩 Playground 左侧 checklist 卡片：工具状态已从进度条下方的单独一行挪到标题同一行，避免“已通过”这类终态独占一整行造成留白。
+- 调整 Playground checklist 卡片列宽：收窄右侧“测试”按钮列并固定较小按钮宽度，把更多横向空间让给标题区，避免 `Agent Files List / Debate Files Read` 这类工具名被过早折成两行。
+- Playground 已进一步收成真正的“工具验收台”：页面不再暴露高级自由调试模式，只保留 AI 选择、单项测试、全部测试、清空结果和最近一次 trace 详情；每个 checklist case 现在都是更复杂的多步文件工具链路（如先 list/search/stat 再 read/write），并且 Playground checklist 的真实模型请求会按 `playground_checklist` 计入该 AI 的 Coding Plan 次数。
+- Playground 工具验收台新增“只重测失败项”按钮：会按当前失败工具串行重跑，不影响已通过项，继续复用单项测试接口、持久化状态和最近一次 trace。
+- Playground checklist 视觉进一步压缩：左侧验收项改成更紧凑的行式布局，状态从文字 pill 改成白/绿/红小圆点，并新增 `?` 悬浮说明按钮，移动到问号上即可查看每项的用途、最近测试时间和失败原因。
+- Playground checklist 交互继续收口：左侧卡片整行点击即可切换右侧详情，去掉了“查看详情”按钮；单项按钮文案收成“测试”，错误信息与 tooltip 都改成强制断行，避免长 provider 报错把卡片或悬浮层撑出边框。
+- 修复 Playground checklist 的 hydration 报错：左侧整行项不再用外层 `button` 包裹内部 `?` / `测试` 按钮，改成带键盘可达性的可点击容器，避免 `<button>` 嵌套 `<button>`。
+- Playground 的 sandbox files 现在改成文件管理器视图：复用了仓库现有的 `fs-tree + react-arborist + treeRoot/treeRow` 文件树体系，初始文件和运行后文件都可以在左侧树里切换、右侧预览；同时把 Playground 左侧主栏进一步压窄，减少 checklist 区域对详情区的挤压。
+- 新增顶级导航 `Playground` 与真实 AI tool sandbox：新增 `/playground` 页面和 `/api/agents/playground` 接口，可直接选择已启用 AI、填写 system/user prompt、勾选文件工具、配置初始 sandbox 文件，并查看 assistant timeline、tool args/result、最终输出、断言结果和运行后文件树。Playground 复用现有 provider/tool schema 与 quota 治理，但所有读写都落在隔离的内存 sandbox，不会污染真实 debate/workspace/strategy 文件。
+- 辩论参与者面板里的“加入新的 AI”下拉现在只显示已启用的 AI 配置；后端 `appendAgentToDebate` 也同步要求 `ai_agents.is_active = true`，避免通过旧缓存或手工请求把已禁用配置继续加进运行中的辩论。
+- 隔离 Next.js 开发与生产构建产物：`next.config.mjs` 现在支持通过 `OPEN_DEBATE_NEXT_DIST_DIR` 指定产物目录，`npm run dev` 会固定使用 `.next-dev`，避免开发态和 `.next` 生产产物共用同一套 `vendor-chunks`/`webpack-runtime` 文件，减少大改后反复出现的 `Cannot find module './vendor-chunks/kysely.js'`、`ChunkLoadError` 等缓存污染问题。
+- 更新 Windows 开发启动器：`scripts/dev-with-summary-worker.cjs` 启动前会同时清理 `.next-dev` 和遗留 `.next`，然后用 `.next-dev` 启动 Next dev，继续保留旧进程清理逻辑。
+- 在 `USER.md` 记录了本仓库的 Next.js 开发环境约定：这类 chunk/module 缺失优先按缓存或旧进程污染处理，并统一通过 `npm run dev` 管理单套开发进程。
+
+- 辩论文件管理新增“文件状态与时间线”能力：新增 `lib/debate-file-status.ts` 统一聚合 debate / debate-agent 文件的创建时间、修改时间、最近读取时间、最近写入人、读取/写入次数和事件时间线；`/api/debates/[id]/file-info` 现在直接返回扩展后的文件状态、版本记录和时间线，新增 `/api/debates/[id]/file-statuses` 给文件树批量渲染状态摘要。
+- 辩论详情页文件树现在会直接显示每个文件的轻量状态摘要：包括当前版本、最近读取和最近更新时间；右键菜单“获取文件信息”已升级为“查看文件状态与时间线”，弹窗里可直接查看文件概况、版本记录和按时间排序的创建/修改/读取事件，不再需要手动翻文件记录页猜单个文件发生过什么。
+
+## 2026-04-24
+
+- AI 配置新增 `Coding Plan` 限额治理：`ai_agents` 现在支持 `usageControlMode` 和共享 `quotaProfileId` 绑定；新增计划池 CRUD/API、导入导出快照复用、5 小时/周/月请求数窗口、平滑节流、手工外部消耗校正，以及 AI 测试/调试在受限时返回结构化 `QUOTA_THROTTLED`。
+- 运行时所有真实 provider HTTP 请求现在都会先走统一配额保留：debate 主流程、summary generation、vote announcement、AI 配置页 test/debug 都会按请求次数计费；超过 60 秒等待时会暂停 debate、延后 summary job，并由新的 `debate_resume_jobs` 后台恢复机制自动续跑。
+- 辩论与 AI 配置可观测性补强：AI 配置页新增 Coding Plan 管理区、计划池摘要和限额模式显示；debate `runtimeNotice` 新增 `quota_wait`；结构化日志补上 `quota.reserve / wait_inline / pause_debate / defer_summary_job / resume_debate / manual_adjustment`，并带计划池、已用配额、恢复时间等上下文。
+- 修复 Windows 开发环境反复出现的 `ChunkLoadError` / `vendor-chunks` / `webpack-runtime` 缓存错乱：`scripts/dev-with-summary-worker.cjs` 现在会在启动前自动清理当前仓库遗留的 `next dev` / `start-server` / `summary-worker` 进程并删除 `.next`，再次执行 `npm run dev` 时会自动顶掉旧实例，避免多个 dev 进程同时占用同一份产物导致模块和 chunk 丢失。
+- 调整 AI 配置页布局：`已有配置` 恢复到右侧主区域，`Coding Plan 池管理` 改为整行放在下方；AI 配置卡片操作按钮改成可换行，长 `Base URL`/文案允许断行，避免卡片边框被撑爆；同时移除了卡片里的“文件”入口，避免把 AI 配置页做成混杂的文件管理入口。
+
+## 2026-04-23
+
+- 修复浏览器错误日志只显示 `{}` 的问题：logger 现在会规范化空错误对象和 DOMException/AbortError 这类非枚举浏览器错误，并把结构化字段序列化进首行日志；辩论详情页读取发言正文失败时会额外记录 action、debateId、turnNumber、HTTP status 和 API error，避免 `failed to load turn detail {}` 无法定位。
+- 继续拆分 `lib/runtime-main.ts`：把官方投票公告生成抽到 `lib/runtime/vote-announcement.ts`，保留原先的 Seat-1 公告席位选择、provider 调用、fallback 公告和文件落盘逻辑；`runtime-main` 只保留 facade 转发与主循环调用，当前主文件降到约 1225 行。
+- 继续拆分 `lib/runtime-main.ts`：把上下文 inline loader、seat/shared context access 自动读取、recent turns 拼装、workflow phase 提示和 idea bank inline 逻辑抽到新文件 `lib/runtime/runtime-inline-loaders.ts`；`runtime-main` 继续保持 facade 转发和 `runDebate` 原调用方式不变，主文件已进一步降到约 1382 行。
+- 修复文件记录页签切换筛选后范围串位的问题：读取 / AI写入 / 总结器写入现在会隔离各自的导航树与已选范围，切换过程中旧 action 的慢请求不会覆盖当前视图，避免从 P1 切到读取再切回 AI写入时自动跳到 P2。
+- 修正生成诊断对工具调用的误判：现在不会再因为 `toolCallsCount > 0` 就直接标成“工具打断”；当模型最终 `finishReason=stop/end_turn` 且正文完整落库时，会显示为“工具后正常结束”，只有最终停止原因仍停在 `tool_calls/function_call` 时才提示工具流程中断。
+- 抽出共享下载 ZIP 基础设施：新增 `lib/zip.ts` 统一负责 ZIP stream 生成、DOS 时间戳、CRC32、central directory 和 ASCII 下载名归一化；辩论文件下载与策略导出下载 route 复用同一实现，保留各自的选择/权限/响应头逻辑不变；新增 `tests/zip.test.ts` 覆盖同步和异步 entries，当前 `npm test` 覆盖 30 条测试。
+- 继续收口 runtime 裸日志：验证码邮件的 console delivery 改用 server logger 记录，剩余 `console.*` 仅保留在 logger 自身 fallback 和 CLI 脚本交互输出里。
+- 扩展高风险路径测试覆盖：新增 `tests/http.test.ts`、`tests/db.test.ts`、`tests/summary-job-worker.test.ts`、`tests/debate-lifecycle.test.ts`、`tests/download-route.test.ts`，直接覆盖 API wrapper 成功/失败 envelope、JSON body fallback、DB recoverable pool error、summary worker 并发配置与连接错误分类、辩论 lifecycle 状态门禁、下载路由空选择校验。
+- 新增 API route wrapper 层：`lib/http.ts` 现在提供 `apiRoute(...)`、统一成功 JSON、JSON body 读取、params 解析、可选 session 鉴权和 route/method/meta 错误上下文，统一收口到 `toErrorResponse(...)`；已迁移 agents、debates、strategies、workspaces、retrieval、model catalog 等 36 个高重复 JSON 路由，下载/SSE/上传等特殊响应路由暂时保留原专用实现。
+- 拆分两个大型客户端详情页：`app/(main)/debates/[id]/page.tsx` 抽出文件树同步 hook、Esc 关闭 hook、注入提示词弹窗和左侧 tab rail；`app/(main)/strategies/[id]/page.tsx` 抽出类型/工具、文件读取规则 data hook、面板挂载 hook、提示词弹窗、概览区和高级操作区。业务逻辑、请求路径和页面文案保持不变，`npx tsc --noEmit --pretty false` 已通过。
+- 继续拆分 `lib/runtime-main.ts`：把 debate file 访问与审计持久化整块抽到新文件 `lib/runtime/debate-file-access.ts`，统一承接 `listMergedSeatFiles`、`recordDebateFileActivity`、`recordImplicitFileReads`、`writeDebateFileWithMode` 以及 `agent_files_* / debate_files_*` 工具入口；`runtime-main` 继续只保留 import/re-export 与上层调用衔接，在不改业务逻辑的前提下主文件已进一步降到约 1936 行。
+- 继续拆分 `lib/runtime-main.ts`：把 summary job 编排与 summary 生成核心再切成 `lib/runtime/summary-orchestration.ts` 和 `lib/runtime/summary-generation.ts`，`enqueue* / retry / live sync / runSummaryJobByRecord` 与 `generateTurnSummary / generateRoundSummary / refreshFactsBoardFromSummaries` 不再混在主文件里；`runtime-main` 维持 facade 和原调用面不变，便于下一步继续处理 `runDebate` 主循环。
+- 继续拆分 `lib/runtime-main.ts`：把边界自动化相关逻辑继续拆成独立子模块，新增 `lib/runtime/workflow-summary.ts`、`lib/runtime/boundary-segments.ts`、`lib/runtime/boundary-votes.ts`，把 `appendWorkflowSummaryLines`、`startAutoSegment*`、投票边界自动开关与 fallback 公告生成从主文件里搬走；`lib/runtime/boundary-automation.ts` 也改成转发这些更细的 runtime 模块，`runtime-main` 在保持 facade 和原调用点不变的前提下进一步降到约 3910 行。
+- 继续拆分 `lib/runtime-main.ts`：把 `finishDebate`、一次性自动恢复、runtime notice、recoverable interruption 判定、summary job 不可重试判定、phase snapshot 持久化这些运行时状态流转逻辑抽到新文件 `lib/runtime/runtime-state.ts`；`runtime-main` 继续保留对外 facade 和原调用点，当前行为不变，但主文件已进一步降到约 4299 行。
+- 继续拆分 `lib/runtime-main.ts`：把响应解析、turn/debate/agent 归一化、上一轮共识计算这些纯函数抽到新文件 `lib/runtime/runtime-parsing.ts`，`runtime-main` 继续只做 import/re-export 和原调用点衔接；这一步不改业务逻辑，也为后面继续拆 `summary / runDebate` 主链路先清出一层稳定边界。
+- 开始拆分 `lib/runtime-main.ts`：先把 `memory / context usage / generation diagnostics` 这一整块子域抽到新文件 `lib/runtime/memory.ts`，并把通用小工具抽到 `lib/runtime/runtime-utils.ts`；`runtime-main` 继续对外 re-export 这些函数，当前调用面不变，但主文件已先从约 4943 行降到约 4490 行，给后续继续拆 `summarizer / runDebate` 主链路腾出空间。
+- 新增统一日志框架：补上 `lib/logger/shared.ts`、`lib/logger/server.ts`、`lib/logger/client.ts`，统一支持 `debug / info / warn / error` 四级日志、结构化字段、错误对象规范化和 child scope；服务端日志继续落到 `log/node-runtime-YYYY-MM-DD.log`，并可通过 `OPEN_DEBATE_LOG_LEVEL` / `NEXT_PUBLIC_OPEN_DEBATE_LOG_LEVEL` 控制输出级别。
+- 补强关键服务端错误日志：`lib/http.ts` 现在会统一记录 API 失败（区分 4xx/5xx）；`lib/db.ts`、`lib/runtime/provider-shared.ts`、`lib/summary-job-worker.ts`、`lib/rate-limit.ts`、`lib/verification.ts`、`scripts/summary-worker.ts` 都已接入统一 logger，数据库连接异常、worker 租约/唤醒失败、runtime 错误、验证码表缺失等关键问题不再只剩裸 `console.error(error)`。
+- 补上核心业务动作日志：辩论的 `start / pause / resume / repair / stop` 现在会记录 lifecycle 日志；对应 API 路由和 `summary-jobs`/验证码发送入口都会带上 `route / method / debateId / action` 等上下文，便于直接从日志定位是哪条接口、哪场 debate、哪个动作出错。
+- 补强前端排障信息：辩论列表页和辩论详情页里原本没有上下文的失败输出，已改成带 action / debateId / turnNumber / file path 等上下文的 browser logger，尤其是“加载更早发言 / 读取正文 / 重置 usage session / 自动恢复设置 / 忽略失败 / 启停辩论 / 读取文件 / 下载 / 读诊断”等关键操作。
+
 ## 2026-04-19
 
 - 修复 summary worker 在本地 Postgres 重启/恢复期的进程级崩溃：`pg Pool` 现在会显式监听并吞掉空闲连接上的 `error` 事件，避免 `ECONNRESET` / `57P03 the database system is in recovery mode` 直接作为未处理事件把 Node 进程打死；同时数据库单例会在这类连接级故障后自动失效并重建，`ensureDbReady()` 的 schema 初始化失败也不再把 rejected promise 永久缓存住，数据库恢复后后续请求与 summary worker tick 可以自行重连继续跑。
@@ -156,6 +244,7 @@
 - 2026-04-12: 策略页切换动画缩减为纯淡入淡出（80ms），进一步降低重绘开销。
 - 2026-04-12: 策略页切换改为无动画的显示/隐藏，避免切换掉帧。
 - 2026-04-12: 策略页切换改为惰性挂载 + startTransition，降低主线程阻塞。
+- 2026-04-25: Playground 工具验收台的“测试集”区域新增“全选”选项，可一键选中全部测试集；取消全选时会回退到默认测试集，继续保持至少选中一组测试集的约束。
 - 2026-04-12: 策略页隐藏面板启用 `contain` 隔离，进一步减少重绘开销。
 - 2026-04-12: 策略页面板滚动条预留空间，避免首次切换引发边框抖动。
 - 2026-04-12: 策略页切换改为绝对定位叠层，避免显示/隐藏触发布局抖动。
@@ -193,3 +282,7 @@
 - 2026-04-18: 修复运行中强停进程后的重复发言问题：`runDebate` 启动时会先对账 `debate_turns` 与 `debates.current_turn`，若检测到“本回合已落盘但 current_turn 尚未推进”，会自动补齐轮次、token、共识与阶段快照，再继续运行，避免同一席位在服务恢复后把刚才那回重新生成一遍。
 - 2026-04-21: 修复三处长期运行内存/状态膨胀风险：辩论 SSE 路由补上 `ReadableStream.cancel()` + 幂等 teardown，避免全局 live emitter 残留订阅；辩论详情页投票结果改为按需加载并限制本地缓存窗口，避免打开长辩论后把所有 round 的 vote JSON 常驻浏览器内存；运行注册表新增 heartbeat stale reap，防止异常退出后 `activeDebateRuns` 长期残留并阻塞后续运行。
 - 2026-04-21: 继续修复 summary worker 的长期连接泄漏风险：`LISTEN/NOTIFY` wake listener 在数据库连接报错或启动失败时，现在会统一 `unlisten + release` 旧 `PoolClient`，停止 worker 时也复用同一套释放逻辑，避免数据库抖动后坏掉的 wake client 挂在进程里并随着重连次数累积。
+- 2026-04-22: 修复辩论详情页状态区彩色栏之间个别贴连的问题：状态摘要区改为统一的纵向堆叠容器，给 `共识 / 阶段 / 自动恢复 / 总结任务` 等卡片提供一致的垂直间距，避免部分卡片因为没有自带 margin 而直接挤在一起。
+- 2026-04-22: 修复移动端长错误状态把侧栏撑出边框的问题：状态区顶部的“当前席位 + 实时状态”改为上下堆叠，并给状态文本开启 `overflow-wrap:anywhere`，避免模型/接口返回的长错误 JSON 或 request id 把整个卡片横向撑爆。
+- 2026-04-22: 修复 OpenAI 兼容 provider 因 `max_tokens` 超限直接报 `InvalidParameter` 的问题：运行时现在会按 provider 统一夹紧请求输出上限，OpenAI 路径默认和显式配置都不会超过 `32768`；agent 创建/更新/导入也新增同样的上限校验，并在读取旧配置时把超限 `max_output_tokens` 压到实际可用范围，避免库里残留的旧脏值继续把运行中的辩论打崩。
+- 2026-04-26: 修复 harness 首轮 policy 与 prompt 已读共享文件脱节的问题：provider 编排现在会先收集本 turn 在 system/prompt 阶段隐式读到的可写共享文件，再把这些精确文件路径灌入 seat working set 并扩展运行时 `allowedOutputPaths`；同时 harness policy 只把真实可写的 shared target 视为 `known targets`，不再被 seat 文件或 read-only shared 文件误导，且 action 指令只展示当前实际允许的 JSON shape，避免再次出现 `ACTION_NOT_ALLOWED: write_append` 这类首轮错配。

@@ -4,6 +4,10 @@ export type DebateStatus = "pending" | "running" | "paused" | "completed" | "sto
 /** AI provider type */
 export type Provider = "openai" | "anthropic";
 export type AgentConnectivityCheckStatus = "reachable" | "failed";
+export type AgentUsageControlMode = "none" | "coding_plan";
+export type QuotaProfileType = "coding_plan";
+export type QuotaPacingMode = "percent" | "absolute";
+export type QuotaWindowType = "rolling_5h" | "week" | "month";
 
 /** Retrieval/embedding provider type */
 export type RetrievalProvider = "openai";
@@ -38,9 +42,54 @@ export type AgentRecord = {
   lastConnectivityCheckStatus: AgentConnectivityCheckStatus | null;
   lastConnectivityCheckAt: string | null;
   lastConnectivityCheckMessage: string | null;
+  usageControlMode: AgentUsageControlMode;
+  quotaProfileId: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+};
+
+export type QuotaProfileRecord = {
+  id: string;
+  userId: string;
+  name: string;
+  profileType: QuotaProfileType;
+  requestLimit5h: number;
+  requestLimitWeek: number;
+  requestLimitMonth: number;
+  pacingMode: QuotaPacingMode;
+  pacingValue: number;
+  resetTimezone: string;
+  nextRequestNotBeforeAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+};
+
+export type QuotaProfileSummary = {
+  profileId: string;
+  profileName: string;
+  limit5h: number;
+  used5h: number;
+  remaining5h: number;
+  window5hStartAt: string | null;
+  window5hEndAt: string | null;
+  limitWeek: number;
+  usedWeek: number;
+  remainingWeek: number;
+  weekWindowStartAt: string;
+  weekWindowEndAt: string;
+  limitMonth: number;
+  usedMonth: number;
+  remainingMonth: number;
+  monthWindowStartAt: string;
+  monthWindowEndAt: string;
+  pacingMode: QuotaPacingMode;
+  pacingValue: number;
+  pacingTarget5h: number;
+  nextAvailableAt: string | null;
+  blockingReason: "pacing" | "rolling_5h_limit" | "week_limit" | "month_limit" | null;
+  effectiveIntervalMs: number;
 };
 
 /** Debate session record */
@@ -59,7 +108,7 @@ export type DebateRecord = {
   workflowPhaseKind: "analysis" | "deliberation" | "finalization_vote" | "finalization" | null;
   workflowPhaseTitle: string | null;
   workflowPhaseRound: number | null;
-  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | null;
+  runtimeNoticeKind: "recovering" | "recovered" | "interrupted" | "quota_wait" | null;
   runtimeNoticeMessage: string | null;
   runtimeNoticeAt: string | null;
   lastErrorCode: string | null;

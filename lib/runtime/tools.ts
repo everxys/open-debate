@@ -102,8 +102,8 @@ export async function loadOpenVoteInline(userId: string, debateId: string, seed?
       `- Prompt: ${openVote.prompt}`,
       "- Rule: every seat must choose the approval option before the debate can enter the consolidation phase.",
       `- Options:\n${options}`,
-      "- How to vote: call tool debate_vote_cast with { choice: '...', reason?: '...' }",
-      "- After all seats voted, call tool debate_vote_close to publish the official result."
+      '- How to vote: emit one ` ```debate-action``` ` JSON block like { "action": "vote_cast", "choice": "...", "reason": "optional" }',
+      "- Do not manually close the vote. The runtime will handle official close/result publication after all required ballots land."
     ].join("\n");
   }
   return [
@@ -113,8 +113,8 @@ export async function loadOpenVoteInline(userId: string, debateId: string, seed?
     ...(openVote.meta?.tieRound ? [`- Tie round: ${openVote.meta.tieRound}`] : []),
     `- Prompt: ${openVote.prompt}`,
     `- Options:\n${options}`,
-    "- How to vote: call tool debate_vote_cast with { choice: '...', reason?: '...' }",
-    "- After all seats voted, call tool debate_vote_close to publish the official result."
+    '- How to vote: emit one ` ```debate-action``` ` JSON block like { "action": "vote_cast", "choice": "...", "reason": "optional" }',
+    "- Do not manually close the vote. The runtime will handle official close/result publication after all required ballots land."
   ].join("\n");
 }
 

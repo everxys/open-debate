@@ -1,5 +1,7 @@
 import { loadEnvConfig } from "@next/env";
 
+import { writeServerLog } from "../lib/logger/server";
+
 loadEnvConfig(process.cwd(), process.env.NODE_ENV !== "production");
 process.env.OPEN_DEBATE_DISABLE_EMBEDDED_SUMMARY_WORKER = "1";
 
@@ -10,7 +12,7 @@ async function main() {
 
   if (process.argv.includes("--once")) {
     const result = await runSummaryJobWorkerOnce({ reason: "standalone_worker_once", mode: "standalone" });
-    console.log("summary worker tick completed", result);
+    await writeServerLog("info", "summary-worker.cli", "summary worker tick completed", { result });
     process.exit(0);
   }
 
@@ -20,10 +22,10 @@ async function main() {
     unrefTimer: false
   });
 
-  console.log("summary worker started", started);
+  await writeServerLog("info", "summary-worker.cli", "summary worker started", { started });
 
   async function shutdown(signal: string) {
-    console.log(`summary worker stopping: ${signal}`);
+    await writeServerLog("info", "summary-worker.cli", "summary worker stopping", { signal });
     await stopSummaryJobWorkerLoop();
     process.exit(0);
   }
@@ -35,6 +37,8 @@ async function main() {
 }
 
 void main().catch((error) => {
-  console.error("summary worker crashed", error);
-  process.exit(1);
+  void (async () => {
+    await writeServerLog("error", "summary-worker.cli", "summary worker crashed", { error });
+    process.exit(1);
+  })();
 });

@@ -3,6 +3,12 @@ import { sql } from "kysely";
 import { decryptSecret, encryptSecret, maskSecret } from "@/lib/crypto";
 import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
+import {
+  ensureQuotaAvailableOrThrowAppError,
+  ensureQuotaProfileBindingForUser,
+  getOrCreateImportedQuotaProfile
+} from "@/lib/quota-control";
+import { sanitizeProviderMaxOutputTokens } from "@/lib/token-limits";
 import { requireSessionUser } from "@/lib/auth";
 import type { AgentConnectivityCheckStatus, AgentRecord, Provider } from "@/lib/types";
 import {
@@ -31,6 +37,8 @@ function toAgentView(agent: AgentRecord) {
     lastConnectivityCheckStatus: agent.lastConnectivityCheckStatus,
     lastConnectivityCheckAt: agent.lastConnectivityCheckAt,
     lastConnectivityCheckMessage: agent.lastConnectivityCheckMessage,
+    usageControlMode: agent.usageControlMode,
+    quotaProfileId: agent.quotaProfileId,
     isActive: agent.isActive,
     createdAt: agent.createdAt,
     updatedAt: agent.updatedAt
@@ -54,15 +62,19 @@ function parseConnectivityCheckStatus(value: unknown): AgentConnectivityCheckSta
 
 /** Normalize DB row to AgentRecord */
 function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
+  const provider = row.provider as Provider;
   return {
     id: String(row.id),
     userId: String(row.user_id),
     name: String(row.name),
-    provider: row.provider as Provider,
+    provider,
     model: String(row.model),
     contextLength: parseNullableInt(row.context_length ?? row.contextLength),
     maxInputTokens: parseNullableInt(row.max_input_tokens ?? row.maxInputTokens),
-    maxOutputTokens: parseNullableInt(row.max_output_tokens ?? row.maxOutputTokens),
+    maxOutputTokens: sanitizeProviderMaxOutputTokens(
+      provider,
+      parseNullableInt(row.max_output_tokens ?? row.maxOutputTokens)
+    ),
     baseUrl: String(row.base_url),
     apiKeyEncrypted: String(row.api_key_encrypted),
     apiKeyMasked: String(row.api_key_masked),
@@ -73,6 +85,9 @@ function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
     lastConnectivityCheckMessage: parseNullableString(
       row.last_connectivity_check_message ?? row.lastConnectivityCheckMessage
     ),
+    usageControlMode:
+      row.usage_control_mode === "coding_plan" || row.usageControlMode === "coding_plan" ? "coding_plan" : "none",
+    quotaProfileId: parseNullableString(row.quota_profile_id ?? row.quotaProfileId),
     isActive: Boolean(row.is_active),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
@@ -156,6 +171,14 @@ async function callProviderEndpoint(input: {
   baseUrl: string;
   apiKey: string;
   model: string;
+  quotaRequest?: {
+    userId: string;
+    usageControlMode: AgentRecord["usageControlMode"];
+    quotaProfileId: string | null;
+    requestKind: string;
+    agentId?: string | null;
+    agentName?: string | null;
+  } | null;
   buildBody: (provider: Provider, model: string) => string;
 }) {
   const urls = resolveTestUrlCandidates(input.provider, input.baseUrl);
@@ -163,6 +186,16 @@ async function callProviderEndpoint(input: {
 
   for (let index = 0; index < urls.length; index += 1) {
     const url = urls[index];
+    if (input.quotaRequest) {
+      await ensureQuotaAvailableOrThrowAppError({
+        userId: input.quotaRequest.userId,
+        usageControlMode: input.quotaRequest.usageControlMode,
+        quotaProfileId: input.quotaRequest.quotaProfileId,
+        requestKind: input.quotaRequest.requestKind,
+        agentId: input.quotaRequest.agentId ?? null,
+        agentName: input.quotaRequest.agentName ?? null
+      });
+    }
     let response: Response;
     try {
       response = await fetch(url, {
@@ -213,6 +246,7 @@ async function callProviderHealthCheck(input: {
   baseUrl: string;
   apiKey: string;
   model: string;
+  quotaRequest?: Parameters<typeof callProviderEndpoint>[0]["quotaRequest"];
 }) {
   const response = await callProviderEndpoint({
     ...input,
@@ -276,6 +310,7 @@ async function callProviderDebug(input: {
   baseUrl: string;
   apiKey: string;
   model: string;
+  quotaRequest?: Parameters<typeof callProviderEndpoint>[0]["quotaRequest"];
 }) {
   const response = await callProviderEndpoint({
     ...input,
@@ -352,6 +387,45 @@ export async function exportAgentsPack(input: unknown) {
   }
 
   const agents = agentRows.map((row) => normalizeAgentRow(row as Record<string, unknown>));
+  const quotaProfileIds = Array.from(
+    new Set(
+      agents
+        .map((agent) => agent.quotaProfileId)
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    )
+  );
+  const quotaProfilesById = new Map<
+    string,
+    {
+      name: string;
+      requestLimit5h: number;
+      requestLimitWeek: number;
+      requestLimitMonth: number;
+      pacingMode: "percent" | "absolute";
+      pacingValue: number;
+      resetTimezone: string;
+    }
+  >();
+  if (quotaProfileIds.length > 0) {
+    const quotaRows = await db
+      .selectFrom("ai_quota_profiles")
+      .selectAll()
+      .where("user_id", "=", session.userId)
+      .where("id", "in", quotaProfileIds)
+      .where("deleted_at", "is", null)
+      .execute();
+    for (const row of quotaRows) {
+      quotaProfilesById.set(String(row.id), {
+        name: String(row.name),
+        requestLimit5h: Number(row.request_limit_5h),
+        requestLimitWeek: Number(row.request_limit_week),
+        requestLimitMonth: Number(row.request_limit_month),
+        pacingMode: row.pacing_mode === "absolute" ? "absolute" : "percent",
+        pacingValue: Number(row.pacing_value),
+        resetTimezone: String(row.reset_timezone ?? "Asia/Shanghai")
+      });
+    }
+  }
 
   let fileRows: Array<{ ai_agent_id: string; path: string; content: string }> = [];
   try {
@@ -394,6 +468,11 @@ export async function exportAgentsPack(input: unknown) {
       maxOutputTokens: agent.maxOutputTokens,
       baseUrl: agent.baseUrl,
       isActive: agent.isActive,
+      usageControlMode: agent.usageControlMode,
+      quotaProfile:
+        agent.usageControlMode === "coding_plan" && agent.quotaProfileId
+          ? (quotaProfilesById.get(agent.quotaProfileId) ?? null)
+          : null,
       apiKey: decryptSecret(agent.apiKeyEncrypted),
       files: filesByAgentId.get(agent.id) ?? []
     }))
@@ -408,6 +487,7 @@ export async function importAgentsPack(input: unknown) {
 
   const createdAgents = await db.transaction().execute(async (trx) => {
     const items: AgentRecord[] = [];
+    const quotaProfileCache = new Map<string, string>();
     for (const item of data.agents) {
       const importedContextLength =
         typeof (item as { contextLength?: unknown }).contextLength === "number"
@@ -422,6 +502,26 @@ export async function importAgentsPack(input: unknown) {
           ? (item as { maxOutputTokens: number }).maxOutputTokens
           : null;
 
+      let usageControlMode: AgentRecord["usageControlMode"] = item.usageControlMode ?? "none";
+      let quotaProfileId: string | null = null;
+      if (usageControlMode === "coding_plan" && item.quotaProfile) {
+        const cacheKey = JSON.stringify(item.quotaProfile);
+        if (quotaProfileCache.has(cacheKey)) {
+          quotaProfileId = quotaProfileCache.get(cacheKey) ?? null;
+        } else {
+          const profile = await getOrCreateImportedQuotaProfile({
+            executor: trx,
+            userId: session.userId,
+            now,
+            snapshot: item.quotaProfile
+          });
+          quotaProfileId = profile.id;
+          quotaProfileCache.set(cacheKey, profile.id);
+        }
+      } else {
+        usageControlMode = "none";
+      }
+
       const inserted = await trx
         .insertInto("ai_agents")
         .values({
@@ -431,11 +531,13 @@ export async function importAgentsPack(input: unknown) {
           model: item.model,
           context_length: importedContextLength,
           max_input_tokens: importedMaxInputTokens,
-          max_output_tokens: importedMaxOutputTokens,
+          max_output_tokens: sanitizeProviderMaxOutputTokens(item.provider, importedMaxOutputTokens),
           base_url: item.baseUrl,
           api_key_encrypted: encryptSecret(item.apiKey),
           api_key_masked: maskSecret(item.apiKey),
           ...resetConnectivityCheckFields(),
+          usage_control_mode: usageControlMode,
+          quota_profile_id: quotaProfileId,
           is_active: item.isActive ?? true,
           created_at: now,
           updated_at: now,
@@ -701,11 +803,13 @@ export async function duplicateAgent(id: string) {
         model: source.model,
         context_length: source.contextLength,
         max_input_tokens: source.maxInputTokens,
-        max_output_tokens: source.maxOutputTokens,
+        max_output_tokens: sanitizeProviderMaxOutputTokens(source.provider, source.maxOutputTokens),
         base_url: source.baseUrl,
         api_key_encrypted: source.apiKeyEncrypted,
         api_key_masked: source.apiKeyMasked,
         ...resetConnectivityCheckFields(),
+        usage_control_mode: source.usageControlMode,
+        quota_profile_id: source.quotaProfileId,
         is_active: source.isActive,
         created_at: now,
         updated_at: now,
@@ -737,6 +841,11 @@ export async function createAgent(input: unknown) {
   const data = createAgentSchema.parse(input);
   const session = await requireSessionUser();
   const now = new Date().toISOString();
+  const quotaBinding = await ensureQuotaProfileBindingForUser(
+    session.userId,
+    data.usageControlMode,
+    data.quotaProfileId ?? null
+  );
   const db = await ensureDb();
   const result = await db
     .insertInto("ai_agents")
@@ -747,11 +856,13 @@ export async function createAgent(input: unknown) {
       model: data.model,
       context_length: data.contextLength ?? null,
       max_input_tokens: data.maxInputTokens ?? null,
-      max_output_tokens: data.maxOutputTokens ?? null,
+      max_output_tokens: sanitizeProviderMaxOutputTokens(data.provider, data.maxOutputTokens ?? null),
       base_url: data.baseUrl,
       api_key_encrypted: encryptSecret(data.apiKey),
       api_key_masked: maskSecret(data.apiKey),
       ...resetConnectivityCheckFields(),
+      usage_control_mode: quotaBinding.usageControlMode,
+      quota_profile_id: quotaBinding.quotaProfileId,
       is_active: true,
       created_at: now,
       updated_at: now,
@@ -777,6 +888,8 @@ export async function updateAgent(id: string, input: unknown) {
   const hasModel = Object.prototype.hasOwnProperty.call(data, "model");
   const hasBaseUrl = Object.prototype.hasOwnProperty.call(data, "baseUrl");
   const hasApiKey = Object.prototype.hasOwnProperty.call(data, "apiKey");
+  const hasUsageControlMode = Object.prototype.hasOwnProperty.call(data, "usageControlMode");
+  const hasQuotaProfileId = Object.prototype.hasOwnProperty.call(data, "quotaProfileId");
   const contextLengthRaw = (data as { contextLength?: unknown }).contextLength;
   const maxInputTokensRaw = (data as { maxInputTokens?: unknown }).maxInputTokens;
   const maxOutputTokensRaw = (data as { maxOutputTokens?: unknown }).maxOutputTokens;
@@ -804,11 +917,18 @@ export async function updateAgent(id: string, input: unknown) {
   const nextMaxOutputTokens =
     hasMaxOutputTokens
       ? typeof maxOutputTokensRaw === "number"
-        ? maxOutputTokensRaw
+        ? sanitizeProviderMaxOutputTokens(data.provider ?? current.provider, maxOutputTokensRaw)
         : maxOutputTokensRaw === null
           ? null
           : current.maxOutputTokens
       : current.maxOutputTokens;
+  const nextUsageControlMode =
+    hasUsageControlMode && data.usageControlMode ? data.usageControlMode : current.usageControlMode;
+  const nextQuotaProfileId =
+    hasUsageControlMode || hasQuotaProfileId
+      ? ((data as { quotaProfileId?: string | null }).quotaProfileId ?? null)
+      : current.quotaProfileId;
+  const quotaBinding = await ensureQuotaProfileBindingForUser(session.userId, nextUsageControlMode, nextQuotaProfileId);
 
   const db = await ensureDb();
   const result = await db
@@ -823,6 +943,8 @@ export async function updateAgent(id: string, input: unknown) {
       base_url: data.baseUrl ?? current.baseUrl,
       api_key_encrypted: data.apiKey ? encryptSecret(data.apiKey) : current.apiKeyEncrypted,
       api_key_masked: data.apiKey ? maskSecret(data.apiKey) : current.apiKeyMasked,
+      usage_control_mode: quotaBinding.usageControlMode,
+      quota_profile_id: quotaBinding.quotaProfileId,
       ...(shouldResetConnectivityCheck
         ? resetConnectivityCheckFields()
         : {
@@ -886,7 +1008,15 @@ export async function testAgentConnection(id: string) {
       provider: agent.provider,
       baseUrl: agent.baseUrl,
       apiKey: decryptSecret(agent.apiKeyEncrypted),
-      model: agent.model
+      model: agent.model,
+      quotaRequest: {
+        userId: agent.userId,
+        usageControlMode: agent.usageControlMode,
+        quotaProfileId: agent.quotaProfileId,
+        requestKind: "agent_test",
+        agentId: agent.id,
+        agentName: agent.name
+      }
     });
     const message = `${agent.name} is reachable`;
     await recordAgentConnectivityCheck(id, { status: "reachable", message });
@@ -905,7 +1035,15 @@ export async function testAgentConnectionDebug(id: string) {
       provider: agent.provider,
       baseUrl: agent.baseUrl,
       apiKey: decryptSecret(agent.apiKeyEncrypted),
-      model: agent.model
+      model: agent.model,
+      quotaRequest: {
+        userId: agent.userId,
+        usageControlMode: agent.usageControlMode,
+        quotaProfileId: agent.quotaProfileId,
+        requestKind: "agent_test_debug",
+        agentId: agent.id,
+        agentName: agent.name
+      }
     });
     await recordAgentConnectivityCheck(id, { status: "reachable", message: `${agent.name} debug check passed` });
     return { ...result, agentId: agent.id, agentName: agent.name, model: agent.model };
@@ -918,11 +1056,18 @@ export async function testAgentConnectionDebug(id: string) {
 
 export async function testAgentConfig(input: unknown) {
   const data = testAgentConfigSchema.parse(input);
-  await requireSessionUser();
+  const session = await requireSessionUser();
   return callProviderHealthCheck({
     provider: data.provider,
     baseUrl: data.baseUrl,
     apiKey: data.apiKey,
-    model: data.model
+    model: data.model,
+    quotaRequest: {
+      userId: session.userId,
+      usageControlMode: data.usageControlMode ?? "none",
+      quotaProfileId: data.quotaProfileId ?? null,
+      requestKind: "agent_test_config",
+      agentName: data.model
+    }
   });
 }

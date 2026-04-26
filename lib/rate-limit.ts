@@ -2,6 +2,7 @@ import { sql } from "kysely";
 
 import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
+import { createServerLogger } from "@/lib/logger/server";
 import { getClientIp } from "@/lib/request";
 
 type IpRateLimitConfig = {
@@ -9,6 +10,8 @@ type IpRateLimitConfig = {
   limit: number;
   windowSeconds: number;
 };
+
+const rateLimitLogger = createServerLogger("rate-limit");
 
 export async function enforceIpRateLimit(request: Request, config: IpRateLimitConfig) {
   const ip = getClientIp(request) ?? "unknown";
@@ -37,7 +40,9 @@ export async function enforceIpRateLimit(request: Request, config: IpRateLimitCo
   } catch (error) {
     const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : null;
     if (code === "42P01") {
-      console.warn("rate_limit_counters table missing; skipping rate limit");
+      rateLimitLogger.warn("rate_limit_counters table missing; skipping rate limit", {
+        action: config.action
+      });
       return;
     }
     throw error;

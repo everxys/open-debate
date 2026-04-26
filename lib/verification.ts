@@ -4,7 +4,10 @@ import { sql } from "kysely";
 
 import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
+import { createServerLogger } from "@/lib/logger/server";
 import { hashVerificationCode, verifyVerificationCode } from "@/lib/password";
+
+const verificationLogger = createServerLogger("verification");
 
 export function generateSixDigitCode() {
   const value = randomInt(0, 1_000_000);
@@ -54,7 +57,7 @@ export async function createSignupVerificationCode(input: {
       .execute();
   } catch (error) {
     if (isPgUndefinedTable(error)) {
-      console.error("DB schema missing: email_verification_codes", error);
+      verificationLogger.error("DB schema missing: email_verification_codes", { error });
       throw new AppError(
         "DB_MIGRATION_REQUIRED",
         500,

@@ -1,6 +1,5 @@
 import { query } from "@/lib/db";
-import { toErrorResponse, AppError } from "@/lib/http";
-import { readSession } from "@/lib/session";
+import { apiRoute, AppError, jsonSuccess, readJsonBody } from "@/lib/http";
 import {
   enqueueDebateSummaryJob,
   FACTS_BOARD_JOB_KEY,
@@ -38,49 +37,44 @@ async function resolveRoundSummaryDependsOnKeys(input: {
   return Array.from({ length: input.participantCount }, (_, index) => `turn:${startTurn + index}`);
 }
 
-export async function GET(
-  _request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const session = await readSession();
-    if (!session) throw new AppError("AUTH_REQUIRED", 401, "Unauthorized");
-    const { id } = await context.params;
-    await requireDebateOwnership(id, session.userId);
-    const jobs = await listDebateSummaryJobs(id);
-    return new Response(JSON.stringify({ success: true, data: jobs }), {
-      headers: { "Content-Type": "application/json" }
-    });
-  } catch (error) {
-    return toErrorResponse(error);
+export const GET = apiRoute<{ id: string }>(
+  {
+    route: "/api/debates/[id]/summary-jobs",
+    method: "GET",
+    requireSession: true,
+    logMeta: ({ params }) => ({ debateId: params.id })
+  },
+  async ({ params, session }) => {
+    await requireDebateOwnership(params.id, session!.userId);
+    const jobs = await listDebateSummaryJobs(params.id);
+    return jsonSuccess(jobs);
   }
-}
+);
 
-export async function POST(
-  request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const session = await readSession();
-    if (!session) throw new AppError("AUTH_REQUIRED", 401, "Unauthorized");
-    const { id } = await context.params;
-    await requireDebateOwnership(id, session.userId);
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+export const POST = apiRoute<{ id: string }>(
+  {
+    route: "/api/debates/[id]/summary-jobs",
+    method: "POST",
+    requireSession: true,
+    logMeta: ({ params }) => ({ debateId: params.id })
+  },
+  async ({ request, params, session, setLogMeta }) => {
+    await requireDebateOwnership(params.id, session!.userId);
+    const body = await readJsonBody<Record<string, unknown>>(request, {});
     const action = String(body.action ?? "");
+    setLogMeta(action ? { action } : undefined);
 
     if (action === "retry_failed") {
-      const jobs = await retryFailedDebateSummaryJobs(id);
-      return new Response(JSON.stringify({ success: true, data: jobs }), {
-        headers: { "Content-Type": "application/json" }
-      });
+      const jobs = await retryFailedDebateSummaryJobs(params.id);
+      return jsonSuccess(jobs);
     }
 
-    const debateResult = await query<{ question: string }>("select question from debates where id = $1", [id]);
+    const debateResult = await query<{ question: string }>("select question from debates where id = $1", [params.id]);
     const debateQuestion = String(debateResult.rows[0]?.question ?? "");
-    const workflow = await loadDebateWorkflow(session.userId, id);
+    const workflow = await loadDebateWorkflow(session!.userId, params.id);
     const fallbackDebateAgentResult = await query<{ id: string }>(
       "select id from debate_agents where debate_id = $1 order by turn_order asc limit 1",
-      [id]
+      [params.id]
     );
     const fallbackDebateAgentId = String(fallbackDebateAgentResult.rows[0]?.id ?? "");
 
@@ -103,22 +97,22 @@ export async function POST(
            where t.debate_id = $1 and t.turn_number = $2
            limit 1
         `,
-        [id, turnNumber]
+        [params.id, turnNumber]
       );
       if ((turnResult.rowCount ?? 0) !== 1) throw new AppError("NOT_FOUND", 404, "Turn not found");
       const row = turnResult.rows[0];
-      const agentCountResult = await query<{ count: string }>("select count(*)::text as count from debate_agents where debate_id = $1", [id]);
+      const agentCountResult = await query<{ count: string }>("select count(*)::text as count from debate_agents where debate_id = $1", [params.id]);
       const agentCount = Math.max(1, Number(agentCountResult.rows[0]?.count ?? 1));
       const roundNumber = Math.floor((turnNumber - 1) / agentCount) + 1;
       const job = await enqueueDebateSummaryJob({
-        debateId: id,
+        debateId: params.id,
         kind: "turn_summary",
         jobKey: `turn:${turnNumber}`,
         turnNumber,
         roundNumber,
         payload: {
-          userId: session.userId,
-          debateId: id,
+          userId: session!.userId,
+          debateId: params.id,
           debateAgentId: String(row.debate_agent_id),
           debateQuestion,
           roundNumber,
@@ -129,7 +123,7 @@ export async function POST(
         },
         force: true
       });
-      return new Response(JSON.stringify({ success: true, data: job }), { headers: { "Content-Type": "application/json" } });
+      return jsonSuccess(job);
     }
 
     if (action === "rebuild_round") {
@@ -137,31 +131,31 @@ export async function POST(
       if (!Number.isFinite(roundNumber) || roundNumber <= 0) {
         throw new AppError("VALIDATION_ERROR", 400, "roundNumber is required");
       }
-      const agentCountResult = await query<{ count: string }>("select count(*)::text as count from debate_agents where debate_id = $1", [id]);
+      const agentCountResult = await query<{ count: string }>("select count(*)::text as count from debate_agents where debate_id = $1", [params.id]);
       const participantCount = Math.max(1, Number(agentCountResult.rows[0]?.count ?? 1));
       const dependsOnKeys = await resolveRoundSummaryDependsOnKeys({
-        userId: session.userId,
-        debateId: id,
+        userId: session!.userId,
+        debateId: params.id,
         roundNumber,
         participantCount
       });
       const turnSummaryContents = await Promise.all(
         dependsOnKeys.map(async (key) => {
           const turnNumber = Number(key.replace(/^turn:/, ""));
-          return readDebateFile(session.userId, id, getTurnSummaryPath(workflow, roundNumber, turnNumber));
+          return readDebateFile(session!.userId, params.id, getTurnSummaryPath(workflow, roundNumber, turnNumber));
         })
       );
       const allTurnSummariesReady = turnSummaryContents.every((content) => Boolean(content?.trim()));
       const job = await enqueueDebateSummaryJob({
-        debateId: id,
+        debateId: params.id,
         kind: "round_summary",
         jobKey: `round:${roundNumber}`,
         roundNumber,
         dependsOnKeys,
         status: allTurnSummariesReady ? "queued" : "blocked",
         payload: {
-          userId: session.userId,
-          debateId: id,
+          userId: session!.userId,
+          debateId: params.id,
           debateAgentId: body.debateAgentId ? String(body.debateAgentId) : fallbackDebateAgentId,
           debateQuestion,
           endedRound: roundNumber,
@@ -170,11 +164,11 @@ export async function POST(
         },
         force: true
       });
-      return new Response(JSON.stringify({ success: true, data: job }), { headers: { "Content-Type": "application/json" } });
+      return jsonSuccess(job);
     }
 
     if (action === "rebuild_facts") {
-      const jobs = await listDebateSummaryJobs(id);
+      const jobs = await listDebateSummaryJobs(params.id);
       const latestRound = jobs
         .filter((job) => job.kind === "round_summary" && job.completedAt)
         .sort((a, b) => (b.roundNumber ?? 0) - (a.roundNumber ?? 0))[0];
@@ -185,7 +179,7 @@ export async function POST(
       if (latestRound?.roundNumber) {
         roundNumber = latestRound.roundNumber;
         sourceLabel = `round-${roundNumber}`;
-        sourceSummary = (await readDebateFile(session.userId, id, getRoundSummaryPath(workflow, roundNumber)))?.trim() ?? "";
+        sourceSummary = (await readDebateFile(session!.userId, params.id, getRoundSummaryPath(workflow, roundNumber)))?.trim() ?? "";
       }
       if (!sourceSummary) {
         const latestTurn = jobs
@@ -196,18 +190,18 @@ export async function POST(
           roundNumber = latestTurn.roundNumber;
           sourceLabel = `turn-${turnNumber}`;
           sourceSummary =
-            (await readDebateFile(session.userId, id, getTurnSummaryPath(workflow, roundNumber, turnNumber)))?.trim() ?? "";
+            (await readDebateFile(session!.userId, params.id, getTurnSummaryPath(workflow, roundNumber, turnNumber)))?.trim() ?? "";
         }
       }
       const job = await enqueueDebateSummaryJob({
-        debateId: id,
+        debateId: params.id,
         kind: "facts_board",
         jobKey: FACTS_BOARD_JOB_KEY,
         turnNumber,
         roundNumber,
         payload: {
-          userId: session.userId,
-          debateId: id,
+          userId: session!.userId,
+          debateId: params.id,
           debateAgentId: body.debateAgentId ? String(body.debateAgentId) : fallbackDebateAgentId,
           debateQuestion,
           sourceLabel,
@@ -222,11 +216,9 @@ export async function POST(
         runAfter: new Date().toISOString(),
         force: true
       });
-      return new Response(JSON.stringify({ success: true, data: job }), { headers: { "Content-Type": "application/json" } });
+      return jsonSuccess(job);
     }
 
     throw new AppError("VALIDATION_ERROR", 400, "Unsupported action");
-  } catch (error) {
-    return toErrorResponse(error);
   }
-}
+);

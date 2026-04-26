@@ -1,15 +1,10 @@
-import { NextResponse } from "next/server";
-
 import { listDebateAllFiles } from "@/lib/debates";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess } from "@/lib/http";
 
-export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
-  try {
-    const { id } = await context.params;
-    const entries = await listDebateAllFiles(id);
-    return NextResponse.json({ success: true, data: entries });
-  } catch (error) {
-    return toErrorResponse(error);
+export const GET = apiRoute<{ id: string }>(
+  { route: "/api/debates/[id]/all-files", method: "GET", logMeta: ({ params }) => ({ debateId: params.id }) },
+  async ({ params }) => {
+    const entries = await listDebateAllFiles(params.id);
+    return jsonSuccess(entries);
   }
-}
-
+);

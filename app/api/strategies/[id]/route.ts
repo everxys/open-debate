@@ -1,45 +1,29 @@
-import { NextResponse } from "next/server";
-
 import { deleteStrategy, getStrategyDetail, updateStrategy } from "@/lib/strategies";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess, readJsonBody } from "@/lib/http";
 
-export async function GET(
-  _request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
-    const strategy = await getStrategyDetail(id);
-    return NextResponse.json({ success: true, data: strategy });
-  } catch (error) {
-    return toErrorResponse(error);
+const routeMeta = ({ params }: { params: { id: string } }) => ({ strategyId: params.id });
+
+export const GET = apiRoute<{ id: string }>(
+  { route: "/api/strategies/[id]", method: "GET", logMeta: routeMeta },
+  async ({ params }) => {
+    const strategy = await getStrategyDetail(params.id);
+    return jsonSuccess(strategy);
   }
-}
+);
 
-export async function PATCH(
-  request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
-    const body = await request.json();
-    const strategy = await updateStrategy(id, body);
-    return NextResponse.json({ success: true, data: strategy });
-  } catch (error) {
-    return toErrorResponse(error);
+export const PATCH = apiRoute<{ id: string }>(
+  { route: "/api/strategies/[id]", method: "PATCH", logMeta: routeMeta },
+  async ({ request, params }) => {
+    const body = await readJsonBody(request);
+    const strategy = await updateStrategy(params.id, body);
+    return jsonSuccess(strategy);
   }
-}
+);
 
-export async function DELETE(
-  _request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
-    await deleteStrategy(id);
-    return NextResponse.json({ success: true, data: null });
-  } catch (error) {
-    return toErrorResponse(error);
+export const DELETE = apiRoute<{ id: string }>(
+  { route: "/api/strategies/[id]", method: "DELETE", logMeta: routeMeta },
+  async ({ params }) => {
+    await deleteStrategy(params.id);
+    return jsonSuccess(null);
   }
-}
-
+);

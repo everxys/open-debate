@@ -33,7 +33,7 @@
     ],
     "transitionRules": {
       "finalization": {
-        "autoOpenVote": true,
+        "autoOpenVote": false,
         "requireUnanimousVote": true,
         "reopenUntilPassed": true,
         "discussionRoundsBetweenVotes": 1,

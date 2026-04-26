@@ -6,8 +6,10 @@ import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type Deba
 import { ensureDb, ensureDebateAutoRecoverColumns } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
+import { createServerLogger } from "@/lib/logger/server";
 import { runDebate } from "@/lib/runtime";
 import { listStrategyFileAccessRules, mergeWorkflowConfigWithFileAccessRules } from "@/lib/strategies";
+import { sanitizeProviderMaxOutputTokens } from "@/lib/token-limits";
 import type { DebateRecord } from "@/lib/types";
 import {
   createDebateSchema,
@@ -23,6 +25,65 @@ import {
   normalizeDebateWorkflow,
   toCanonicalWorkflowConfig
 } from "@/lib/workflow";
+
+const debateLogger = createServerLogger("debates");
+
+type DebateStatus = DebateRecord["status"];
+
+export type DebateLifecycleAction = "start" | "pause" | "resume" | "repair" | "stop";
+
+type DebateLifecycleRule = {
+  allowedStatuses: readonly DebateStatus[];
+  resultStatus: DebateStatus;
+  conflictMessage: string;
+};
+
+export const DEBATE_LIFECYCLE_RULES = {
+  start: {
+    allowedStatuses: ["pending", "paused"],
+    resultStatus: "running",
+    conflictMessage: "Debate cannot be started"
+  },
+  pause: {
+    allowedStatuses: ["running"],
+    resultStatus: "paused",
+    conflictMessage: "Only running debates can be paused"
+  },
+  resume: {
+    allowedStatuses: ["paused"],
+    resultStatus: "running",
+    conflictMessage: "Only paused debates can be resumed"
+  },
+  repair: {
+    allowedStatuses: ["failed"],
+    resultStatus: "paused",
+    conflictMessage: "Only failed debates can be repaired"
+  },
+  stop: {
+    allowedStatuses: ["pending", "running", "paused"],
+    resultStatus: "stopped",
+    conflictMessage: "Debate is already finished"
+  }
+} satisfies Record<DebateLifecycleAction, DebateLifecycleRule>;
+
+export function getDebateLifecycleRule(action: DebateLifecycleAction) {
+  return DEBATE_LIFECYCLE_RULES[action];
+}
+
+export function canTransitionDebateStatus(action: DebateLifecycleAction, status: DebateStatus) {
+  return getDebateLifecycleRule(action).allowedStatuses.some((allowedStatus) => allowedStatus === status);
+}
+
+function launchDebateRun(debateId: string, userId: string, trigger: "start" | "resume") {
+  void runDebate(debateId, userId).catch((error) => {
+    debateLogger.error("failed to launch debate runtime", {
+      debateId,
+      userId,
+      trigger,
+      error
+    });
+  });
+}
 
 function createUniqueDisplayName(used: Set<string>) {
   let index = used.size + 1;
@@ -842,7 +903,10 @@ export async function getDebateDetail(id: string) {
     provider: item.agent_provider ? String(item.agent_provider) : "openai",
     contextLength: item.context_length === null ? null : Number(item.context_length),
     maxInputTokens: item.max_input_tokens === null ? null : Number(item.max_input_tokens),
-    maxOutputTokens: item.max_output_tokens === null ? null : Number(item.max_output_tokens),
+    maxOutputTokens: sanitizeProviderMaxOutputTokens(
+      item.agent_provider ? String(item.agent_provider) : "openai",
+      item.max_output_tokens === null ? null : Number(item.max_output_tokens)
+    ),
     turnOrder: Number(item.turn_order),
     turnCount: Number(item.turn_count)
   }));
@@ -2281,6 +2345,7 @@ export async function startDebateSegment(id: string, input: unknown) {
 
 export async function startDebate(id: string) {
   const session = await requireSessionUser();
+  const lifecycleRule = getDebateLifecycleRule("start");
 
   const db = await ensureDb();
   const before = await db
@@ -2299,7 +2364,7 @@ export async function startDebate(id: string) {
   const result = await db
     .updateTable("debates")
     .set({
-      status: "running",
+      status: lifecycleRule.resultStatus,
       started_at: sql`coalesce(started_at, ${now})`,
       runtime_notice_kind: null,
       runtime_notice_message: null,
@@ -2312,11 +2377,11 @@ export async function startDebate(id: string) {
     })
     .where("id", "=", id)
     .where("user_id", "=", session.userId)
-    .where("status", "in", ["pending", "paused"])
+    .where("status", "in", [...lifecycleRule.allowedStatuses])
     .returningAll()
     .executeTakeFirst();
   if (!result) {
-    throw new AppError("CONFLICT", 409, "Debate cannot be started");
+    throw new AppError("CONFLICT", 409, lifecycleRule.conflictMessage);
   }
 
   // Safety: older versions could accidentally seed memory/* into a brand-new debate (via strategy role files).
@@ -2365,39 +2430,52 @@ export async function startDebate(id: string) {
     `.compile(db));
   }
 
-  void runDebate(id, session.userId);
+  debateLogger.info("debate started", {
+    debateId: id,
+    userId: session.userId,
+    previousStatus: beforeStatus,
+    previousTurn: beforeTurn,
+    resetSeededContext: beforeStatus === "pending" && beforeTurn === 0
+  });
+  launchDebateRun(id, session.userId, "start");
   return toListItem(normalizeDebateRow(result));
 }
 
 export async function pauseDebate(id: string) {
   const session = await requireSessionUser();
+  const lifecycleRule = getDebateLifecycleRule("pause");
   const now = new Date().toISOString();
   const db = await ensureDb();
   const result = await db
     .updateTable("debates")
     .set({
-      status: "paused",
+      status: lifecycleRule.resultStatus,
       updated_at: now
     })
     .where("id", "=", id)
     .where("user_id", "=", session.userId)
-    .where("status", "=", "running")
+    .where("status", "=", lifecycleRule.allowedStatuses[0])
     .returningAll()
     .executeTakeFirst();
   if (!result) {
-    throw new AppError("CONFLICT", 409, "Only running debates can be paused");
+    throw new AppError("CONFLICT", 409, lifecycleRule.conflictMessage);
   }
+  debateLogger.info("debate paused", {
+    debateId: id,
+    userId: session.userId
+  });
   return toListItem(normalizeDebateRow(result));
 }
 
 export async function resumeDebate(id: string) {
   const session = await requireSessionUser();
+  const lifecycleRule = getDebateLifecycleRule("resume");
   const now = new Date().toISOString();
   const db = await ensureDb();
   const result = await db
     .updateTable("debates")
     .set({
-      status: "running",
+      status: lifecycleRule.resultStatus,
       runtime_notice_kind: null,
       runtime_notice_message: null,
       runtime_notice_at: null,
@@ -2407,24 +2485,29 @@ export async function resumeDebate(id: string) {
     })
     .where("id", "=", id)
     .where("user_id", "=", session.userId)
-    .where("status", "=", "paused")
+    .where("status", "=", lifecycleRule.allowedStatuses[0])
     .returningAll()
     .executeTakeFirst();
   if (!result) {
-    throw new AppError("CONFLICT", 409, "Only paused debates can be resumed");
+    throw new AppError("CONFLICT", 409, lifecycleRule.conflictMessage);
   }
-  void runDebate(id, session.userId);
+  debateLogger.info("debate resumed", {
+    debateId: id,
+    userId: session.userId
+  });
+  launchDebateRun(id, session.userId, "resume");
   return toListItem(normalizeDebateRow(result));
 }
 
 export async function repairDebate(id: string) {
   const session = await requireSessionUser();
+  const lifecycleRule = getDebateLifecycleRule("repair");
   const now = new Date().toISOString();
   const db = await ensureDb();
   const result = await db
     .updateTable("debates")
     .set({
-      status: "paused",
+      status: lifecycleRule.resultStatus,
       finished_at: null,
       stopped_reason: null,
       runtime_notice_kind: "interrupted",
@@ -2438,35 +2521,45 @@ export async function repairDebate(id: string) {
     })
     .where("id", "=", id)
     .where("user_id", "=", session.userId)
-    .where("status", "=", "failed")
+    .where("status", "=", lifecycleRule.allowedStatuses[0])
     .returningAll()
     .executeTakeFirst();
   if (!result) {
-    throw new AppError("CONFLICT", 409, "Only failed debates can be repaired");
+    throw new AppError("CONFLICT", 409, lifecycleRule.conflictMessage);
   }
+  debateLogger.info("debate repaired from failed to paused", {
+    debateId: id,
+    userId: session.userId
+  });
   return toListItem(normalizeDebateRow(result));
 }
 
 export async function stopDebate(id: string, reason: string) {
   const session = await requireSessionUser();
+  const lifecycleRule = getDebateLifecycleRule("stop");
   const now = new Date().toISOString();
   const db = await ensureDb();
   const result = await db
     .updateTable("debates")
     .set({
-      status: "stopped",
+      status: lifecycleRule.resultStatus,
       stopped_reason: reason,
       finished_at: now,
       updated_at: now
     })
     .where("id", "=", id)
     .where("user_id", "=", session.userId)
-    .where("status", "in", ["pending", "running", "paused"])
+    .where("status", "in", [...lifecycleRule.allowedStatuses])
     .returningAll()
     .executeTakeFirst();
   if (!result) {
-    throw new AppError("CONFLICT", 409, "Debate is already finished");
+    throw new AppError("CONFLICT", 409, lifecycleRule.conflictMessage);
   }
+  debateLogger.info("debate stopped", {
+    debateId: id,
+    userId: session.userId,
+    reason
+  });
   return toListItem(normalizeDebateRow(result));
 }
 
@@ -2482,10 +2575,11 @@ export async function appendAgentToDebate(id: string, agentId: string) {
     .select("id")
     .where("user_id", "=", session.userId)
     .where("deleted_at", "is", null)
+    .where("is_active", "=", true)
     .where("id", "=", agentId)
     .executeTakeFirst();
   if (!agent) {
-    throw new AppError("NOT_FOUND", 404, "Agent not found");
+    throw new AppError("NOT_FOUND", 404, "Agent not found or disabled");
   }
 
   const maxOrderResult = await db

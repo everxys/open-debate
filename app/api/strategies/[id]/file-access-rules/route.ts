@@ -1,31 +1,21 @@
-import { NextResponse } from "next/server";
-
 import { createStrategyFileAccessRule, listStrategyFileAccessRules } from "@/lib/strategies";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess, readJsonBody } from "@/lib/http";
 
-export async function GET(
-  _request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
-    const rules = await listStrategyFileAccessRules(id);
-    return NextResponse.json({ success: true, data: rules });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+const routeMeta = ({ params }: { params: { id: string } }) => ({ strategyId: params.id });
 
-export async function POST(
-  request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
-    const body = await request.json();
-    const rule = await createStrategyFileAccessRule(id, body);
-    return NextResponse.json({ success: true, data: rule });
-  } catch (error) {
-    return toErrorResponse(error);
+export const GET = apiRoute<{ id: string }>(
+  { route: "/api/strategies/[id]/file-access-rules", method: "GET", logMeta: routeMeta },
+  async ({ params }) => {
+    const rules = await listStrategyFileAccessRules(params.id);
+    return jsonSuccess(rules);
   }
-}
+);
+
+export const POST = apiRoute<{ id: string }>(
+  { route: "/api/strategies/[id]/file-access-rules", method: "POST", logMeta: routeMeta },
+  async ({ request, params }) => {
+    const body = await readJsonBody(request);
+    const rule = await createStrategyFileAccessRule(params.id, body);
+    return jsonSuccess(rule);
+  }
+);

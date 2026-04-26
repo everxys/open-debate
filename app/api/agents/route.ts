@@ -1,23 +1,15 @@
-import { NextResponse } from "next/server";
-
 import { createAgent, listAgents } from "@/lib/agents";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess, readJsonBody } from "@/lib/http";
 
-export async function GET() {
-  try {
-    const agents = await listAgents();
-    return NextResponse.json({ success: true, data: agents });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+export const dynamic = "force-dynamic";
 
-export async function POST(request: Request) {
-  try {
-    const body = await request.json();
-    const agent = await createAgent(body);
-    return NextResponse.json({ success: true, data: agent }, { status: 201 });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+export const GET = apiRoute({ route: "/api/agents", method: "GET" }, async () => {
+  const agents = await listAgents();
+  return jsonSuccess(agents);
+});
+
+export const POST = apiRoute({ route: "/api/agents", method: "POST" }, async ({ request }) => {
+  const body = await readJsonBody(request);
+  const agent = await createAgent(body);
+  return jsonSuccess(agent, 201);
+});

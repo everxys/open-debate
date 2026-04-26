@@ -1,15 +1,10 @@
-import { NextResponse } from "next/server";
-
 import { exportAgentsPack } from "@/lib/agents";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess, readJsonBody } from "@/lib/http";
 
-export async function POST(request: Request) {
-  try {
-    const body = await request.json();
-    const pack = await exportAgentsPack(body);
-    return NextResponse.json({ success: true, data: pack });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+export const dynamic = "force-dynamic";
 
+export const POST = apiRoute({ route: "/api/agents/export", method: "POST" }, async ({ request }) => {
+  const body = await readJsonBody(request);
+  const pack = await exportAgentsPack(body);
+  return jsonSuccess(pack);
+});

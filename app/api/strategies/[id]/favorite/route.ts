@@ -1,25 +1,20 @@
-import { NextResponse } from "next/server";
-
 import { favoriteStrategy, unfavoriteStrategy } from "@/lib/strategies";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess } from "@/lib/http";
 
-export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
-  try {
-    const { id } = await context.params;
-    const result = await favoriteStrategy(id);
-    return NextResponse.json({ success: true, data: result });
-  } catch (error) {
-    return toErrorResponse(error);
+const routeMeta = ({ params }: { params: { id: string } }) => ({ strategyId: params.id });
+
+export const POST = apiRoute<{ id: string }>(
+  { route: "/api/strategies/[id]/favorite", method: "POST", logMeta: routeMeta },
+  async ({ params }) => {
+    const result = await favoriteStrategy(params.id);
+    return jsonSuccess(result);
   }
-}
+);
 
-export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
-  try {
-    const { id } = await context.params;
-    const result = await unfavoriteStrategy(id);
-    return NextResponse.json({ success: true, data: result });
-  } catch (error) {
-    return toErrorResponse(error);
+export const DELETE = apiRoute<{ id: string }>(
+  { route: "/api/strategies/[id]/favorite", method: "DELETE", logMeta: routeMeta },
+  async ({ params }) => {
+    const result = await unfavoriteStrategy(params.id);
+    return jsonSuccess(result);
   }
-}
-
+);

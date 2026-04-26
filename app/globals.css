@@ -81,6 +81,24 @@ button {
   grid-template-columns: 360px 360px 1fr;
 }
 
+.agentsPageGrid {
+  align-items: start;
+}
+
+.agentsListPanel {
+  order: 2;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.agentsListViewport {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
 .roleList {
   display: flex;
   flex-direction: column;
@@ -261,6 +279,455 @@ button {
   min-width: 0;
 }
 
+.playgroundChecklistShell {
+  grid-template-columns: minmax(320px, 500px) minmax(0, 1fr);
+  align-items: start;
+}
+
+.playgroundTools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.playgroundToolChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 12px;
+  background: #fff;
+}
+
+.playgroundToolChip.active {
+  border-color: rgba(38, 99, 235, 0.45);
+  background: rgba(38, 99, 235, 0.08);
+}
+
+.playgroundFileCard {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.playgroundPathInput {
+  min-width: 280px;
+}
+
+.playgroundChecklistCard {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: #fff;
+  box-shadow: 0 8px 18px rgba(20, 38, 63, 0.04);
+  cursor: pointer;
+}
+
+.playgroundChecklistSuiteOption {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.playgroundChecklistSuiteOption input {
+  margin-top: 2px;
+  accent-color: var(--blue);
+}
+
+.playgroundChecklistSuiteText {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.playgroundChecklistSuiteLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.playgroundChecklistSuiteDefault {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(38, 99, 235, 0.10);
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.playgroundChecklistCard.selected {
+  border-color: rgba(38, 99, 235, 0.44);
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(38, 99, 235, 0.12),
+    0 14px 28px rgba(38, 99, 235, 0.08);
+}
+
+  .playgroundChecklistCardBody {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 136px;
+    gap: 12px;
+    align-items: center;
+  }
+
+.playgroundChecklistMain {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+}
+
+.playgroundChecklistDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid #cfd8ea;
+  background: #fff;
+  margin-top: 6px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.9);
+}
+
+.playgroundChecklistDot.success {
+  background: #22c55e;
+  border-color: #16a34a;
+}
+
+.playgroundChecklistDot.error {
+  background: #ef4444;
+  border-color: #dc2626;
+}
+
+.playgroundChecklistDot.warn {
+  background: #f59e0b;
+  border-color: #d97706;
+}
+
+.playgroundChecklistText {
+  min-width: 0;
+}
+
+  .playgroundChecklistTitleRow {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .playgroundChecklistTitleLead {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+    flex-wrap: nowrap;
+  }
+
+  .playgroundChecklistInlineStatus {
+    font-size: 13px;
+    line-height: 1.3;
+    color: var(--muted);
+    white-space: nowrap;
+    flex: 0 0 auto;
+  }
+
+  .playgroundChecklistInlineStatus.success {
+    color: #16a34a;
+  }
+
+  .playgroundChecklistInlineStatus.error {
+    color: #dc2626;
+  }
+
+  .playgroundChecklistInlineStatus.warn {
+    color: #d97706;
+  }
+
+  .playgroundChecklistSuiteBadge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 22px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: #eef4ff;
+    color: #335caa;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+    flex: 0 0 auto;
+  }
+
+  .playgroundChecklistActions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    align-self: center;
+    justify-items: end;
+  }
+
+  .playgroundChecklistActions .btn {
+    min-width: 112px;
+  }
+
+  .playgroundChecklistMeta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 12px;
+      line-height: 1.4;
+      min-width: 0;
+    }
+
+  .playgroundChecklistMeta > span + span::before {
+    content: "·";
+    margin-right: 6px;
+    color: var(--muted);
+  }
+
+  .playgroundChecklistStageText {
+    margin-top: 4px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .playgroundChecklistProgress {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .playgroundChecklistProgress.detail {
+    margin-top: 0;
+  }
+
+  .playgroundChecklistProgressDetailItem {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .playgroundChecklistProgressLabel {
+    font-size: 12px;
+    line-height: 1.3;
+    color: var(--muted);
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .playgroundChecklistProgressSegment {
+    height: 6px;
+    border-radius: 999px;
+    background: #e5ebf5;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .playgroundChecklistProgressSegment.done {
+    background: rgba(38, 99, 235, 0.82);
+  }
+
+  .playgroundChecklistProgressSegment.done.success {
+    background: rgba(34, 197, 94, 0.85);
+  }
+
+  .playgroundChecklistProgressSegment.current {
+    background: rgba(59, 130, 246, 0.18);
+  }
+
+  .playgroundChecklistProgressSegment.current::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, rgba(38, 99, 235, 0.10), rgba(38, 99, 235, 0.92), rgba(38, 99, 235, 0.10));
+    animation: playgroundProgressPulse 1.2s linear infinite;
+  }
+
+  .playgroundChecklistProgressSegment.failed {
+    background: rgba(239, 68, 68, 0.88);
+  }
+
+  .playgroundChecklistProgressSegment.pending {
+    background: #e5ebf5;
+  }
+
+  .playgroundChecklistErrorText {
+    color: var(--red);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+.playgroundChecklistHint {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.playgroundChecklistHintButton {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: help;
+}
+
+.playgroundChecklistTooltip {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 280px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 18px 40px rgba(20, 38, 63, 0.14);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: none;
+  z-index: 30;
+}
+
+.playgroundChecklistHint:hover .playgroundChecklistTooltip,
+.playgroundChecklistHint:focus-within .playgroundChecklistTooltip {
+  display: block;
+}
+
+  .playgroundTraceCard {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.playgroundPre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f6f8fc;
+  border-radius: 12px;
+  padding: 12px;
+  border: 1px solid #e3e9f3;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.playgroundFileBrowser {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.playgroundFileBrowserTree {
+  min-height: 280px;
+}
+
+  .playgroundFileBrowserPreview {
+    min-height: 280px;
+  }
+
+  .playgroundStatusHeadline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    align-items: center;
+  }
+
+  .playgroundStatusMessage {
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  .playgroundStatusError {
+    color: var(--red);
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+
+  .playgroundStageHistory {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .playgroundStageHistoryItem {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: #fff;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  @keyframes playgroundProgressPulse {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(100%);
+    }
+  }
+
+  @media (max-width: 1080px) {
+  .playgroundChecklistShell {
+    grid-template-columns: 1fr;
+  }
+
+  .playgroundChecklistCardBody {
+    grid-template-columns: 1fr;
+  }
+
+  .playgroundChecklistActions {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: stretch;
+  }
+
+  .playgroundChecklistTooltip {
+    left: auto;
+    right: 0;
+    top: calc(100% + 8px);
+    transform: none;
+    width: min(280px, 70vw);
+  }
+
+  .playgroundFileBrowser {
+    grid-template-columns: 1fr;
+  }
+}
+
 .strategyTab {
   position: relative;
   border-radius: 12px;
@@ -385,6 +852,77 @@ button {
 
 .agentCard {
   position: relative;
+  min-width: 0;
+  padding: 18px;
+}
+
+.agentCardLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(248px, 320px);
+  gap: 18px;
+  align-items: start;
+}
+
+.agentCardMain {
+  gap: 12px;
+  min-width: 0;
+}
+
+.agentCardHeader {
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.agentCardIdentity {
+  gap: 10px;
+  min-width: 0;
+  align-items: flex-start;
+}
+
+.agentCardIdentityText {
+  gap: 6px;
+  min-width: 0;
+}
+
+.agentCardTitle {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.agentCardMetrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.agentCardMetric {
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.agentCardMetricQuota {
+  background: rgba(59, 130, 246, 0.06);
+}
+
+.agentCardMeta {
+  gap: 6px;
+}
+
+.agentCardAside {
+  gap: 16px;
+  min-width: 0;
+  align-self: start;
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.03);
+  justify-content: flex-start;
+}
+
+.agentCardAsideStatus {
+  gap: 8px;
 }
 
 .agentCardEditing {
@@ -406,6 +944,56 @@ button {
 
 .agentEditor {
   position: relative;
+}
+
+.agentCardActions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+
+.agentCardActions .btn {
+  max-width: 100%;
+}
+
+.agentCard .muted,
+.agentCard strong {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 1320px) {
+  .agentCardLayout {
+    grid-template-columns: minmax(0, 1fr) minmax(232px, 292px);
+  }
+
+  .agentCardMetrics {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+}
+
+@media (max-width: 1080px) {
+  .agentCardLayout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .agentCardAside {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 900px) {
+  .agentsListPanel,
+  .agentEditor {
+    height: auto;
+  }
+
+  .agentsListViewport {
+    flex: none;
+    min-height: auto;
+    padding-right: 0;
+  }
 }
 
 .agentStatus {
@@ -652,6 +1240,20 @@ button {
   min-height: 0;
 }
 
+.debateSidebarPanelFiles {
+  height: auto;
+  max-height: none;
+  align-self: start;
+}
+
+.debateSidebarHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .debateSidebarContent {
   flex: 1;
   min-height: 0;
@@ -659,6 +1261,10 @@ button {
   flex-direction: column;
   overflow-y: auto;
   padding-right: 4px;
+}
+
+.debateSidebarContentLocked {
+  overflow: hidden;
 }
 
 .debateQuestionPreview {
@@ -684,6 +1290,27 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.statusSummaryStack {
+  display: grid;
+  gap: 12px;
+}
+
+.statusLiveRow {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.statusLiveCurrent,
+.statusLiveMessage {
+  min-width: 0;
+}
+
+.statusLiveMessage {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .statusMetaChip {
@@ -736,10 +1363,6 @@ button {
   color: #5b4a93;
 }
 
-.debateFilesAction {
-  min-width: 140px;
-}
-
 .debateFilesActionLabel {
   display: inline-grid;
   align-items: center;
@@ -760,9 +1383,82 @@ button {
   flex: 1;
 }
 
-.debateFilesPanel .treeRoot {
+.debateFilesPanel .filesTreeBox .treeRoot {
   height: 100%;
   min-height: 0;
+}
+
+.debateFilesViewport {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: visible;
+}
+
+.debateFilesEmptyState {
+  min-height: 0;
+}
+
+.debateFilesTreeViewport {
+  flex: 0 0 auto;
+  align-self: stretch;
+  min-height: 0;
+  height: auto;
+  max-height: min(62dvh, calc(100dvh - 240px));
+  overflow: auto;
+}
+
+.debateFilesToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px 16px;
+}
+
+.debateFilesToolbarMain {
+  flex: 1 1 220px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.debateFilesToolbarTitleRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.debateFilesToolbarTitleRow > strong {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.debateFilesToolbarStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.debateFilesToolbarStat {
+  white-space: nowrap;
+  line-height: 1.3;
+}
+
+.debateFilesToolbarActions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.debateFilesAction {
+  min-width: 120px;
 }
 
 .debateViewerShell {
@@ -835,6 +1531,11 @@ button {
     height: min(68dvh, calc(100dvh - 160px));
     max-height: calc(100dvh - 160px);
   }
+
+  .debateSidebarPanelMemory {
+    height: auto;
+    max-height: none;
+  }
 }
 
 @media (max-width: 980px) {
@@ -859,6 +1560,26 @@ button {
 
   .debateModalActions {
     justify-content: flex-start;
+  }
+}
+
+@media (max-width: 720px) {
+  .debateSidebarHeader {
+    align-items: stretch;
+  }
+
+  .debateFilesToolbarActions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .debateFilesAction {
+    min-width: 0;
+  }
+
+  .debateFilesTreeViewport {
+    max-height: min(52dvh, calc(100dvh - 280px));
   }
 }
 

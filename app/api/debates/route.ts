@@ -1,25 +1,15 @@
-import { NextResponse } from "next/server";
-
 import { createDebate, listDebates } from "@/lib/debates";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess, readJsonBody } from "@/lib/http";
 
-export async function GET(request: Request) {
-  try {
-    const url = new URL(request.url);
-    const scope = url.searchParams.get("scope") === "shared" ? "shared" : "mine";
-    const debates = await listDebates(scope);
-    return NextResponse.json({ success: true, data: debates });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+export const GET = apiRoute({ route: "/api/debates", method: "GET" }, async ({ request }) => {
+  const url = new URL(request.url);
+  const scope = url.searchParams.get("scope") === "shared" ? "shared" : "mine";
+  const debates = await listDebates(scope);
+  return jsonSuccess(debates);
+});
 
-export async function POST(request: Request) {
-  try {
-    const body = await request.json();
-    const debate = await createDebate(body);
-    return NextResponse.json({ success: true, data: debate }, { status: 201 });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+export const POST = apiRoute({ route: "/api/debates", method: "POST" }, async ({ request }) => {
+  const body = await readJsonBody(request);
+  const debate = await createDebate(body);
+  return jsonSuccess(debate, 201);
+});

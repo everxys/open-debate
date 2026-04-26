@@ -1,8 +1,95 @@
 import { z } from "zod";
+import { getProviderMaxOutputTokensLimit } from "@/lib/token-limits";
 
 // === Agent schemas ===
 
-export const createAgentSchema = z.object({
+const usageControlModeSchema = z.enum(["none", "coding_plan"]);
+const quotaPacingModeSchema = z.enum(["percent", "absolute"]);
+const quotaWindowTypeSchema = z.enum(["rolling_5h", "week", "month"]);
+
+function isValidTimeZone(value: string) {
+  try {
+    Intl.DateTimeFormat("zh-CN", { timeZone: value }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const quotaProfileSnapshotBaseSchema = z.object({
+  name: z.string().min(1).max(80),
+  requestLimit5h: z.number().int().min(1).max(10_000_000),
+  requestLimitWeek: z.number().int().min(1).max(10_000_000),
+  requestLimitMonth: z.number().int().min(1).max(10_000_000),
+  pacingMode: quotaPacingModeSchema,
+  pacingValue: z.number().int().min(1).max(10_000_000),
+  resetTimezone: z.string().min(1).max(100).refine(isValidTimeZone, "Invalid time zone")
+});
+
+const quotaBindingSchema = z.object({
+  usageControlMode: usageControlModeSchema.optional().default("none"),
+  quotaProfileId: z.string().uuid().nullable().optional()
+});
+
+function withQuotaBindingValidation<T extends z.ZodTypeAny>(schema: T) {
+  return schema.superRefine((data, ctx) => {
+    if (!data || typeof data !== "object") return;
+    const usageControlMode = (data as { usageControlMode?: unknown }).usageControlMode;
+    const quotaProfileId = (data as { quotaProfileId?: unknown }).quotaProfileId;
+    if (usageControlMode === "coding_plan" && !quotaProfileId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["quotaProfileId"],
+        message: "选择 Coding Plan 时必须绑定计划池"
+      });
+    }
+    if (usageControlMode !== undefined && usageControlMode !== "coding_plan" && quotaProfileId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["quotaProfileId"],
+        message: "未启用 Coding Plan 时不能绑定计划池"
+      });
+    }
+  });
+}
+
+function withQuotaProfileValidation<T extends z.ZodTypeAny>(schema: T) {
+  return schema.superRefine((data, ctx) => {
+    if (!data || typeof data !== "object") return;
+    const pacingMode = (data as { pacingMode?: unknown }).pacingMode;
+    const pacingValue = (data as { pacingValue?: unknown }).pacingValue;
+    const requestLimit5h = (data as { requestLimit5h?: unknown }).requestLimit5h;
+    if (pacingMode === "percent" && typeof pacingValue === "number" && pacingValue > 100) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.too_big,
+        path: ["pacingValue"],
+        maximum: 100,
+        inclusive: true,
+        type: "number",
+        message: "百分比模式不能超过 100"
+      });
+    }
+    if (
+      pacingMode === "absolute" &&
+      typeof pacingValue === "number" &&
+      typeof requestLimit5h === "number" &&
+      pacingValue > requestLimit5h
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.too_big,
+        path: ["pacingValue"],
+        maximum: requestLimit5h,
+        inclusive: true,
+        type: "number",
+        message: "固定次数模式不能超过 5 小时限额"
+      });
+    }
+  });
+}
+
+const quotaProfileSnapshotSchema = withQuotaProfileValidation(quotaProfileSnapshotBaseSchema);
+
+const agentSchemaBase = z.object({
   name: z.string().min(1).max(50),
   provider: z.enum(["openai", "anthropic"]),
   model: z.string().min(1).max(100),
@@ -10,14 +97,47 @@ export const createAgentSchema = z.object({
   maxInputTokens: z.number().int().min(1).max(2_000_000).nullable().optional(),
   maxOutputTokens: z.number().int().min(1).max(2_000_000).nullable().optional(),
   baseUrl: z.string().url().min(1),
-  apiKey: z.string().min(1)
+  apiKey: z.string().min(1),
+  usageControlMode: quotaBindingSchema.shape.usageControlMode,
+  quotaProfileId: quotaBindingSchema.shape.quotaProfileId
 });
 
-export const testAgentConfigSchema = createAgentSchema.pick({ provider: true, model: true, baseUrl: true, apiKey: true });
+function withProviderMaxOutputValidation<T extends z.ZodTypeAny>(schema: T) {
+  return schema.superRefine((data, ctx) => {
+    if (!data || typeof data !== "object") return;
+    const provider = (data as { provider?: unknown }).provider;
+    const maxOutputTokens = (data as { maxOutputTokens?: unknown }).maxOutputTokens;
+    const limit = getProviderMaxOutputTokensLimit(typeof provider === "string" ? provider : null);
+    if (limit === null || typeof maxOutputTokens !== "number" || maxOutputTokens <= limit) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.too_big,
+      path: ["maxOutputTokens"],
+      maximum: limit,
+      inclusive: true,
+      type: "number",
+      message: `OpenAI 兼容接口的最大输出 Token 不能超过 ${limit.toLocaleString()}`
+    });
+  });
+}
 
-export const updateAgentSchema = createAgentSchema.partial().extend({
+function withAgentValidation<T extends z.ZodTypeAny>(schema: T) {
+  return withQuotaBindingValidation(withProviderMaxOutputValidation(schema));
+}
+
+export const createAgentSchema = withAgentValidation(agentSchemaBase);
+
+export const testAgentConfigSchema = withQuotaBindingValidation(agentSchemaBase.pick({
+  provider: true,
+  model: true,
+  baseUrl: true,
+  apiKey: true,
+  usageControlMode: true,
+  quotaProfileId: true
+}));
+
+export const updateAgentSchema = withAgentValidation(agentSchemaBase.partial().extend({
   isActive: z.boolean().optional()
-});
+}));
 
 // === Retrieval config schemas ===
 
@@ -59,7 +179,7 @@ export const moveFileSchema = agentFileMoveSchema;
 
 // === Agent export/import schemas ===
 
-export const agentPortableSchema = z.object({
+export const agentPortableSchema = withProviderMaxOutputValidation(z.object({
   name: z.string().min(1).max(50),
   provider: z.enum(["openai", "anthropic"]),
   model: z.string().min(1).max(100),
@@ -69,7 +189,34 @@ export const agentPortableSchema = z.object({
   baseUrl: z.string().url().min(1),
   isActive: z.boolean().optional().default(true),
   apiKey: z.string().min(1),
-  files: z.array(agentFileUpsertSchema).optional().default([])
+  files: z.array(agentFileUpsertSchema).optional().default([]),
+  usageControlMode: usageControlModeSchema.optional().default("none"),
+  quotaProfile: quotaProfileSnapshotSchema.nullable().optional()
+}).superRefine((data, ctx) => {
+  if (data.usageControlMode === "coding_plan" && !data.quotaProfile) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["quotaProfile"],
+      message: "导出的 Coding Plan 配置缺少计划池快照"
+    });
+  }
+  if (data.usageControlMode !== "coding_plan" && data.quotaProfile) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["quotaProfile"],
+      message: "未启用 Coding Plan 时不能附带计划池快照"
+    });
+  }
+}));
+
+export const createQuotaProfileSchema = quotaProfileSnapshotSchema;
+
+export const updateQuotaProfileSchema = withQuotaProfileValidation(quotaProfileSnapshotBaseSchema.partial());
+
+export const adjustQuotaProfileSchema = z.object({
+  windowType: quotaWindowTypeSchema,
+  delta: z.number().int().min(-10_000_000).max(10_000_000).refine((value) => value !== 0, "delta cannot be 0"),
+  note: z.string().max(400).nullable().optional()
 });
 
 export const exportAgentsRequestSchema = z.object({ agentIds: z.array(z.string()).min(1) });

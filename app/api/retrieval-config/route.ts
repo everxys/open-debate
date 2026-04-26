@@ -1,23 +1,13 @@
-import { NextResponse } from "next/server";
-
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess, readJsonBody } from "@/lib/http";
 import { getRetrievalConfig, updateRetrievalConfig } from "@/lib/retrieval";
 
-export async function GET() {
-  try {
-    const data = await getRetrievalConfig();
-    return NextResponse.json({ success: true, data });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+export const GET = apiRoute({ route: "/api/retrieval-config", method: "GET" }, async () => {
+  const data = await getRetrievalConfig();
+  return jsonSuccess(data);
+});
 
-export async function PATCH(request: Request) {
-  try {
-    const body = await request.json();
-    const data = await updateRetrievalConfig(body);
-    return NextResponse.json({ success: true, data });
-  } catch (error) {
-    return toErrorResponse(error);
-  }
-}
+export const PATCH = apiRoute({ route: "/api/retrieval-config", method: "PATCH" }, async ({ request }) => {
+  const body = await readJsonBody(request);
+  const data = await updateRetrievalConfig(body);
+  return jsonSuccess(data);
+});

@@ -1,4 +1,3 @@
-export const MAX_TOOL_ROUNDS = 3;
 export const ENABLE_DEBATE_MEMORY = process.env.ENABLE_DEBATE_MEMORY !== "0";
 export const MEMORY_SUMMARY_PATH = "memory/summary.md";
 export const MEMORY_LOG_PATH = "memory/log.jsonl";
@@ -15,6 +14,7 @@ export const VOTE_ANNOUNCEMENT_PREFIX = "votes/announcement-round-";
 export const WORKFLOW_PATH = "workflow.json";
 export const CONTEXT_WINDOW_PATH = "context/window.json";
 export const CONTEXT_SEGMENT_PATH = "context/segment.md";
+export const CONTEXT_WORKING_SET_PATH = "context/working_set.json";
 export const CONTEXT_USAGE_PATH = "context/usage.json";
 export const CONTEXT_USAGE_LOG_PATH = "context/usage_log.jsonl";
 export const CONTEXT_USAGE_TOTALS_PATH = "context/usage_totals.json";

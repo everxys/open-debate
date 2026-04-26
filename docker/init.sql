@@ -68,6 +68,8 @@ create table if not exists ai_agents (
   last_connectivity_check_status text null,
   last_connectivity_check_at timestamptz null,
   last_connectivity_check_message text null,
+  usage_control_mode text not null default 'none' check (usage_control_mode in ('none', 'coding_plan')),
+  quota_profile_id uuid null,
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -79,6 +81,56 @@ alter table ai_agents add column if not exists max_output_tokens integer null;
 alter table ai_agents add column if not exists last_connectivity_check_status text null;
 alter table ai_agents add column if not exists last_connectivity_check_at timestamptz null;
 alter table ai_agents add column if not exists last_connectivity_check_message text null;
+alter table ai_agents add column if not exists usage_control_mode text not null default 'none';
+alter table ai_agents add column if not exists quota_profile_id uuid null;
+
+create table if not exists ai_quota_profiles (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  name text not null,
+  profile_type text not null default 'coding_plan' check (profile_type in ('coding_plan')),
+  request_limit_5h integer not null,
+  request_limit_week integer not null,
+  request_limit_month integer not null,
+  pacing_mode text not null check (pacing_mode in ('percent', 'absolute')),
+  pacing_value integer not null,
+  reset_timezone text not null default 'Asia/Shanghai',
+  next_request_not_before_at timestamptz null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  deleted_at timestamptz null
+);
+
+create index if not exists idx_ai_quota_profiles_user_id_updated_at
+  on ai_quota_profiles (user_id, updated_at desc);
+
+create table if not exists ai_quota_window_usage (
+  id uuid primary key default gen_random_uuid(),
+  profile_id uuid not null references ai_quota_profiles(id) on delete cascade,
+  window_type text not null check (window_type in ('rolling_5h', 'week', 'month')),
+  window_start_at timestamptz not null,
+  window_end_at timestamptz not null,
+  internal_request_count integer not null default 0,
+  manual_adjustment_count integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (profile_id, window_type, window_start_at)
+);
+
+create index if not exists idx_ai_quota_window_usage_profile_type_end
+  on ai_quota_window_usage (profile_id, window_type, window_end_at desc);
+
+create table if not exists ai_quota_adjustments (
+  id uuid primary key default gen_random_uuid(),
+  profile_id uuid not null references ai_quota_profiles(id) on delete cascade,
+  window_type text not null check (window_type in ('rolling_5h', 'week', 'month')),
+  delta integer not null,
+  note text null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_ai_quota_adjustments_profile_created_at
+  on ai_quota_adjustments (profile_id, created_at desc);
 
 create table if not exists debates (
   id uuid primary key default gen_random_uuid(),
@@ -154,6 +206,54 @@ create index if not exists idx_debates_is_shared_updated_at on debates(is_shared
 create index if not exists idx_debate_agents_debate_id on debate_agents(debate_id);
 create index if not exists idx_debate_turns_debate_id on debate_turns(debate_id);
 create unique index if not exists idx_debate_turns_debate_id_turn_number_unique on debate_turns(debate_id, turn_number);
+create index if not exists idx_ai_agents_quota_profile_id on ai_agents(quota_profile_id);
+
+create table if not exists debate_turn_mutations (
+  id uuid primary key default gen_random_uuid(),
+  debate_id uuid not null references debates(id) on delete cascade,
+  debate_agent_id uuid not null references debate_agents(id) on delete cascade,
+  turn_number integer not null,
+  round_number integer not null,
+  mutation_kind text not null check (mutation_kind in ('write_replace', 'write_append', 'write_section', 'vote_cast')),
+  target_path text not null,
+  sequence_number integer not null,
+  status text not null default 'pending' check (status in ('pending', 'committed', 'rolled_back')),
+  before_exists boolean not null default false,
+  before_content text null,
+  before_version integer null,
+  before_updated_at timestamptz null,
+  before_created_at timestamptz null,
+  after_exists boolean not null default false,
+  after_content text null,
+  after_version integer null,
+  after_updated_at timestamptz null,
+  action_payload_json jsonb null,
+  result_json jsonb null,
+  created_at timestamptz not null default now(),
+  committed_at timestamptz null,
+  rolled_back_at timestamptz null
+);
+
+create index if not exists idx_debate_turn_mutations_debate_turn_status
+  on debate_turn_mutations (debate_id, turn_number, status, sequence_number asc);
+
+create table if not exists debate_resume_jobs (
+  id uuid primary key default gen_random_uuid(),
+  debate_id uuid not null references debates(id) on delete cascade,
+  profile_id uuid not null references ai_quota_profiles(id) on delete cascade,
+  resume_at timestamptz not null,
+  reason text not null default 'quota_wait',
+  status text not null default 'pending' check (status in ('pending', 'running', 'completed', 'failed')),
+  locked_by text null,
+  locked_at timestamptz null,
+  last_error text null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  completed_at timestamptz null
+);
+
+create index if not exists idx_debate_resume_jobs_status_resume_at
+  on debate_resume_jobs (status, resume_at asc, updated_at asc);
 
 create table if not exists rate_limit_counters (
   key text not null,
@@ -178,6 +278,57 @@ create table if not exists ai_agent_files (
 
 create index if not exists idx_ai_agent_files_agent_id_updated_at
   on ai_agent_files (ai_agent_id, updated_at desc);
+
+create table if not exists playground_tool_checklists (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  agent_id uuid not null references ai_agents(id) on delete cascade,
+  tool_name text not null check (tool_name in (
+    'agent_files_list',
+    'agent_files_read',
+    'agent_files_search',
+    'debate_files_read',
+    'debate_files_stat',
+    'debate_files_write',
+    'debate_vote_open',
+    'debate_vote_cast',
+    'debate_vote_close',
+    'harness_read',
+    'harness_write',
+    'harness_vote_cast'
+  )),
+  status text not null default 'idle' check (status in ('idle', 'running', 'passed', 'failed')),
+  current_stage text null check (current_stage in (
+    'queued',
+    'requesting_model',
+    'receiving_model_output',
+    'executing_tools',
+    'sandbox_changed',
+    'validating_result',
+    'passed',
+    'failed'
+  )),
+  stage_started_at timestamptz null,
+  stage_index integer null,
+  stage_history jsonb null,
+  last_progress_message text null,
+  last_run_at timestamptz null,
+  last_passed_at timestamptz null,
+  last_error_message text null,
+  last_run_trace jsonb null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, agent_id, tool_name)
+);
+
+alter table playground_tool_checklists add column if not exists current_stage text null;
+alter table playground_tool_checklists add column if not exists stage_started_at timestamptz null;
+alter table playground_tool_checklists add column if not exists stage_index integer null;
+alter table playground_tool_checklists add column if not exists stage_history jsonb null;
+alter table playground_tool_checklists add column if not exists last_progress_message text null;
+
+create index if not exists idx_playground_tool_checklists_user_agent_updated_at
+  on playground_tool_checklists (user_id, agent_id, updated_at desc);
 
 create table if not exists strategies (
   id uuid primary key default gen_random_uuid(),

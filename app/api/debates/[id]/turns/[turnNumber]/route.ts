@@ -1,18 +1,15 @@
-import { NextResponse } from "next/server";
-
 import { getDebateTurnDetail } from "@/lib/debates";
-import { toErrorResponse } from "@/lib/http";
+import { apiRoute, jsonSuccess } from "@/lib/http";
 
-export async function GET(
-  _request: Request,
-  context: { params: Promise<{ id: string; turnNumber: string }> }
-) {
-  try {
-    const { id, turnNumber } = await context.params;
-    const safeTurnNumber = Number(turnNumber);
-    const detail = await getDebateTurnDetail(id, safeTurnNumber);
-    return NextResponse.json({ success: true, data: detail });
-  } catch (error) {
-    return toErrorResponse(error);
+export const GET = apiRoute<{ id: string; turnNumber: string }>(
+  {
+    route: "/api/debates/[id]/turns/[turnNumber]",
+    method: "GET",
+    logMeta: ({ params }) => ({ debateId: params.id, turnNumber: params.turnNumber })
+  },
+  async ({ params }) => {
+    const safeTurnNumber = Number(params.turnNumber);
+    const detail = await getDebateTurnDetail(params.id, safeTurnNumber);
+    return jsonSuccess(detail);
   }
-}
+);
