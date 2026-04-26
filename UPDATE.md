@@ -1,6 +1,7 @@
 ## 2026-04-26
 
 - 重构辩论详情“文件”页的顶部结构：`app/(main)/debates/[id]/debate-files-panel.tsx` 里的文件工具栏不再用会互相挤压的 grid/纵向摘要布局，而是改成独立的“主信息区 + 按钮区” header，统计信息用单行 chip 式文本展示，宽度不足时按钮区整体下移而不是把标题和计数挤成竖排；`app/globals.css` 同步重写了这块 header 样式与文件页页头样式，并继续保留文件树卡片脱离全局 `treeRoot` 拉伸、按内容高度驱动滚动的布局。
+- 修复辩论详情“文件”页的双滚动条：文件树区域不再复用全局 `treeRoot` 和外层 `overflow:auto` 包裹 `react-arborist`，而是重构成 `debateFilesTreeCard -> debateFilesTreeFrame -> Tree` 的单一滚动所有权结构，外卡片只负责边框与裁剪，树组件自己负责滚动，避免同一块文件树里再出现两根垂直滚动条。
 - 继续收口小说工作台的 harness 修复边界：保留通用修复（`unlockAfterPhase` 只做解锁后按需可读、workflow-level writable target bootstrap、`HARNESS_ACTION_RESULT` 作为文件状态唯一真相），但撤回了 runtime 里对 `debate/ideas/*.md` 的全局默认猜测；现在 `resolveDebateIdeaBankPaths` 只认 workflow 显式 `ideaBank.*Path`，并新增测试锁定这一点，避免把某个工作台的目录约定硬编码进所有辩论的通用 runtime。与此同时也已核实当前“神作小说工作台”对应策略与其 workspace 下已有 debates 的持久化 `workflow.json` 本身就已经是显式 `ideaBank` 配置，因此这次不需要再额外回填数据库。
 - 修正 `docker/seed_democratic_centralism_strategy.sql` 里 Phase 1.5 的投票示例：不再教模型调用旧的 `debate_vote_cast` + `selections` 结构，改为与主 runtime 一致的 harness `vote_cast` debate-action 协议，避免 reseed / 导入后把过时投票语义重新注入 prompt。
 - 收口 harness 的读写面与目标推进链：runtime 现在把 shared readable surface 和 writable surface 分开计算，`list/search` 返回的路径会直接写回 seat working set，下一轮 policy 能从 `list/search` 正常推进到 `read`；`read` 也改成只允许读取当前已知 target，不再借 `allowedOutputPaths` 扩大到整个 shared 写入面。

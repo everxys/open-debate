@@ -3,11 +3,6 @@
   "/api/debates/[id]/turns/route": "app/api/debates/[id]/turns/route.js",
   "/api/debates/[id]/summary-jobs/route": "app/api/debates/[id]/summary-jobs/route.js",
   "/api/debates/[id]/files/route": "app/api/debates/[id]/files/route.js",
-  "/api/agents/route": "app/api/agents/route.js",
-  "/api/debates/[id]/turns/[turnNumber]/route": "app/api/debates/[id]/turns/[turnNumber]/route.js",
-  "/api/debates/[id]/all-files/route": "app/api/debates/[id]/all-files/route.js",
-  "/api/debates/[id]/file-statuses/route": "app/api/debates/[id]/file-statuses/route.js",
-  "/api/debates/[id]/events/route": "app/api/debates/[id]/events/route.js",
-  "/(main)/debates/[id]/page": "app/(main)/debates/[id]/page.js",
-  "/(main)/debates/page": "app/(main)/debates/page.js"
+  "/(main)/debates/page": "app/(main)/debates/page.js",
+  "/(main)/debates/[id]/page": "app/(main)/debates/[id]/page.js"
 }

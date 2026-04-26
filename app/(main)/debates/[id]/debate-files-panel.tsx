@@ -165,7 +165,7 @@ export function DebateFilesPanel(props: {
   }, []);
 
   return (
-    <div className="debateFilesViewport">
+    <div className="debateFilesLayout">
       <div className="softBox">
         <DebateFilesToolbar
           nodeCount={nodeCount}
@@ -181,14 +181,12 @@ export function DebateFilesPanel(props: {
       ) : !props.hasFiles ? (
         <div className="softBox muted debateFilesEmptyState">暂无文件（通常需要至少一轮发言后才会逐步生成）。</div>
       ) : (
-        <div
-          className="softBox treeRoot debateFilesTreeViewport"
-          style={{ padding: 0 }}
-          onContextMenu={props.onRootContextMenu}
-        >
-          <Tree<FsNode> data={props.tree} width="100%" height={treeHeight} indent={18} rowHeight={rowHeight} openByDefault={false}>
-            {props.renderNode}
-          </Tree>
+        <div className="softBox debateFilesTreeCard">
+          <div className="debateFilesTreeFrame" onContextMenu={props.onRootContextMenu}>
+            <Tree<FsNode> data={props.tree} width="100%" height={treeHeight} indent={18} rowHeight={rowHeight} openByDefault={false}>
+              {props.renderNode}
+            </Tree>
+          </div>
         </div>
       )}
       <DebateFilesContextMenu

@@ -1378,17 +1378,7 @@ button {
   overflow: hidden;
 }
 
-.debateFilesPanel .filesTreeBox {
-  min-height: 0;
-  flex: 1;
-}
-
-.debateFilesPanel .filesTreeBox .treeRoot {
-  height: 100%;
-  min-height: 0;
-}
-
-.debateFilesViewport {
+.debateFilesLayout {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -1401,13 +1391,16 @@ button {
   min-height: 0;
 }
 
-.debateFilesTreeViewport {
+.debateFilesTreeCard {
+  padding: 0;
+  overflow: hidden;
+}
+
+.debateFilesTreeFrame {
   flex: 0 0 auto;
-  align-self: stretch;
   min-height: 0;
-  height: auto;
   max-height: min(62dvh, calc(100dvh - 240px));
-  overflow: auto;
+  overflow: hidden;
 }
 
 .debateFilesToolbar {
@@ -1579,6 +1572,10 @@ button {
   }
 
   .debateFilesTreeViewport {
+    max-height: min(52dvh, calc(100dvh - 280px));
+  }
+
+  .debateFilesTreeFrame {
     max-height: min(52dvh, calc(100dvh - 280px));
   }
 }
