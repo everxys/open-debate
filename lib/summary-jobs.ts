@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import { sql } from "kysely";
 
 import { ensureDb } from "@/lib/db";
+import { normalizeNullableTimestampString, normalizeTimestampString } from "@/lib/timestamps";
 
 export type DebateSummaryJobKind = "turn_summary" | "round_summary" | "facts_board";
 export const FACTS_BOARD_JOB_KEY = "facts:board";
@@ -153,17 +154,17 @@ function normalizeSummaryJobRow(row: SummaryJobRow): DebateSummaryJobRecord {
     dependsOnKeys: normalizeStringArray(row.depends_on_keys),
     payload: normalizePayload(row.payload_json),
     priority: Number(row.priority ?? 100),
-    runAfter: row.run_after ? String(row.run_after) : null,
+    runAfter: normalizeNullableTimestampString(row.run_after),
     attemptCount: Number(row.attempt_count ?? 0),
     lastError: row.last_error ? String(row.last_error) : null,
-    nextRetryAt: row.next_retry_at ? String(row.next_retry_at) : null,
+    nextRetryAt: normalizeNullableTimestampString(row.next_retry_at),
     lockedBy: row.locked_by ? String(row.locked_by) : null,
-    lockedAt: row.locked_at ? String(row.locked_at) : null,
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at),
-    completedAt: row.completed_at ? String(row.completed_at) : null,
+    lockedAt: normalizeNullableTimestampString(row.locked_at),
+    createdAt: normalizeTimestampString(row.created_at),
+    updatedAt: normalizeTimestampString(row.updated_at),
+    completedAt: normalizeNullableTimestampString(row.completed_at),
     lockedWorkerStatus: row.locked_worker_status ? String(row.locked_worker_status) : null,
-    lockedWorkerLastHeartbeatAt: row.locked_worker_last_heartbeat_at ? String(row.locked_worker_last_heartbeat_at) : null
+    lockedWorkerLastHeartbeatAt: normalizeNullableTimestampString(row.locked_worker_last_heartbeat_at)
   };
 }
 
@@ -177,15 +178,15 @@ function normalizeSummaryWorkerRow(row: SummaryWorkerRow): DebateSummaryWorkerHe
     id: String(row.id),
     mode: String(row.mode),
     status: String(row.status),
-    startedAt: String(row.started_at),
-    lastHeartbeatAt: String(row.last_heartbeat_at),
+    startedAt: normalizeTimestampString(row.started_at),
+    lastHeartbeatAt: normalizeTimestampString(row.last_heartbeat_at),
     currentJobId: row.current_job_id ? String(row.current_job_id) : null,
     currentDebateId: row.current_debate_id ? String(row.current_debate_id) : null,
     currentJobKey: row.current_job_key ? String(row.current_job_key) : null,
     claimedCount: Number(row.claimed_count ?? 0),
     completedCount: Number(row.completed_count ?? 0),
     failedCount: Number(row.failed_count ?? 0),
-    updatedAt: String(row.updated_at),
+    updatedAt: normalizeTimestampString(row.updated_at),
     stale
   };
 }
@@ -605,9 +606,9 @@ export async function recoverStaleDebateSummaryJobs(options?: { debateId?: strin
     const recoveredBecause = String(row.recovered_because ?? "").trim();
     if (!recoveredBecause) continue;
     const previousLockedBy = row.locked_by ? String(row.locked_by) : null;
-    const previousLockedAt = row.locked_at ? String(row.locked_at) : null;
+    const previousLockedAt = normalizeNullableTimestampString(row.locked_at);
     const workerStatus = row.worker_status ? String(row.worker_status) : null;
-    const workerLastHeartbeatAt = row.worker_last_heartbeat_at ? String(row.worker_last_heartbeat_at) : null;
+    const workerLastHeartbeatAt = normalizeNullableTimestampString(row.worker_last_heartbeat_at);
     const payload = normalizePayload(row.payload_json);
     const recoveredPayload = JSON.stringify({
       ...payload,

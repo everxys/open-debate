@@ -9,6 +9,7 @@ import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
 import { createServerLogger } from "@/lib/logger/server";
 import { runDebate } from "@/lib/runtime";
 import { listStrategyFileAccessRules, mergeWorkflowConfigWithFileAccessRules } from "@/lib/strategies";
+import { normalizeNullableTimestampString, normalizeTimestampString } from "@/lib/timestamps";
 import { sanitizeProviderMaxOutputTokens } from "@/lib/token-limits";
 import type { DebateRecord } from "@/lib/types";
 import {
@@ -149,18 +150,18 @@ function normalizeDebateRow(row: Record<string, unknown>): DebateRecord {
     workflowPhaseRound: row.workflow_phase_round === null ? null : Number(row.workflow_phase_round),
     runtimeNoticeKind: (row.runtime_notice_kind as DebateRecord["runtimeNoticeKind"]) ?? null,
     runtimeNoticeMessage: (row.runtime_notice_message as string | null) ?? null,
-    runtimeNoticeAt: (row.runtime_notice_at as string | null) ?? null,
+    runtimeNoticeAt: normalizeNullableTimestampString(row.runtime_notice_at),
     lastErrorCode: (row.last_error_code as string | null) ?? null,
     lastErrorMessage: (row.last_error_message as string | null) ?? null,
     ignoredRuntimeErrorSignature: (row.ignored_runtime_error_signature as string | null) ?? null,
-    ignoredRuntimeErrorAt: (row.ignored_runtime_error_at as string | null) ?? null,
+    ignoredRuntimeErrorAt: normalizeNullableTimestampString(row.ignored_runtime_error_at),
     autoRecoverOnceOnFailed: Boolean(row.auto_recover_once_on_failed),
-    autoRecoverOnceUsedAt: (row.auto_recover_once_used_at as string | null) ?? null,
-    startedAt: (row.started_at as string | null) ?? null,
-    finishedAt: (row.finished_at as string | null) ?? null,
+    autoRecoverOnceUsedAt: normalizeNullableTimestampString(row.auto_recover_once_used_at),
+    startedAt: normalizeNullableTimestampString(row.started_at),
+    finishedAt: normalizeNullableTimestampString(row.finished_at),
     stoppedReason: (row.stopped_reason as string | null) ?? null,
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at)
+    createdAt: normalizeTimestampString(row.created_at),
+    updatedAt: normalizeTimestampString(row.updated_at)
   };
 }
 
@@ -206,6 +207,7 @@ function appendWorkflowSummaryLines(lines: string[], workflow: NonNullable<Retur
     lines.push(`- idea bank raw: ${workflow.ideaBank.rawIdeaBankPath ?? "(none)"}`);
     lines.push(
       `- idea bank derived: ${[
+        workflow.ideaBank.derivedFiles.currentBattlefieldPath,
         workflow.ideaBank.derivedFiles.selectedSTierPath,
         workflow.ideaBank.derivedFiles.selectedATierPath,
         workflow.ideaBank.derivedFiles.rejectedOrMergedPath,

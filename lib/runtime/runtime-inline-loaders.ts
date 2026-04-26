@@ -537,22 +537,36 @@ export async function loadWorkflowIdeaBankInline(input: {
   });
   const rawPath = ideaBank.rawIdeaBankPath;
   const derived = ideaBank.derivedFiles;
+  const currentBattlefieldPath = derived.currentBattlefieldPath;
+  const currentBattlefieldContent = currentBattlefieldPath
+    ? ((await readDebateFile(input.userId, input.debateId, currentBattlefieldPath)) ?? "").trim()
+    : "";
 
   if (input.phaseKind === "deliberation") {
+    if (currentBattlefieldPath) {
+      lines.push(`- Current battlefield path: ${currentBattlefieldPath} (primary Phase 2 orientation ledger; read this first every round).`);
+      if (currentBattlefieldContent) {
+        lines.push("", `## Current battlefield · ${currentBattlefieldPath}`, clipPromptInlineContent(currentBattlefieldContent, 6_000));
+      } else {
+        lines.push("- Current battlefield is still empty. If the round needs a stable ledger target, fill this file before pushing heavy deliverables.");
+      }
+    }
     if (rawPath) {
       lines.push(`- Raw idea bank path: ${rawPath} (read-only source material; do not overwrite this file).`);
       const rawContent = (await readDebateFile(input.userId, input.debateId, rawPath)) ?? "";
-      if (rawContent.trim()) {
-        lines.push("", `## Raw idea bank · ${rawPath}`, clipPromptInlineContent(rawContent.trim()));
+      if (!currentBattlefieldContent && rawContent.trim()) {
+        lines.push("", `## Raw idea bank · ${rawPath}`, clipPromptInlineContent(rawContent.trim(), 10_000));
       }
     }
     lines.push("- In this phase, you must collaboratively filter, merge, reject, regroup, and invent ideas.");
-    lines.push("- Write the screening results into derived idea files instead of mutating the raw idea bank.");
+    lines.push("- Treat the derived idea files as active Phase 2 ledgers, not deferred placeholders for Phase 3.");
+    lines.push("- Write the screening and compression results into current-battlefield / selected-s-tier / event-mappings / selected-a-tier before trying to expand heavy final deliverables.");
     const derivedTargets = [
+      derived.currentBattlefieldPath,
       derived.selectedSTierPath,
+      derived.eventMappingsPath,
       derived.selectedATierPath,
       derived.rejectedOrMergedPath,
-      derived.eventMappingsPath,
       derived.newlyInventedIdeasPath
     ].filter((item): item is string => Boolean(item));
     if (derivedTargets.length > 0) {
@@ -562,11 +576,17 @@ export async function loadWorkflowIdeaBankInline(input: {
     if (rawPath) {
       lines.push(`- Raw idea bank path: ${rawPath} (do not reopen the raw bank unless you must verify unresolved risk).`);
     }
+    if (currentBattlefieldPath) {
+      lines.push(`- Current battlefield path: ${currentBattlefieldPath} (use this as the quickest maturity check before deciding on consolidation).`);
+    }
     lines.push("- In this phase, do not expand the scope again by default.");
     lines.push("- Focus on whether the debate is ready to enter consolidation, what blockers remain, and whether the required outputs can now be unified.");
   } else if (input.phaseKind === "finalization") {
     if (rawPath) {
       lines.push(`- Raw idea bank path: ${rawPath} (do not return to this file by default in finalization).`);
+    }
+    if (currentBattlefieldPath) {
+      lines.push(`- Current battlefield path: ${currentBattlefieldPath} (use this as the compact source of unresolved gaps before widening to larger files).`);
     }
     lines.push("- In this phase, use the idea screening results as the primary source of truth.");
   }
@@ -574,13 +594,14 @@ export async function loadWorkflowIdeaBankInline(input: {
   const derivedReadOrder =
     input.phaseKind === "deliberation"
       ? [
+          derived.currentBattlefieldPath,
           derived.selectedSTierPath,
+          derived.eventMappingsPath,
           derived.selectedATierPath,
           derived.rejectedOrMergedPath,
-          derived.eventMappingsPath,
           derived.newlyInventedIdeasPath
         ]
-      : [derived.selectedSTierPath, derived.eventMappingsPath, derived.selectedATierPath];
+      : [derived.currentBattlefieldPath, derived.selectedSTierPath, derived.eventMappingsPath, derived.selectedATierPath];
 
   for (const path of derivedReadOrder) {
     if (!path) continue;
@@ -595,6 +616,7 @@ export async function loadWorkflowIdeaBankInline(input: {
 type ResolvedIdeaBankPaths = {
   rawIdeaBankPath: string | null;
   derivedFiles: {
+    currentBattlefieldPath: string | null;
     selectedSTierPath: string | null;
     selectedATierPath: string | null;
     rejectedOrMergedPath: string | null;
@@ -613,6 +635,7 @@ export async function resolveDebateIdeaBankPaths(input: {
   return {
     rawIdeaBankPath: configured?.rawIdeaBankPath ?? null,
     derivedFiles: {
+      currentBattlefieldPath: configured?.derivedFiles.currentBattlefieldPath ?? null,
       selectedSTierPath: configured?.derivedFiles.selectedSTierPath ?? null,
       selectedATierPath: configured?.derivedFiles.selectedATierPath ?? null,
       rejectedOrMergedPath: configured?.derivedFiles.rejectedOrMergedPath ?? null,

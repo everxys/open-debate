@@ -10,6 +10,7 @@ test("resolveDebateIdeaBankPaths does not infer workspace-specific defaults", as
       ideaBank: {
         rawIdeaBankPath: null,
         derivedFiles: {
+          currentBattlefieldPath: null,
           selectedSTierPath: null,
           selectedATierPath: null,
           rejectedOrMergedPath: null,
@@ -24,6 +25,7 @@ test("resolveDebateIdeaBankPaths does not infer workspace-specific defaults", as
 
   assert.equal(result.rawIdeaBankPath, null);
   assert.deepEqual(result.derivedFiles, {
+    currentBattlefieldPath: null,
     selectedSTierPath: null,
     selectedATierPath: null,
     rejectedOrMergedPath: null,

@@ -1,4 +1,5 @@
 import { sanitizeProviderMaxOutputTokens } from "@/lib/token-limits";
+import { normalizeNullableTimestampString, normalizeTimestampString } from "@/lib/timestamps";
 import type { AgentRecord, DebateRecord, DebateTurnRecord, StructuredOutput } from "@/lib/types";
 import type { NormalizedDebateWorkflow } from "@/lib/workflow";
 
@@ -146,17 +147,6 @@ export function parseResponse(raw: string): {
   }
 
   return { content: raw, structuredOutput: null, parseStatus: "ok" as const };
-}
-
-function normalizeTimestampString(value: unknown) {
-  if (value === null || value === undefined) return "";
-  if (value instanceof Date) return value.toISOString();
-  return String(value);
-}
-
-function normalizeNullableTimestampString(value: unknown) {
-  if (value === null || value === undefined) return null;
-  return normalizeTimestampString(value);
 }
 
 export function normalizeDebateTurnRow(row: Record<string, unknown>): DebateTurnRecord {

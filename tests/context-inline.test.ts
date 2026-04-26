@@ -79,6 +79,7 @@ test("unlockAfterPhase becomes readable without becoming auto-read", () => {
       ideaBank: {
         rawIdeaBankPath: null,
         derivedFiles: {
+          currentBattlefieldPath: null,
           selectedSTierPath: null,
           selectedATierPath: null,
           rejectedOrMergedPath: null,

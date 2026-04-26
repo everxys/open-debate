@@ -102,6 +102,7 @@ export type DebateWorkflowConfig = {
   ideaBank?: {
     rawIdeaBankPath?: string | null;
     derivedFiles?: {
+      currentBattlefieldPath?: string | null;
       selectedSTierPath?: string | null;
       selectedATierPath?: string | null;
       rejectedOrMergedPath?: string | null;
@@ -185,6 +186,7 @@ export type NormalizedDebateWorkflow = {
   ideaBank: {
     rawIdeaBankPath: string | null;
     derivedFiles: {
+      currentBattlefieldPath: string | null;
       selectedSTierPath: string | null;
       selectedATierPath: string | null;
       rejectedOrMergedPath: string | null;
@@ -291,6 +293,7 @@ export function createDefaultDebateWorkflowConfig(): DebateWorkflowConfig {
     ideaBank: {
       rawIdeaBankPath: null,
       derivedFiles: {
+        currentBattlefieldPath: null,
         selectedSTierPath: null,
         selectedATierPath: null,
         rejectedOrMergedPath: null,
@@ -752,6 +755,8 @@ function normalizeIdeaBank(value: unknown) {
   return {
     rawIdeaBankPath: obj?.rawIdeaBankPath === null ? null : normalizeWorkflowFilePath(obj?.rawIdeaBankPath),
     derivedFiles: {
+      currentBattlefieldPath:
+        derivedRaw?.currentBattlefieldPath === null ? null : normalizeWorkflowFilePath(derivedRaw?.currentBattlefieldPath),
       selectedSTierPath: derivedRaw?.selectedSTierPath === null ? null : normalizeWorkflowFilePath(derivedRaw?.selectedSTierPath),
       selectedATierPath: derivedRaw?.selectedATierPath === null ? null : normalizeWorkflowFilePath(derivedRaw?.selectedATierPath),
       rejectedOrMergedPath: derivedRaw?.rejectedOrMergedPath === null ? null : normalizeWorkflowFilePath(derivedRaw?.rejectedOrMergedPath),

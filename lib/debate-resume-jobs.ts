@@ -5,6 +5,7 @@ import { sql } from "kysely";
 import { ensureDb } from "@/lib/db";
 import { createServerLogger } from "@/lib/logger/server";
 import { getQuotaProfileSummaryForSystem } from "@/lib/quota-control";
+import { normalizeNullableTimestampString, normalizeTimestampString } from "@/lib/timestamps";
 
 const quotaResumeLogger = createServerLogger("quota-resume");
 const RESUME_JOB_STALE_AFTER_MS = 120_000;
@@ -27,7 +28,8 @@ type ResumeJobRecord = {
 };
 
 function parseNullableString(value: unknown) {
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
+  const normalized = normalizeNullableTimestampString(value);
+  return typeof normalized === "string" && normalized.trim().length > 0 ? normalized : null;
 }
 
 function parseResumeJobRow(row: Row): ResumeJobRecord {
@@ -35,14 +37,14 @@ function parseResumeJobRow(row: Row): ResumeJobRecord {
     id: String(row.id),
     debateId: String(row.debate_id),
     profileId: String(row.profile_id),
-    resumeAt: String(row.resume_at),
+    resumeAt: normalizeTimestampString(row.resume_at),
     reason: String(row.reason ?? "quota_wait"),
     status: String(row.status ?? "pending"),
     lockedBy: parseNullableString(row.locked_by),
     lockedAt: parseNullableString(row.locked_at),
     lastError: parseNullableString(row.last_error),
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at),
+    createdAt: normalizeTimestampString(row.created_at),
+    updatedAt: normalizeTimestampString(row.updated_at),
     completedAt: parseNullableString(row.completed_at)
   };
 }

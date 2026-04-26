@@ -957,6 +957,7 @@ function formatWorkflowRulesMarkdown(raw: string) {
     );
     rules.push(
       `- 点子库派生文件：${[
+        parsed.ideaBank.derivedFiles.currentBattlefieldPath,
         parsed.ideaBank.derivedFiles.selectedSTierPath,
         parsed.ideaBank.derivedFiles.selectedATierPath,
         parsed.ideaBank.derivedFiles.rejectedOrMergedPath,

@@ -105,6 +105,37 @@ async function getWorkflowAllowedOutputPaths(input: {
   return Array.from(paths);
 }
 
+async function getWorkflowPhasePreferredWritablePaths(input: {
+  workflow: Awaited<ReturnType<typeof loadDebateWorkflow>>;
+  userId: string;
+  debateId: string;
+  currentPhaseKind: WorkflowPhaseKind | null;
+}) {
+  if (!input.workflow?.enabled || !input.currentPhaseKind) return [] as string[];
+  const ideaBank = await resolveDebateIdeaBankPaths({
+    workflow: input.workflow,
+    userId: input.userId,
+    debateId: input.debateId
+  });
+  const derived = ideaBank.derivedFiles;
+  if (input.currentPhaseKind === "deliberation") {
+    return [
+      derived.currentBattlefieldPath,
+      derived.selectedSTierPath,
+      derived.eventMappingsPath,
+      derived.selectedATierPath,
+      derived.rejectedOrMergedPath,
+      derived.newlyInventedIdeasPath
+    ].filter((item): item is string => Boolean(item));
+  }
+  if (input.currentPhaseKind === "finalization_vote" || input.currentPhaseKind === "finalization") {
+    return [derived.currentBattlefieldPath, derived.selectedSTierPath, derived.eventMappingsPath, derived.selectedATierPath].filter(
+      (item): item is string => Boolean(item)
+    );
+  }
+  return [] as string[];
+}
+
 async function getWorkflowReadableSharedPaths(input: {
   workflow: Awaited<ReturnType<typeof loadDebateWorkflow>>;
   userId: string;
@@ -246,6 +277,7 @@ type ProviderPromptContext = ProviderCallInput & {
   readableSharedPaths: string[];
   requiredDeliverables: NonNullable<Awaited<ReturnType<typeof loadDebateWorkflow>>>["deliverables"]["requiredFiles"] | [];
   pendingDeliverables: Awaited<ReturnType<typeof listMissingRequiredDeliverables>>;
+  phasePreferredWritablePaths: string[];
   contextAccessLines: string[];
   prompt: string;
   implicitReadAudit: DebateFileActivityAudit;
@@ -391,6 +423,12 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
     debateId: input.debate.id,
     currentPhaseKind: currentPhase?.kind ?? null,
     allowedOutputPaths
+  });
+  const phasePreferredWritablePaths = await getWorkflowPhasePreferredWritablePaths({
+    workflow,
+    userId: input.userId,
+    debateId: input.debate.id,
+    currentPhaseKind: currentPhase?.kind ?? null
   });
   const currentOutputMaxTokens = getWorkflowOutputMaxTokens(workflow, currentPhase?.kind ?? null, input.agent.maxOutputTokens);
   const contextAccessLines = buildContextAccessSummaryLines({
@@ -583,6 +621,7 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
     readableSharedPaths,
     requiredDeliverables,
     pendingDeliverables,
+    phasePreferredWritablePaths,
     contextAccessLines,
     prompt,
     implicitReadAudit
@@ -742,7 +781,9 @@ async function runOpenAiProviderLoop(
   let dynamicOpenVote = context.openVote;
   let actionPolicy = resolveRuntimeActionPolicy({
     roleType: context.currentRoleType,
+    currentPhaseKind: context.currentPhase?.kind ?? null,
     pendingDeliverables: context.pendingDeliverables,
+    phasePreferredWritablePaths: context.phasePreferredWritablePaths,
     openVote: dynamicOpenVote,
     debateAgentId: context.debateAgentId,
     workingSet,
@@ -869,6 +910,7 @@ async function runOpenAiProviderLoop(
         readableSharedPaths: runtimeReadableSharedPaths,
         allowedOutputPaths: runtimeAllowedOutputPaths,
         readTargetPaths: actionPolicy.knownTargetPaths,
+        writeTargetPaths: actionPolicy.preferredWritableTargetPaths,
         action: parsedAction.action,
         participantCount: context.participantCount,
         voterName: context.agent.name,
@@ -896,7 +938,9 @@ async function runOpenAiProviderLoop(
       });
       actionPolicy = resolveRuntimeActionPolicy({
         roleType: context.currentRoleType,
+        currentPhaseKind: context.currentPhase?.kind ?? null,
         pendingDeliverables: context.pendingDeliverables,
+        phasePreferredWritablePaths: context.phasePreferredWritablePaths,
         openVote: dynamicOpenVote,
         debateAgentId: context.debateAgentId,
         workingSet,
@@ -948,7 +992,9 @@ async function runAnthropicProviderLoop(
   let dynamicOpenVote = context.openVote;
   let actionPolicy = resolveRuntimeActionPolicy({
     roleType: context.currentRoleType,
+    currentPhaseKind: context.currentPhase?.kind ?? null,
     pendingDeliverables: context.pendingDeliverables,
+    phasePreferredWritablePaths: context.phasePreferredWritablePaths,
     openVote: dynamicOpenVote,
     debateAgentId: context.debateAgentId,
     workingSet,
@@ -1059,6 +1105,7 @@ async function runAnthropicProviderLoop(
         readableSharedPaths: runtimeReadableSharedPaths,
         allowedOutputPaths: runtimeAllowedOutputPaths,
         readTargetPaths: actionPolicy.knownTargetPaths,
+        writeTargetPaths: actionPolicy.preferredWritableTargetPaths,
         action: parsedAction.action,
         participantCount: context.participantCount,
         voterName: context.agent.name,
@@ -1086,7 +1133,9 @@ async function runAnthropicProviderLoop(
       });
       actionPolicy = resolveRuntimeActionPolicy({
         roleType: context.currentRoleType,
+        currentPhaseKind: context.currentPhase?.kind ?? null,
         pendingDeliverables: context.pendingDeliverables,
+        phasePreferredWritablePaths: context.phasePreferredWritablePaths,
         openVote: dynamicOpenVote,
         debateAgentId: context.debateAgentId,
         workingSet,

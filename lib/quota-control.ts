@@ -7,6 +7,7 @@ import type { OpenDebateDb } from "@/lib/db-schema";
 import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { createServerLogger } from "@/lib/logger/server";
+import { normalizeNullableTimestampString, normalizeTimestampString } from "@/lib/timestamps";
 import type {
   AgentUsageControlMode,
   QuotaPacingMode,
@@ -116,7 +117,8 @@ export class QuotaDelayError extends Error {
 }
 
 function parseNullableString(value: unknown) {
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
+  const normalized = normalizeNullableTimestampString(value);
+  return typeof normalized === "string" && normalized.trim().length > 0 ? normalized : null;
 }
 
 function parseNullableInt(value: unknown) {
@@ -143,8 +145,8 @@ function parseQuotaProfileRow(row: Row): QuotaProfileRecord {
     pacingValue: parseRequiredInt(row.pacing_value),
     resetTimezone: String(row.reset_timezone ?? DEFAULT_QUOTA_RESET_TIMEZONE),
     nextRequestNotBeforeAt: parseNullableString(row.next_request_not_before_at),
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at),
+    createdAt: normalizeTimestampString(row.created_at),
+    updatedAt: normalizeTimestampString(row.updated_at),
     deletedAt: parseNullableString(row.deleted_at)
   };
 }

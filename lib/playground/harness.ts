@@ -35,12 +35,14 @@ function buildHarnessResultMessage(result: unknown, allowedActions: string[]) {
 
 function buildHarnessPolicy(request: PlaygroundRunRequest, sandbox: PlaygroundSandbox) {
   const knownTargetPaths = sandbox.snapshot().filter((item) => item.scope === "debate").map((item) => item.path).slice(0, 10);
+  const knownWritableTargetPaths = knownTargetPaths.filter((path) => path.startsWith("sandbox/") || path.startsWith("outputs/"));
   return {
     allowedActions: request.enabledHarnessActions,
     preferredWriteAction: request.enabledHarnessActions.find((item) => item.startsWith("write_")) ?? null,
     reason: "Playground harness capability check.",
     knownTargetPaths,
-    knownWritableTargetPaths: knownTargetPaths.filter((path) => path.startsWith("sandbox/") || path.startsWith("outputs/"))
+    knownWritableTargetPaths,
+    preferredWritableTargetPaths: knownWritableTargetPaths
   };
 }
 

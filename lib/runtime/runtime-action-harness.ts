@@ -12,8 +12,9 @@ import {
   toolDebateFilesWrite
 } from "@/lib/runtime/debate-file-access";
 import { toolVoteCast } from "@/lib/runtime/tools";
+import { normalizeTimestampString } from "@/lib/timestamps";
 import type { DebateParticipantRoleType } from "@/lib/debate-role-types";
-import type { NormalizedWorkflowRequiredFile } from "@/lib/workflow";
+import type { NormalizedWorkflowRequiredFile, WorkflowPhaseKind } from "@/lib/workflow";
 import type { OpenOfficialVote } from "@/lib/runtime/workflow-phase";
 
 type WorkingSetFileRef = {
@@ -48,6 +49,7 @@ export type RuntimeActionPolicy = {
   reason: string;
   knownTargetPaths: string[];
   knownWritableTargetPaths: string[];
+  preferredWritableTargetPaths: string[];
 };
 
 export type RuntimeSeatWorkingSet = {
@@ -72,6 +74,7 @@ type SharedReadContext = WorkingSetContext & {
 type ExecuteHarnessActionInput = SharedReadContext & {
   action: RuntimeHarnessAction;
   readTargetPaths: string[];
+  writeTargetPaths: string[];
   participantCount: number;
   voterName: string;
   turnNumber: number;
@@ -225,11 +228,38 @@ function collectWorkingSetWritableTargets(input: {
 function collectBootstrapWritableTargets(input: {
   pendingDeliverables: NormalizedWorkflowRequiredFile[];
   allowedOutputPaths: string[];
+  phasePreferredWritablePaths: string[];
 }) {
   return dedupePaths([
+    ...input.phasePreferredWritablePaths,
     ...input.allowedOutputPaths.filter((item) => !normalizePath(item).endsWith("/")),
     ...input.pendingDeliverables.map((item) => item.path)
   ]);
+}
+
+function collectPreferredWritableTargets(input: {
+  currentPhaseKind: WorkflowPhaseKind | null;
+  phasePreferredWritablePaths: string[];
+  workingSetWritableTargets: string[];
+  bootstrapWritableTargetPaths: string[];
+  pendingDeliverables: NormalizedWorkflowRequiredFile[];
+}) {
+  const knownWritableTargets = [...input.workingSetWritableTargets, ...input.bootstrapWritableTargetPaths];
+  const preferredPhaseTargets = input.phasePreferredWritablePaths.filter((path) =>
+    knownWritableTargets.some((candidate) => normalizePath(candidate) === normalizePath(path))
+  );
+  if (preferredPhaseTargets.length > 0) return dedupePaths(preferredPhaseTargets);
+
+  const pendingDeliverablePathSet = new Set(input.pendingDeliverables.map((item) => normalizePath(item.path)));
+  const pendingTargets = knownWritableTargets.filter((path) => pendingDeliverablePathSet.has(normalizePath(path)));
+  if (pendingTargets.length > 0) return dedupePaths(pendingTargets);
+
+  if (input.currentPhaseKind === "deliberation") {
+    const markdownTargets = knownWritableTargets.filter((path) => normalizePath(path).endsWith(".md"));
+    if (markdownTargets.length > 0) return dedupePaths(markdownTargets.slice(0, 6));
+  }
+
+  return dedupePaths(knownWritableTargets);
 }
 
 async function loadDebateFileSnapshot(debateId: string, path: string): Promise<DebateFileSnapshot> {
@@ -268,7 +298,7 @@ async function listSharedFiles(input: SharedReadContext): Promise<SharedFileRow[
       path: normalizePath(String(row.path ?? "")),
       content: String(row.content ?? ""),
       version: Number(row.version ?? 0) || 0,
-      updatedAt: typeof row.updated_at === "string" ? row.updated_at : null
+      updatedAt: row.updated_at === null || row.updated_at === undefined ? null : normalizeTimestampString(row.updated_at)
     }))
     .filter((row) => isPathInSharedSurface(row.path, input.readableSharedPaths));
 }
@@ -585,7 +615,9 @@ export function buildRuntimeActionWorkingSetInline(workingSet: RuntimeSeatWorkin
 
 export function resolveRuntimeActionPolicy(input: {
   roleType: DebateParticipantRoleType;
+  currentPhaseKind: WorkflowPhaseKind | null;
   pendingDeliverables: NormalizedWorkflowRequiredFile[];
+  phasePreferredWritablePaths: string[];
   openVote: OpenOfficialVote | null;
   debateAgentId: string;
   workingSet: RuntimeSeatWorkingSet;
@@ -602,39 +634,50 @@ export function resolveRuntimeActionPolicy(input: {
   });
   const bootstrapWritableTargetPaths = collectBootstrapWritableTargets({
     pendingDeliverables: input.pendingDeliverables,
-    allowedOutputPaths: input.allowedOutputPaths
+    allowedOutputPaths: input.allowedOutputPaths,
+    phasePreferredWritablePaths: input.phasePreferredWritablePaths
   });
   const knownTargetPaths = dedupePaths([...workingSetReadTargets, ...bootstrapWritableTargetPaths]);
   const knownWritableTargetPaths = dedupePaths([...workingSetWritableTargets, ...bootstrapWritableTargetPaths]);
+  const preferredWritableTargetPaths = collectPreferredWritableTargets({
+    currentPhaseKind: input.currentPhaseKind,
+    phasePreferredWritablePaths: input.phasePreferredWritablePaths,
+    workingSetWritableTargets,
+    bootstrapWritableTargetPaths,
+    pendingDeliverables: input.pendingDeliverables
+  });
   const alreadyVoted = Boolean(
     input.openVote?.ballots?.some((ballot: { debateAgentId?: string | null }) => String(ballot.debateAgentId ?? "") === input.debateAgentId)
   );
   if (input.openVote && !alreadyVoted) {
     return {
-      allowedActions: ["vote_cast"],
-      preferredWriteAction: null,
-      reason: "There is an open official vote and this seat has not voted yet.",
-      knownTargetPaths,
-      knownWritableTargetPaths
-    };
+        allowedActions: ["vote_cast"],
+        preferredWriteAction: null,
+        reason: "There is an open official vote and this seat has not voted yet.",
+        knownTargetPaths,
+        knownWritableTargetPaths,
+        preferredWritableTargetPaths: []
+      };
   }
   if (knownTargetPaths.length === 0) {
     return {
-      allowedActions: ["list", "search"],
-      preferredWriteAction: null,
-      reason: "No working-set target is known yet. Discover the target path first.",
-      knownTargetPaths,
-      knownWritableTargetPaths
-    };
+        allowedActions: ["list", "search"],
+        preferredWriteAction: null,
+        reason: "No working-set target is known yet. Discover the target path first.",
+        knownTargetPaths,
+        knownWritableTargetPaths,
+        preferredWritableTargetPaths
+      };
   }
   if (knownWritableTargetPaths.length === 0) {
     return {
-      allowedActions: ["read"],
-      preferredWriteAction: null,
-      reason: "A readable target is known, but no writable shared target is available for this step.",
-      knownTargetPaths,
-      knownWritableTargetPaths
-    };
+        allowedActions: ["read"],
+        preferredWriteAction: null,
+        reason: "A readable target is known, but no writable shared target is available for this step.",
+        knownTargetPaths,
+        knownWritableTargetPaths,
+        preferredWritableTargetPaths
+      };
   }
   const pendingDeliverablePathSet = new Set(input.pendingDeliverables.map((item) => normalizePath(item.path)));
   const hasPendingWorkingSetDeliverableTarget = workingSetWritableTargets.some((path) =>
@@ -643,8 +686,15 @@ export function resolveRuntimeActionPolicy(input: {
   const hasBootstrapPendingDeliverableTarget =
     workingSetWritableTargets.length === 0 &&
     bootstrapWritableTargetPaths.some((path) => pendingDeliverablePathSet.has(normalizePath(path)));
+  const hasPreferredPhaseTarget = preferredWritableTargetPaths.some((path) =>
+    input.phasePreferredWritablePaths.some((candidate) => normalizePath(candidate) === normalizePath(path))
+  );
   const preferredWriteAction: RuntimeActionName | null =
-    hasPendingWorkingSetDeliverableTarget || hasBootstrapPendingDeliverableTarget
+    hasPreferredPhaseTarget
+      ? preferredWritableTargetPaths.some((path) => path.endsWith(".md"))
+        ? "write_section"
+        : "write_replace"
+      : hasPendingWorkingSetDeliverableTarget || hasBootstrapPendingDeliverableTarget
       ? "write_replace"
       : knownWritableTargetPaths.some((path) => path.endsWith(".md"))
         ? "write_section"
@@ -655,10 +705,13 @@ export function resolveRuntimeActionPolicy(input: {
     allowedActions: preferredWriteAction ? ["read", preferredWriteAction] : ["read"],
     preferredWriteAction,
     reason: preferredWriteAction
-      ? `Use the known target directly; only ${preferredWriteAction} is exposed for writes this step.`
+      ? hasPreferredPhaseTarget
+        ? `Use the phase-preferred ledger target directly; only ${preferredWriteAction} is exposed for writes this step.`
+        : `Use the known target directly; only ${preferredWriteAction} is exposed for writes this step.`
       : "Read the known target directly; this step does not expose a write action.",
     knownTargetPaths,
-    knownWritableTargetPaths
+    knownWritableTargetPaths,
+    preferredWritableTargetPaths
   };
 }
 
@@ -688,6 +741,9 @@ export function buildRuntimeActionInstructions(input: {
   }
   if (input.policy.knownWritableTargetPaths.length > 0) {
     lines.push(`Writable targets: ${input.policy.knownWritableTargetPaths.slice(0, 8).join(", ")}`);
+  }
+  if (input.policy.preferredWritableTargetPaths.length > 0) {
+    lines.push(`Preferred write targets this step: ${input.policy.preferredWritableTargetPaths.slice(0, 8).join(", ")}`);
   }
   if (allowedShapeLines.length > 0) {
     lines.push("If you need an action, output exactly one fenced JSON block matching one of the allowed shapes below and nothing else:");
@@ -912,48 +968,56 @@ export async function executeRuntimeHarnessAction(input: ExecuteHarnessActionInp
       reason: action.reason ?? undefined
     });
   } else {
-    const stat = await toolDebateFilesStat({
-      debateAgentId: input.debateAgentId,
-      debateId: input.debateId,
-      turnNumber: input.turnNumber,
-      roundNumber: input.roundNumber,
-      path: action.path,
-      now: input.now,
-      allowedOutputPaths: input.allowedOutputPaths
-    });
-    const baseVersion = typeof stat === "object" && stat && "version" in stat ? Number(stat.version ?? 0) : null;
-    const baseUpdatedAt =
-      typeof stat === "object" && stat && "updatedAt" in stat && typeof stat.updatedAt === "string"
-        ? stat.updatedAt
-        : null;
-    const mode =
-      action.action === "write_replace" ? "replace" : action.action === "write_append" ? "append" : "section_merge";
-    result = await toolDebateFilesWrite({
-      userId: input.userId,
-      debateAgentId: input.debateAgentId,
-      debateId: input.debateId,
-      turnNumber: input.turnNumber,
-      roundNumber: input.roundNumber,
-      path: action.path,
-      content: action.content,
-      mode,
-      baseVersion,
-      baseUpdatedAt,
-      targetHeading: action.action === "write_section" ? action.heading : null,
-      now: input.now,
-      allowedOutputPaths: input.allowedOutputPaths
-    });
-    if (typeof result === "object" && result && "ok" in result && result.ok === true) {
-      appendWorkingSetWrite(
-        workingSet,
-        makeFileRef({
-          path: action.path,
-          source: "shared",
-          content: action.content,
-          version: "version" in result ? Number((result as { version?: unknown }).version ?? 0) : null,
-          updatedAt: "updatedAt" in result ? String((result as { updatedAt?: unknown }).updatedAt ?? "") : null
-        })
-      );
+    const writeTargetSet = new Set(input.writeTargetPaths.map((item) => normalizePath(item)));
+    if (writeTargetSet.size > 0 && !writeTargetSet.has(action.path)) {
+      result = { error: `WRITE_TARGET_NOT_ALLOWED: ${action.path}` };
+    } else {
+      const stat = await toolDebateFilesStat({
+        debateAgentId: input.debateAgentId,
+        debateId: input.debateId,
+        turnNumber: input.turnNumber,
+        roundNumber: input.roundNumber,
+        path: action.path,
+        now: input.now,
+        allowedOutputPaths: input.allowedOutputPaths
+      });
+      const baseVersion = typeof stat === "object" && stat && "version" in stat ? Number(stat.version ?? 0) : null;
+      const baseUpdatedAt =
+        typeof stat === "object" && stat && "updatedAt" in stat && typeof stat.updatedAt === "string"
+          ? stat.updatedAt
+          : null;
+      const mode =
+        action.action === "write_replace" ? "replace" : action.action === "write_append" ? "append" : "section_merge";
+      result = await toolDebateFilesWrite({
+        userId: input.userId,
+        debateAgentId: input.debateAgentId,
+        debateId: input.debateId,
+        turnNumber: input.turnNumber,
+        roundNumber: input.roundNumber,
+        path: action.path,
+        content: action.content,
+        mode,
+        baseVersion,
+        baseUpdatedAt,
+        targetHeading: action.action === "write_section" ? action.heading : null,
+        now: input.now,
+        allowedOutputPaths: input.allowedOutputPaths
+      });
+      if (typeof result === "object" && result && "ok" in result && result.ok === true) {
+        appendWorkingSetWrite(
+          workingSet,
+          makeFileRef({
+            path: action.path,
+            source: "shared",
+            content: action.content,
+            version: "version" in result ? Number((result as { version?: unknown }).version ?? 0) : null,
+            updatedAt:
+              "updatedAt" in result && (result as { updatedAt?: unknown }).updatedAt !== null && (result as { updatedAt?: unknown }).updatedAt !== undefined
+                ? normalizeTimestampString((result as { updatedAt?: unknown }).updatedAt)
+                : null
+          })
+        );
+      }
     }
   }
 

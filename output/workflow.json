@@ -124,6 +124,17 @@
             }
         ]
     },
+    "ideaBank": {
+        "rawIdeaBankPath": "debate/ideas/raw-idea-bank.md",
+        "derivedFiles": {
+            "currentBattlefieldPath": "debate/ideas/current-battlefield.md",
+            "selectedSTierPath": "debate/ideas/selected-s-tier.md",
+            "selectedATierPath": "debate/ideas/selected-a-tier.md",
+            "rejectedOrMergedPath": "debate/ideas/rejected-or-merged.md",
+            "eventMappingsPath": "debate/ideas/event-mappings.md",
+            "newlyInventedIdeasPath": "debate/ideas/newly-invented-ideas.md"
+        }
+    },
     "phaseMachine": {
         "phases": [
             {
@@ -140,7 +151,7 @@
                 "title": "Phase 2 · 子任务推进与方案成形",
                 "minRounds": null,
                 "description": "按子任务逐块推进：点子筛选、主线骨架、人物系统、核心事件、关系弧线、终局伏笔、分卷结构、章节展开。",
-                "injectedPrompt": "【Phase 2】当前阶段由固定 Host 宣布本轮唯一子任务，其他席位围绕该子任务推进。若工作台已经提供 debate/ideas/ 下的私有素材，进入本阶段后应先读取并消化 raw-idea-bank、selected-s-tier、selected-a-tier、event-mappings 等相关文件，再据此做筛选、合并、替换和重组，不能脱离现有素材凭空泛谈。优先顺序通常是：点子筛选与重组 -> 主线骨架与终局真相 -> 人物系统 -> 五大核心事件 -> 关系弧线 -> 伏笔回收 -> 分卷结构 -> 章节级展开。单轮只打一个块，不要同时平铺人物、终局、章节、事件。最常见的伪推进，是讨论热闹但没有形成稳定候选结论，也没有把好点子压成可写文件。"
+                "injectedPrompt": "【Phase 2】当前阶段由固定 Host 宣布本轮唯一子任务，其他席位围绕该子任务推进。若工作台已经提供 debate/ideas/ 下的私有素材，进入本阶段后应先读取并消化 current-battlefield，再按需对照 raw-idea-bank、selected-s-tier、selected-a-tier、event-mappings 等文件，不能脱离现有素材凭空泛谈。current-battlefield / selected-s-tier / event-mappings / selected-a-tier 是本阶段持续沉淀的权威 ledger，不是留到 Phase 3 再写的占位文件；如果 current-battlefield 还是空的，应优先把当前战场、稳定候选、最弱一笔和下一轮唯一子任务压进去。优先顺序通常是：点子筛选与重组 -> 主线骨架与终局真相 -> 人物系统 -> 五大核心事件 -> 关系弧线 -> 伏笔回收 -> 分卷结构 -> 章节级展开。单轮只打一个块，不要同时平铺人物、终局、章节、事件，也不要过早把写动作重心切到 final/* 重交付文件。最常见的伪推进，是讨论热闹但没有形成稳定候选结论，也没有把好点子压成可写 ledger。"
             },
             {
                 "id": "phase-2-5",

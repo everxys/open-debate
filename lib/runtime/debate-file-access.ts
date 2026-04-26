@@ -24,6 +24,7 @@ import {
   type DebateFileWriteMode
 } from "@/lib/runtime/tools";
 import { getPgErrorCode } from "@/lib/runtime/runtime-utils";
+import { normalizeTimestampString } from "@/lib/timestamps";
 import type { NormalizedDebateWorkflow, WorkflowPhaseKind } from "@/lib/workflow";
 
 export type DebateFileActivityAction = "read" | "write" | "search" | "list" | "stat";
@@ -452,8 +453,8 @@ export async function getDebateFileMeta(db: DbLike, debateId: string, path: stri
   if ((result.rows.length ?? 0) !== 1) return null;
   return {
     content: String(result.rows[0].content ?? ""),
-    createdAt: String(result.rows[0].created_at ?? ""),
-    updatedAt: String(result.rows[0].updated_at ?? ""),
+    createdAt: normalizeTimestampString(result.rows[0].created_at),
+    updatedAt: normalizeTimestampString(result.rows[0].updated_at),
     version: Number(result.rows[0].version ?? 1) || 1
   };
 }
@@ -764,7 +765,7 @@ export async function toolDebateFilesStat(input: {
       path: safePath,
       exists: true,
       size: Number(result.content_length ?? 0) || 0,
-      updatedAt: String(result.updated_at ?? ""),
+      updatedAt: normalizeTimestampString(result.updated_at),
       version: Number(result.version ?? 1) || 1
     };
   } catch (error) {

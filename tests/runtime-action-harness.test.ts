@@ -23,7 +23,9 @@ test("parseRuntimeHarnessAction reads fenced harness JSON", () => {
 test("resolveRuntimeActionPolicy gates to vote_cast when seat has not voted", () => {
   const policy = resolveRuntimeActionPolicy({
     roleType: "Analyst",
+    currentPhaseKind: "deliberation",
     pendingDeliverables: [],
+    phasePreferredWritablePaths: [],
     openVote: {
       status: "open",
       kind: "custom",
@@ -45,11 +47,13 @@ test("resolveRuntimeActionPolicy gates to vote_cast when seat has not voted", ()
     allowedOutputPaths: ["outputs/"]
   });
   assert.deepEqual(policy.allowedActions, ["vote_cast"]);
+  assert.deepEqual(policy.preferredWritableTargetPaths, []);
 });
 
 test("resolveRuntimeActionPolicy prefers write_section for known markdown source files", () => {
   const policy = resolveRuntimeActionPolicy({
     roleType: "Analyst",
+    currentPhaseKind: "deliberation",
     pendingDeliverables: [
       {
         path: "outputs/final-answer.md",
@@ -64,6 +68,7 @@ test("resolveRuntimeActionPolicy prefers write_section for known markdown source
         }
       }
     ],
+    phasePreferredWritablePaths: ["debate/ideas/selected-s-tier.md"],
     openVote: null,
     debateAgentId: "seat-2",
     workingSet: {
@@ -87,11 +92,13 @@ test("resolveRuntimeActionPolicy prefers write_section for known markdown source
   assert.deepEqual(policy.allowedActions, ["read", "write_section"]);
   assert.deepEqual(policy.knownTargetPaths, ["debate/ideas/selected-s-tier.md", "outputs/final-answer.md"]);
   assert.deepEqual(policy.knownWritableTargetPaths, ["debate/ideas/selected-s-tier.md", "outputs/final-answer.md"]);
+  assert.deepEqual(policy.preferredWritableTargetPaths, ["debate/ideas/selected-s-tier.md"]);
 });
 
-test("resolveRuntimeActionPolicy bootstraps concrete writable targets from workflow paths", () => {
+test("resolveRuntimeActionPolicy bootstraps phase ledger targets before final deliverables", () => {
   const policy = resolveRuntimeActionPolicy({
     roleType: "Analyst",
+    currentPhaseKind: "deliberation",
     pendingDeliverables: [
       {
         path: "final/01-core-premise.md",
@@ -106,6 +113,7 @@ test("resolveRuntimeActionPolicy bootstraps concrete writable targets from workf
         }
       }
     ],
+    phasePreferredWritablePaths: ["debate/ideas/current-battlefield.md", "debate/ideas/selected-s-tier.md"],
     openVote: null,
     debateAgentId: "seat-bootstrap",
     workingSet: {
@@ -115,18 +123,29 @@ test("resolveRuntimeActionPolicy bootstraps concrete writable targets from workf
       updatedAt: null
     },
     readableSharedPaths: ["outputs/", "final/"],
-    allowedOutputPaths: ["outputs/", "final/"]
+    allowedOutputPaths: ["outputs/", "final/", "debate/ideas/current-battlefield.md", "debate/ideas/selected-s-tier.md"]
   });
-  assert.equal(policy.preferredWriteAction, "write_replace");
-  assert.deepEqual(policy.allowedActions, ["read", "write_replace"]);
-  assert.deepEqual(policy.knownTargetPaths, ["final/01-core-premise.md"]);
-  assert.deepEqual(policy.knownWritableTargetPaths, ["final/01-core-premise.md"]);
+  assert.equal(policy.preferredWriteAction, "write_section");
+  assert.deepEqual(policy.allowedActions, ["read", "write_section"]);
+  assert.deepEqual(policy.preferredWritableTargetPaths, ["debate/ideas/current-battlefield.md", "debate/ideas/selected-s-tier.md"]);
+  assert.deepEqual(policy.knownTargetPaths, [
+    "debate/ideas/current-battlefield.md",
+    "debate/ideas/selected-s-tier.md",
+    "final/01-core-premise.md"
+  ]);
+  assert.deepEqual(policy.knownWritableTargetPaths, [
+    "debate/ideas/current-battlefield.md",
+    "debate/ideas/selected-s-tier.md",
+    "final/01-core-premise.md"
+  ]);
 });
 
 test("resolveRuntimeActionPolicy allows read when a read-only shared target is known", () => {
   const policy = resolveRuntimeActionPolicy({
     roleType: "Analyst",
+    currentPhaseKind: "analysis",
     pendingDeliverables: [],
+    phasePreferredWritablePaths: [],
     openVote: null,
     debateAgentId: "seat-3",
     workingSet: {
@@ -156,12 +175,15 @@ test("resolveRuntimeActionPolicy allows read when a read-only shared target is k
   assert.deepEqual(policy.allowedActions, ["read"]);
   assert.deepEqual(policy.knownTargetPaths, ["facts/board.md", "memory/summary.md"]);
   assert.deepEqual(policy.knownWritableTargetPaths, []);
+  assert.deepEqual(policy.preferredWritableTargetPaths, []);
 });
 
 test("resolveRuntimeActionPolicy allows read when only a seat-file target is known", () => {
   const policy = resolveRuntimeActionPolicy({
     roleType: "Analyst",
+    currentPhaseKind: "analysis",
     pendingDeliverables: [],
+    phasePreferredWritablePaths: [],
     openVote: null,
     debateAgentId: "seat-4",
     workingSet: {
@@ -184,6 +206,7 @@ test("resolveRuntimeActionPolicy allows read when only a seat-file target is kno
   assert.deepEqual(policy.allowedActions, ["read"]);
   assert.deepEqual(policy.knownTargetPaths, ["memory/notes.md"]);
   assert.deepEqual(policy.knownWritableTargetPaths, []);
+  assert.deepEqual(policy.preferredWritableTargetPaths, []);
 });
 
 test("buildRuntimeActionInstructions only lists allowed JSON shapes", () => {
@@ -193,7 +216,8 @@ test("buildRuntimeActionInstructions only lists allowed JSON shapes", () => {
       preferredWriteAction: "write_section",
       reason: "Known target is a shared markdown source file.",
       knownTargetPaths: ["debate/ideas/selected-s-tier.md"],
-      knownWritableTargetPaths: ["debate/ideas/selected-s-tier.md"]
+      knownWritableTargetPaths: ["debate/ideas/selected-s-tier.md"],
+      preferredWritableTargetPaths: ["debate/ideas/selected-s-tier.md"]
     },
     allowedOutputPaths: ["outputs/", "debate/ideas/selected-s-tier.md"]
   });
