@@ -42,7 +42,8 @@ function buildHarnessPolicy(request: PlaygroundRunRequest, sandbox: PlaygroundSa
     reason: "Playground harness capability check.",
     knownTargetPaths,
     knownWritableTargetPaths,
-    preferredWritableTargetPaths: knownWritableTargetPaths
+    preferredWritableTargetPaths: knownWritableTargetPaths,
+    preferredWritableHeadingsByPath: {}
   };
 }
 

@@ -42,8 +42,10 @@ import {
 import {
   buildRuntimeActionInstructions,
   buildRuntimeActionWorkingSetInline,
+  classifyPhase2LedgerTarget,
   detectRuntimeActionLoop,
   executeRuntimeHarnessAction,
+  hasWorkingSetReadForPath,
   loadRuntimeSeatWorkingSet,
   makeRuntimeActionLoopRecord,
   mergeRuntimeSharedFilesIntoWorkingSet,
@@ -53,6 +55,7 @@ import {
   resolveRuntimeActionPolicy,
   type RuntimeHarnessAction,
   type RuntimeActionLoopState,
+  type Phase2LedgerState,
   type RuntimeSeatWorkingSet
 } from "@/lib/runtime/runtime-action-harness";
 import {
@@ -725,11 +728,106 @@ function buildSharedSystemInline(input: {
   return systemParts.join("\n\n");
 }
 
+type RuntimeHarnessRecoveryAction = "read" | "write_replace";
+
+type RuntimeHarnessRecoveryHint = {
+  targetPath: string;
+  nextAction: RuntimeHarnessRecoveryAction;
+  failureCount: number;
+  suppressWriteSection: boolean;
+  error: string;
+  existingHeading: string | null;
+};
+
+type RuntimeHarnessRecoveryState = {
+  byPath: Record<string, RuntimeHarnessRecoveryHint>;
+};
+
+function normalizeRecoveryTargetPath(path: string | null | undefined) {
+  return normalizeRuntimePath(path);
+}
+
+function getHarnessErrorText(result: unknown) {
+  if (!result || typeof result !== "object" || !("error" in result)) return null;
+  return typeof (result as { error?: unknown }).error === "string" ? String((result as { error?: unknown }).error) : null;
+}
+
+function extractSectionMergeHeading(error: string) {
+  const match = error.match(/matching "([^"]+)"/i);
+  return match ? match[1] : null;
+}
+
+function isHarnessRecoveryError(error: string) {
+  return /section_merge content must start with a Markdown heading matching/i.test(error)
+    || /TARGET_HEADING_NOT_FOUND/i.test(error)
+    || /TARGET_FILE_NOT_FOUND/i.test(error);
+}
+
+function nextRecoveryActionForLedgerState(state: Phase2LedgerState, hasRead: boolean): RuntimeHarnessRecoveryAction {
+  if (state === "missing" || state === "template_or_placeholder") return "write_replace";
+  return hasRead ? "read" : "read";
+}
+
+function buildRecoveryPolicyOverrides(state: RuntimeHarnessRecoveryState) {
+  const hints = Object.values(state.byPath);
+  return {
+    forcedReadPaths: hints.filter((item) => item.nextAction === "read").map((item) => item.targetPath),
+    forcedReplacePaths: hints.filter((item) => item.nextAction === "write_replace").map((item) => item.targetPath),
+    suppressedWriteSectionPaths: hints.filter((item) => item.suppressWriteSection).map((item) => item.targetPath)
+  };
+}
+
+function updateRuntimeHarnessRecoveryState(input: {
+  state: RuntimeHarnessRecoveryState;
+  action: RuntimeHarnessAction;
+  result: unknown;
+  workingSet: RuntimeSeatWorkingSet;
+}) {
+  const next: RuntimeHarnessRecoveryState = {
+    byPath: { ...input.state.byPath }
+  };
+  const targetPath =
+    input.action.action === "read" || input.action.action === "write_replace" || input.action.action === "write_append" || input.action.action === "write_section"
+      ? normalizeRecoveryTargetPath(input.action.path)
+      : "";
+  const ok = typeof input.result === "object" && input.result && "ok" in input.result && input.result.ok === true;
+  if (targetPath && ok) {
+    delete next.byPath[targetPath];
+    return next;
+  }
+  if (input.action.action === "read" && targetPath) {
+    return next;
+  }
+  if ((input.action.action !== "write_section" && input.action.action !== "write_replace" && input.action.action !== "write_append") || !targetPath) {
+    return next;
+  }
+  const error = getHarnessErrorText(input.result);
+  if (!error || !isHarnessRecoveryError(error)) return next;
+  const existing = next.byPath[targetPath];
+  const failureCount = (existing?.failureCount ?? 0) + 1;
+  const ledgerState = classifyPhase2LedgerTarget(input.workingSet, targetPath);
+  const hasRead = hasWorkingSetReadForPath(input.workingSet, targetPath);
+  const nextAction =
+    input.action.action === "write_section"
+      ? nextRecoveryActionForLedgerState(ledgerState, hasRead)
+      : "read";
+  next.byPath[targetPath] = {
+    targetPath,
+    nextAction,
+    failureCount,
+    suppressWriteSection: failureCount >= 2,
+    error,
+    existingHeading: extractSectionMergeHeading(error)
+  };
+  return next;
+}
+
 function buildHarnessResultMessage(input: {
   action: RuntimeHarnessAction;
   result: unknown;
   allowedActions: string[];
   workingSet: RuntimeSeatWorkingSet;
+  recoveryHint?: RuntimeHarnessRecoveryHint | null;
 }) {
   const lines = ["HARNESS_ACTION_RESULT"];
   lines.push(typeof input.result === "string" ? input.result : JSON.stringify(input.result));
@@ -740,6 +838,19 @@ function buildHarnessResultMessage(input: {
         ? `AUTHORITATIVE_FILE_STATE: ${input.action.path} is confirmed written by the harness.`
         : `AUTHORITATIVE_FILE_STATE: ${input.action.path} is not confirmed written; treat it as unchanged.`
     );
+  }
+  if (input.recoveryHint) {
+    lines.push(`RECOVERY_TARGET: ${input.recoveryHint.targetPath}`);
+    if (input.recoveryHint.existingHeading) {
+      lines.push(`EXISTING_TARGET_HEADING: ${input.recoveryHint.existingHeading}`);
+    }
+    lines.push(`NEXT_RECOVERY_ACTION: ${input.recoveryHint.nextAction}`);
+    lines.push(
+      input.recoveryHint.suppressWriteSection
+        ? "SECTION_MERGE_LOCKED_THIS_TURN: yes"
+        : "SECTION_MERGE_LOCKED_THIS_TURN: no"
+    );
+    lines.push(`RECOVERY_REASON: ${input.recoveryHint.error}`);
   }
   lines.push(`NEXT_ALLOWED_ACTIONS: ${input.allowedActions.join(", ") || "none"}`);
   const workingSetInline = buildRuntimeActionWorkingSetInline(input.workingSet);
@@ -779,11 +890,13 @@ async function runOpenAiProviderLoop(
     workflow: context.workflow
   });
   let dynamicOpenVote = context.openVote;
+  let recoveryState: RuntimeHarnessRecoveryState = { byPath: {} };
   let actionPolicy = resolveRuntimeActionPolicy({
     roleType: context.currentRoleType,
     currentPhaseKind: context.currentPhase?.kind ?? null,
     pendingDeliverables: context.pendingDeliverables,
     phasePreferredWritablePaths: context.phasePreferredWritablePaths,
+    ...buildRecoveryPolicyOverrides(recoveryState),
     openVote: dynamicOpenVote,
     debateAgentId: context.debateAgentId,
     workingSet,
@@ -927,6 +1040,12 @@ async function runOpenAiProviderLoop(
       if (parsedAction.action.action === "vote_cast" && typeof execution.result === "object" && execution.result) {
         dynamicOpenVote = ((execution.result as { vote?: unknown }).vote as typeof dynamicOpenVote) ?? dynamicOpenVote;
       }
+      recoveryState = updateRuntimeHarnessRecoveryState({
+        state: recoveryState,
+        action: parsedAction.action,
+        result: execution.result,
+        workingSet
+      });
       runtimeReadableSharedPaths = buildRuntimeReadableSharedPaths({
         baseReadableSharedPaths: context.readableSharedPaths,
         workingSet
@@ -941,6 +1060,7 @@ async function runOpenAiProviderLoop(
         currentPhaseKind: context.currentPhase?.kind ?? null,
         pendingDeliverables: context.pendingDeliverables,
         phasePreferredWritablePaths: context.phasePreferredWritablePaths,
+        ...buildRecoveryPolicyOverrides(recoveryState),
         openVote: dynamicOpenVote,
         debateAgentId: context.debateAgentId,
         workingSet,
@@ -953,7 +1073,11 @@ async function runOpenAiProviderLoop(
           action: parsedAction.action,
           result: execution.result,
           allowedActions: actionPolicy.allowedActions,
-          workingSet
+          workingSet,
+          recoveryHint:
+            "path" in parsedAction.action
+              ? recoveryState.byPath[normalizeRecoveryTargetPath(parsedAction.action.path)]
+              : null
         })
       });
     }
@@ -990,11 +1114,13 @@ async function runAnthropicProviderLoop(
     workflow: context.workflow
   });
   let dynamicOpenVote = context.openVote;
+  let recoveryState: RuntimeHarnessRecoveryState = { byPath: {} };
   let actionPolicy = resolveRuntimeActionPolicy({
     roleType: context.currentRoleType,
     currentPhaseKind: context.currentPhase?.kind ?? null,
     pendingDeliverables: context.pendingDeliverables,
     phasePreferredWritablePaths: context.phasePreferredWritablePaths,
+    ...buildRecoveryPolicyOverrides(recoveryState),
     openVote: dynamicOpenVote,
     debateAgentId: context.debateAgentId,
     workingSet,
@@ -1122,6 +1248,12 @@ async function runAnthropicProviderLoop(
       if (parsedAction.action.action === "vote_cast" && typeof execution.result === "object" && execution.result) {
         dynamicOpenVote = ((execution.result as { vote?: unknown }).vote as typeof dynamicOpenVote) ?? dynamicOpenVote;
       }
+      recoveryState = updateRuntimeHarnessRecoveryState({
+        state: recoveryState,
+        action: parsedAction.action,
+        result: execution.result,
+        workingSet
+      });
       runtimeReadableSharedPaths = buildRuntimeReadableSharedPaths({
         baseReadableSharedPaths: context.readableSharedPaths,
         workingSet
@@ -1136,6 +1268,7 @@ async function runAnthropicProviderLoop(
         currentPhaseKind: context.currentPhase?.kind ?? null,
         pendingDeliverables: context.pendingDeliverables,
         phasePreferredWritablePaths: context.phasePreferredWritablePaths,
+        ...buildRecoveryPolicyOverrides(recoveryState),
         openVote: dynamicOpenVote,
         debateAgentId: context.debateAgentId,
         workingSet,
@@ -1151,7 +1284,11 @@ async function runAnthropicProviderLoop(
               action: parsedAction.action,
               result: execution.result,
               allowedActions: actionPolicy.allowedActions,
-              workingSet
+              workingSet,
+              recoveryHint:
+                "path" in parsedAction.action
+                  ? recoveryState.byPath[normalizeRecoveryTargetPath(parsedAction.action.path)]
+                  : null
             })
           }
         ]

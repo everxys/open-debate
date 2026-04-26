@@ -1,6 +1,11 @@
 import { sql } from "kysely";
 
 import { ensureDb } from "@/lib/db";
+import {
+  getPhase2LedgerHeadings,
+  isPhase2LedgerPath,
+  isPhase2LedgerPlaceholderContent
+} from "@/lib/phase2-ledgers";
 import { readDebateAgentFile, readDebateFile, upsertDebateAgentFile } from "@/lib/runtime/file-store";
 import {
   CONTEXT_WORKING_SET_PATH
@@ -50,6 +55,7 @@ export type RuntimeActionPolicy = {
   knownTargetPaths: string[];
   knownWritableTargetPaths: string[];
   preferredWritableTargetPaths: string[];
+  preferredWritableHeadingsByPath: Record<string, string[]>;
 };
 
 export type RuntimeSeatWorkingSet = {
@@ -260,6 +266,30 @@ function collectPreferredWritableTargets(input: {
   }
 
   return dedupePaths(knownWritableTargets);
+}
+
+export type Phase2LedgerState = "missing" | "template_or_placeholder" | "structured";
+
+function findWorkingSetRef(workingSet: RuntimeSeatWorkingSet, path: string) {
+  const normalized = normalizePath(path);
+  return (
+    [...workingSet.recentlyWrittenFiles, ...workingSet.canonicalSourceFiles, ...workingSet.recentlyReadFiles].find(
+      (item) => normalizePath(item.path) === normalized
+    ) ?? null
+  );
+}
+
+export function hasWorkingSetReadForPath(workingSet: RuntimeSeatWorkingSet, path: string) {
+  const normalized = normalizePath(path);
+  return workingSet.recentlyReadFiles.some((item) => normalizePath(item.path) === normalized);
+}
+
+export function classifyPhase2LedgerTarget(workingSet: RuntimeSeatWorkingSet, path: string): Phase2LedgerState {
+  const ref = findWorkingSetRef(workingSet, path);
+  if (!ref?.excerpt) return "missing";
+  if (isPhase2LedgerPlaceholderContent(path, ref.excerpt)) return "template_or_placeholder";
+  const headingMatches = ref.excerpt.match(/^##\s+.+$/gm) ?? [];
+  return headingMatches.length > 0 ? "structured" : "template_or_placeholder";
 }
 
 async function loadDebateFileSnapshot(debateId: string, path: string): Promise<DebateFileSnapshot> {
@@ -618,6 +648,9 @@ export function resolveRuntimeActionPolicy(input: {
   currentPhaseKind: WorkflowPhaseKind | null;
   pendingDeliverables: NormalizedWorkflowRequiredFile[];
   phasePreferredWritablePaths: string[];
+  forcedReadPaths?: string[];
+  forcedReplacePaths?: string[];
+  suppressedWriteSectionPaths?: string[];
   openVote: OpenOfficialVote | null;
   debateAgentId: string;
   workingSet: RuntimeSeatWorkingSet;
@@ -650,13 +683,14 @@ export function resolveRuntimeActionPolicy(input: {
     input.openVote?.ballots?.some((ballot: { debateAgentId?: string | null }) => String(ballot.debateAgentId ?? "") === input.debateAgentId)
   );
   if (input.openVote && !alreadyVoted) {
-    return {
+      return {
         allowedActions: ["vote_cast"],
         preferredWriteAction: null,
         reason: "There is an open official vote and this seat has not voted yet.",
         knownTargetPaths,
         knownWritableTargetPaths,
-        preferredWritableTargetPaths: []
+        preferredWritableTargetPaths: [],
+        preferredWritableHeadingsByPath: {}
       };
   }
   if (knownTargetPaths.length === 0) {
@@ -666,7 +700,8 @@ export function resolveRuntimeActionPolicy(input: {
         reason: "No working-set target is known yet. Discover the target path first.",
         knownTargetPaths,
         knownWritableTargetPaths,
-        preferredWritableTargetPaths
+        preferredWritableTargetPaths,
+        preferredWritableHeadingsByPath: {}
       };
   }
   if (knownWritableTargetPaths.length === 0) {
@@ -676,7 +711,8 @@ export function resolveRuntimeActionPolicy(input: {
         reason: "A readable target is known, but no writable shared target is available for this step.",
         knownTargetPaths,
         knownWritableTargetPaths,
-        preferredWritableTargetPaths
+        preferredWritableTargetPaths,
+        preferredWritableHeadingsByPath: {}
       };
   }
   const pendingDeliverablePathSet = new Set(input.pendingDeliverables.map((item) => normalizePath(item.path)));
@@ -689,11 +725,43 @@ export function resolveRuntimeActionPolicy(input: {
   const hasPreferredPhaseTarget = preferredWritableTargetPaths.some((path) =>
     input.phasePreferredWritablePaths.some((candidate) => normalizePath(candidate) === normalizePath(path))
   );
+  const forcedReadPathSet = new Set((input.forcedReadPaths ?? []).map((item) => normalizePath(item)));
+  const forcedReplacePathSet = new Set((input.forcedReplacePaths ?? []).map((item) => normalizePath(item)));
+  const suppressedWriteSectionPathSet = new Set((input.suppressedWriteSectionPaths ?? []).map((item) => normalizePath(item)));
+  const preferredWritableHeadingsByPath = Object.fromEntries(
+    preferredWritableTargetPaths
+      .filter((path) => isPhase2LedgerPath(path))
+      .map((path) => [path, getPhase2LedgerHeadings(path)])
+  ) as Record<string, string[]>;
+  const preferredPhaseLedgerTargets = preferredWritableTargetPaths.filter((path) =>
+    input.phasePreferredWritablePaths.some((candidate) => normalizePath(candidate) === normalizePath(path)) && isPhase2LedgerPath(path)
+  );
+  const preferredPhaseLedgerStates = preferredPhaseLedgerTargets.map((path) => ({
+    path,
+    state: classifyPhase2LedgerTarget(input.workingSet, path),
+    hasRead: hasWorkingSetReadForPath(input.workingSet, path)
+  }));
+  const hasForcedReadTarget = preferredWritableTargetPaths.some((path) => forcedReadPathSet.has(normalizePath(path)));
+  const hasForcedReplaceTarget = preferredWritableTargetPaths.some((path) => forcedReplacePathSet.has(normalizePath(path)));
+  const hasTemplatePhaseLedgerTarget = preferredPhaseLedgerStates.some((item) => item.state !== "structured");
+  const hasStructuredUnreadPhaseLedgerTarget = preferredPhaseLedgerStates.some((item) => item.state === "structured" && !item.hasRead);
+  const hasStructuredReadablePhaseLedgerTarget = preferredPhaseLedgerStates.some(
+    (item) =>
+      item.state === "structured" &&
+      item.hasRead &&
+      !suppressedWriteSectionPathSet.has(normalizePath(item.path))
+  );
   const preferredWriteAction: RuntimeActionName | null =
-    hasPreferredPhaseTarget
-      ? preferredWritableTargetPaths.some((path) => path.endsWith(".md"))
-        ? "write_section"
-        : "write_replace"
+    hasForcedReadTarget
+      ? null
+      : hasPreferredPhaseTarget && preferredPhaseLedgerTargets.length > 0
+      ? hasForcedReplaceTarget || hasTemplatePhaseLedgerTarget
+        ? "write_replace"
+        : hasStructuredUnreadPhaseLedgerTarget
+          ? null
+          : hasStructuredReadablePhaseLedgerTarget
+            ? "write_section"
+            : "write_replace"
       : hasPendingWorkingSetDeliverableTarget || hasBootstrapPendingDeliverableTarget
       ? "write_replace"
       : knownWritableTargetPaths.some((path) => path.endsWith(".md"))
@@ -706,12 +774,17 @@ export function resolveRuntimeActionPolicy(input: {
     preferredWriteAction,
     reason: preferredWriteAction
       ? hasPreferredPhaseTarget
-        ? `Use the phase-preferred ledger target directly; only ${preferredWriteAction} is exposed for writes this step.`
+        ? hasForcedReplaceTarget || hasTemplatePhaseLedgerTarget
+          ? `Use the phase-preferred ledger target directly; it is still missing/template state, so only ${preferredWriteAction} is exposed for writes this step.`
+          : `Use the phase-preferred ledger target directly; only ${preferredWriteAction} is exposed for writes this step.`
         : `Use the known target directly; only ${preferredWriteAction} is exposed for writes this step.`
-      : "Read the known target directly; this step does not expose a write action.",
+      : hasForcedReadTarget || hasStructuredUnreadPhaseLedgerTarget
+        ? "Read the phase-preferred ledger first; section updates stay locked until the current structured headings are visible in the working set."
+        : "Read the known target directly; this step does not expose a write action.",
     knownTargetPaths,
     knownWritableTargetPaths,
-    preferredWritableTargetPaths
+    preferredWritableTargetPaths,
+    preferredWritableHeadingsByPath
   };
 }
 
@@ -734,6 +807,7 @@ export function buildRuntimeActionInstructions(input: {
   lines.push("Only the latest HARNESS_ACTION_RESULT is authoritative for file state.");
   lines.push("Do not claim a file was created, updated, appended, or section-merged unless the latest result confirmed ok:true for that exact path.");
   lines.push("If a harness write returns an error, treat the target file as unchanged.");
+  lines.push("For template Phase 2 ledger files, use write_replace first; do not use write_section until the file has stable headings and you have read them.");
   lines.push(`Allowed actions this step: ${input.policy.allowedActions.join(", ") || "none"}.`);
   lines.push(`Action policy reason: ${input.policy.reason}`);
   if (input.policy.knownTargetPaths.length > 0) {
@@ -744,6 +818,15 @@ export function buildRuntimeActionInstructions(input: {
   }
   if (input.policy.preferredWritableTargetPaths.length > 0) {
     lines.push(`Preferred write targets this step: ${input.policy.preferredWritableTargetPaths.slice(0, 8).join(", ")}`);
+  }
+  if (input.policy.preferredWriteAction === "write_section") {
+    for (const path of input.policy.preferredWritableTargetPaths.slice(0, 4)) {
+      const headings = input.policy.preferredWritableHeadingsByPath[path] ?? [];
+      if (headings.length > 0) {
+        lines.push(`Eligible section headings for ${path}: ${headings.join(" | ")}`);
+      }
+    }
+    lines.push("For write_section, the replacement content must start with the exact heading already present in the file.");
   }
   if (allowedShapeLines.length > 0) {
     lines.push("If you need an action, output exactly one fenced JSON block matching one of the allowed shapes below and nothing else:");

@@ -50,7 +50,7 @@ test("resolveRuntimeActionPolicy gates to vote_cast when seat has not voted", ()
   assert.deepEqual(policy.preferredWritableTargetPaths, []);
 });
 
-test("resolveRuntimeActionPolicy prefers write_section for known markdown source files", () => {
+test("resolveRuntimeActionPolicy prefers write_replace for template phase ledger files", () => {
   const policy = resolveRuntimeActionPolicy({
     roleType: "Analyst",
     currentPhaseKind: "deliberation",
@@ -78,7 +78,7 @@ test("resolveRuntimeActionPolicy prefers write_section for known markdown source
           source: "shared",
           version: 3,
           updatedAt: new Date().toISOString(),
-          excerpt: "Known writable source"
+          excerpt: "# S-tier ideas\n\n## 当前稳定入选\n\n- 待填写：只写已经有较强共识的大点子。"
         }
       ],
       recentlyReadFiles: [],
@@ -88,14 +88,14 @@ test("resolveRuntimeActionPolicy prefers write_section for known markdown source
     readableSharedPaths: ["outputs/", "final/", "debate/ideas/selected-s-tier.md"],
     allowedOutputPaths: ["outputs/", "final/", "debate/ideas/selected-s-tier.md"]
   });
-  assert.equal(policy.preferredWriteAction, "write_section");
-  assert.deepEqual(policy.allowedActions, ["read", "write_section"]);
+  assert.equal(policy.preferredWriteAction, "write_replace");
+  assert.deepEqual(policy.allowedActions, ["read", "write_replace"]);
   assert.deepEqual(policy.knownTargetPaths, ["debate/ideas/selected-s-tier.md", "outputs/final-answer.md"]);
   assert.deepEqual(policy.knownWritableTargetPaths, ["debate/ideas/selected-s-tier.md", "outputs/final-answer.md"]);
   assert.deepEqual(policy.preferredWritableTargetPaths, ["debate/ideas/selected-s-tier.md"]);
 });
 
-test("resolveRuntimeActionPolicy bootstraps phase ledger targets before final deliverables", () => {
+test("resolveRuntimeActionPolicy bootstraps phase ledger targets with write_replace before final deliverables", () => {
   const policy = resolveRuntimeActionPolicy({
     roleType: "Analyst",
     currentPhaseKind: "deliberation",
@@ -125,8 +125,8 @@ test("resolveRuntimeActionPolicy bootstraps phase ledger targets before final de
     readableSharedPaths: ["outputs/", "final/"],
     allowedOutputPaths: ["outputs/", "final/", "debate/ideas/current-battlefield.md", "debate/ideas/selected-s-tier.md"]
   });
-  assert.equal(policy.preferredWriteAction, "write_section");
-  assert.deepEqual(policy.allowedActions, ["read", "write_section"]);
+  assert.equal(policy.preferredWriteAction, "write_replace");
+  assert.deepEqual(policy.allowedActions, ["read", "write_replace"]);
   assert.deepEqual(policy.preferredWritableTargetPaths, ["debate/ideas/current-battlefield.md", "debate/ideas/selected-s-tier.md"]);
   assert.deepEqual(policy.knownTargetPaths, [
     "debate/ideas/current-battlefield.md",
@@ -138,6 +138,127 @@ test("resolveRuntimeActionPolicy bootstraps phase ledger targets before final de
     "debate/ideas/selected-s-tier.md",
     "final/01-core-premise.md"
   ]);
+});
+
+test("resolveRuntimeActionPolicy requires a read before write_section on structured phase ledgers", () => {
+  const policy = resolveRuntimeActionPolicy({
+    roleType: "Analyst",
+    currentPhaseKind: "deliberation",
+    pendingDeliverables: [],
+    phasePreferredWritablePaths: ["debate/ideas/selected-s-tier.md"],
+    openVote: null,
+    debateAgentId: "seat-structured",
+    workingSet: {
+      canonicalSourceFiles: [
+        {
+          path: "debate/ideas/selected-s-tier.md",
+          source: "shared",
+          version: 4,
+          updatedAt: new Date().toISOString(),
+          excerpt: "# S-tier ideas\n\n## 当前稳定入选\n\n- 方案 A\n\n## 待验证但高价值\n\n- 方案 B"
+        }
+      ],
+      recentlyReadFiles: [],
+      recentlyWrittenFiles: [],
+      updatedAt: null
+    },
+    readableSharedPaths: ["debate/ideas/selected-s-tier.md"],
+    allowedOutputPaths: ["debate/ideas/selected-s-tier.md"]
+  });
+  assert.equal(policy.preferredWriteAction, null);
+  assert.deepEqual(policy.allowedActions, ["read"]);
+});
+
+test("resolveRuntimeActionPolicy allows write_section after structured phase ledger has been read", () => {
+  const policy = resolveRuntimeActionPolicy({
+    roleType: "Analyst",
+    currentPhaseKind: "deliberation",
+    pendingDeliverables: [],
+    phasePreferredWritablePaths: ["debate/ideas/selected-s-tier.md"],
+    openVote: null,
+    debateAgentId: "seat-structured-read",
+    workingSet: {
+      canonicalSourceFiles: [
+        {
+          path: "debate/ideas/selected-s-tier.md",
+          source: "shared",
+          version: 4,
+          updatedAt: new Date().toISOString(),
+          excerpt: "# S-tier ideas\n\n## 当前稳定入选\n\n- 方案 A\n\n## 待验证但高价值\n\n- 方案 B"
+        }
+      ],
+      recentlyReadFiles: [
+        {
+          path: "debate/ideas/selected-s-tier.md",
+          source: "shared",
+          version: 4,
+          updatedAt: new Date().toISOString(),
+          excerpt: "# S-tier ideas\n\n## 当前稳定入选\n\n- 方案 A\n\n## 待验证但高价值\n\n- 方案 B"
+        }
+      ],
+      recentlyWrittenFiles: [],
+      updatedAt: null
+    },
+    readableSharedPaths: ["debate/ideas/selected-s-tier.md"],
+    allowedOutputPaths: ["debate/ideas/selected-s-tier.md"]
+  });
+  assert.equal(policy.preferredWriteAction, "write_section");
+  assert.deepEqual(policy.allowedActions, ["read", "write_section"]);
+  assert.deepEqual(policy.preferredWritableHeadingsByPath["debate/ideas/selected-s-tier.md"], [
+    "# S-tier ideas",
+    "## 当前稳定入选",
+    "## 待验证但高价值"
+  ]);
+});
+
+test("resolveRuntimeActionPolicy downgrades repeated heading-mismatch targets to read or replace", () => {
+  const replacePolicy = resolveRuntimeActionPolicy({
+    roleType: "Analyst",
+    currentPhaseKind: "deliberation",
+    pendingDeliverables: [],
+    phasePreferredWritablePaths: ["debate/ideas/current-battlefield.md"],
+    forcedReplacePaths: ["debate/ideas/current-battlefield.md"],
+    openVote: null,
+    debateAgentId: "seat-recover-replace",
+    workingSet: {
+      canonicalSourceFiles: [],
+      recentlyReadFiles: [],
+      recentlyWrittenFiles: [],
+      updatedAt: null
+    },
+    readableSharedPaths: ["debate/ideas/current-battlefield.md"],
+    allowedOutputPaths: ["debate/ideas/current-battlefield.md"]
+  });
+  assert.equal(replacePolicy.preferredWriteAction, "write_replace");
+
+  const readPolicy = resolveRuntimeActionPolicy({
+    roleType: "Analyst",
+    currentPhaseKind: "deliberation",
+    pendingDeliverables: [],
+    phasePreferredWritablePaths: ["debate/ideas/selected-s-tier.md"],
+    forcedReadPaths: ["debate/ideas/selected-s-tier.md"],
+    suppressedWriteSectionPaths: ["debate/ideas/selected-s-tier.md"],
+    openVote: null,
+    debateAgentId: "seat-recover-read",
+    workingSet: {
+      canonicalSourceFiles: [
+        {
+          path: "debate/ideas/selected-s-tier.md",
+          source: "shared",
+          version: 4,
+          updatedAt: new Date().toISOString(),
+          excerpt: "# S-tier ideas\n\n## 当前稳定入选\n\n- 方案 A\n\n## 待验证但高价值\n\n- 方案 B"
+        }
+      ],
+      recentlyReadFiles: [],
+      recentlyWrittenFiles: [],
+      updatedAt: null
+    },
+    readableSharedPaths: ["debate/ideas/selected-s-tier.md"],
+    allowedOutputPaths: ["debate/ideas/selected-s-tier.md"]
+  });
+  assert.equal(readPolicy.preferredWriteAction, null);
+  assert.deepEqual(readPolicy.allowedActions, ["read"]);
 });
 
 test("resolveRuntimeActionPolicy allows read when a read-only shared target is known", () => {
@@ -217,11 +338,15 @@ test("buildRuntimeActionInstructions only lists allowed JSON shapes", () => {
       reason: "Known target is a shared markdown source file.",
       knownTargetPaths: ["debate/ideas/selected-s-tier.md"],
       knownWritableTargetPaths: ["debate/ideas/selected-s-tier.md"],
-      preferredWritableTargetPaths: ["debate/ideas/selected-s-tier.md"]
+      preferredWritableTargetPaths: ["debate/ideas/selected-s-tier.md"],
+      preferredWritableHeadingsByPath: {
+        "debate/ideas/selected-s-tier.md": ["# S-tier ideas", "## 当前稳定入选", "## 待验证但高价值"]
+      }
     },
     allowedOutputPaths: ["outputs/", "debate/ideas/selected-s-tier.md"]
   });
   assert.match(instructions, /write_section/);
+  assert.match(instructions, /Eligible section headings/i);
   assert.doesNotMatch(instructions, /write_append/);
   assert.doesNotMatch(instructions, /vote_cast/);
   assert.match(instructions, /Only the latest HARNESS_ACTION_RESULT is authoritative/i);

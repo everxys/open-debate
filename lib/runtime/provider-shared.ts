@@ -157,6 +157,7 @@ export function buildFileToolInstructions(input: {
     "  - final/* must use an explicit safe mode. Use replace only for full-file rewrites, append only for intentional tail appends, and section_merge for updating one Markdown heading section.",
     "  - Before any write on final/*, call debate_files_stat or debate_files_read and pass baseVersion/baseUpdatedAt back into debate_files_write.",
     "  - For section_merge, read the file first and pass targetHeading plus replacement content that starts with the same Markdown heading.",
+    "  - For template ledger files in Phase 2, use replace first; do not use section_merge until the file has stable headings and you have read them.",
     "  - After debate_files_write, treat the tool result path/version/size as the only proof of persistence. Never claim a file was written if the tool returned an error."
   ];
 

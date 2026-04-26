@@ -7,6 +7,11 @@ import { ensureDb, ensureDebateAutoRecoverColumns } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
 import { createServerLogger } from "@/lib/logger/server";
+import {
+  applyPhase2LedgerWorkflowDefaults,
+  isPhase2LedgerPlaceholderContent,
+  listConfiguredPhase2LedgerSeeds
+} from "@/lib/phase2-ledgers";
 import { runDebate } from "@/lib/runtime";
 import { listStrategyFileAccessRules, mergeWorkflowConfigWithFileAccessRules } from "@/lib/strategies";
 import { normalizeNullableTimestampString, normalizeTimestampString } from "@/lib/timestamps";
@@ -56,9 +61,9 @@ export const DEBATE_LIFECYCLE_RULES = {
     conflictMessage: "Only paused debates can be resumed"
   },
   repair: {
-    allowedStatuses: ["failed"],
+    allowedStatuses: ["failed", "paused", "running"],
     resultStatus: "paused",
-    conflictMessage: "Only failed debates can be repaired"
+    conflictMessage: "Only running, paused, or failed debates can be repaired"
   },
   stop: {
     allowedStatuses: ["pending", "running", "paused"],
@@ -532,6 +537,24 @@ async function copyStrategyDebateFiles(
   options?: { summaryAgentId?: string | null }
 ) {
   const db = await ensureDb();
+  const upsertDebateFile = async (path: string, content: string) => {
+    await db
+      .insertInto("debate_files")
+      .values({
+        debate_id: debateId,
+        path,
+        content,
+        created_at: now,
+        updated_at: now
+      })
+      .onConflict((oc) =>
+        oc.columns(["debate_id", "path"]).doUpdateSet({
+          content,
+          updated_at: now
+        })
+      )
+      .execute();
+  };
   const workflow = await db
     .selectFrom("strategy_role_files")
     .select("content")
@@ -541,12 +564,12 @@ async function copyStrategyDebateFiles(
     .executeTakeFirst();
   const workflowContent = workflow ? String(workflow.content ?? "").trim() : "";
   const strategyFileAccessRules = await listStrategyFileAccessRules(strategyId);
-  const canonicalWorkflowContent = (() => {
+  const canonicalWorkflow = (() => {
     try {
       const parsed = workflowContent ? (JSON.parse(workflowContent) as unknown) : createDefaultDebateWorkflowConfig();
       const baseCanonical = (toCanonicalWorkflowConfig(parsed) ?? parsed) as DebateWorkflowConfig;
       const mergedCanonical = mergeWorkflowConfigWithFileAccessRules(baseCanonical, strategyFileAccessRules);
-      const canonical = mergedCanonical as Record<string, unknown>;
+      const canonical = applyPhase2LedgerWorkflowDefaults(mergedCanonical) as Record<string, unknown>;
       const summaryAgentId = typeof options?.summaryAgentId === "string" ? options.summaryAgentId.trim() : "";
       if (
         canonical &&
@@ -559,31 +582,18 @@ async function copyStrategyDebateFiles(
           aiAgentId: summaryAgentId || null
         };
       }
-      return JSON.stringify(canonical, null, 2);
+      return canonical as DebateWorkflowConfig;
     } catch {
-      return JSON.stringify(
-        mergeWorkflowConfigWithFileAccessRules(createDefaultDebateWorkflowConfig(), strategyFileAccessRules),
-        null,
-        2
+      return applyPhase2LedgerWorkflowDefaults(
+        mergeWorkflowConfigWithFileAccessRules(createDefaultDebateWorkflowConfig(), strategyFileAccessRules)
       );
     }
   })();
-  await db
-    .insertInto("debate_files")
-    .values({
-      debate_id: debateId,
-      path: "workflow.json",
-      content: canonicalWorkflowContent,
-      created_at: now,
-      updated_at: now
-    })
-    .onConflict((oc) =>
-      oc.columns(["debate_id", "path"]).doUpdateSet({
-        content: canonicalWorkflowContent,
-        updated_at: now
-      })
-    )
-    .execute();
+  const canonicalWorkflowContent = JSON.stringify(canonicalWorkflow, null, 2);
+  await upsertDebateFile("workflow.json", canonicalWorkflowContent);
+
+  const phase2LedgerSeeds = listConfiguredPhase2LedgerSeeds(canonicalWorkflow);
+  const phase2LedgerPathSet = new Set(phase2LedgerSeeds.map((item) => item.path));
 
   const sharedDebateFiles = await db
     .selectFrom("strategy_role_files")
@@ -599,20 +609,92 @@ async function copyStrategyDebateFiles(
     const normalizedPath = sourcePath.replace(/\\/g, "/").replace(/^\/+/, "").trim();
     const debatePath = normalizedPath.replace(/^debate\//i, "");
     if (!debatePath) continue;
+    if (phase2LedgerPathSet.has(debatePath)) continue;
     const content = String(file.content ?? "");
-    await db
+    await upsertDebateFile(debatePath, content);
+  }
+
+  for (const seed of phase2LedgerSeeds) {
+    await upsertDebateFile(seed.path, seed.content);
+  }
+}
+
+async function repairDebatePhase2Artifacts(input: {
+  db: Awaited<ReturnType<typeof ensureDb>>;
+  debateId: string;
+  userId: string;
+  now: string;
+}) {
+  const workflowRow = await input.db
+    .selectFrom("debate_files as f")
+    .innerJoin("debates as d", "d.id", "f.debate_id")
+    .select(["f.content"])
+    .where("f.debate_id", "=", input.debateId)
+    .where("d.user_id", "=", input.userId)
+    .where("f.path", "=", "workflow.json")
+    .executeTakeFirst();
+  const parsedWorkflow = (() => {
+    try {
+      const raw = String(workflowRow?.content ?? "").trim();
+      return raw ? ((JSON.parse(raw) as unknown) ?? createDefaultDebateWorkflowConfig()) : createDefaultDebateWorkflowConfig();
+    } catch {
+      return createDefaultDebateWorkflowConfig();
+    }
+  })();
+  const canonicalWorkflow = applyPhase2LedgerWorkflowDefaults(
+    (toCanonicalWorkflowConfig(parsedWorkflow) ?? parsedWorkflow) as DebateWorkflowConfig
+  );
+  const canonicalWorkflowContent = JSON.stringify(canonicalWorkflow, null, 2);
+  await input.db
+    .insertInto("debate_files")
+    .values({
+      debate_id: input.debateId,
+      path: "workflow.json",
+      content: canonicalWorkflowContent,
+      created_at: input.now,
+      updated_at: input.now
+    })
+    .onConflict((oc) =>
+      oc.columns(["debate_id", "path"]).doUpdateSet({
+        content: canonicalWorkflowContent,
+        updated_at: input.now
+      })
+    )
+    .execute();
+
+  const seeds = listConfiguredPhase2LedgerSeeds(canonicalWorkflow);
+  if (seeds.length <= 0) return;
+  const existingRows = await input.db
+    .selectFrom("debate_files as f")
+    .innerJoin("debates as d", "d.id", "f.debate_id")
+    .select(["f.path", "f.content"])
+    .where("f.debate_id", "=", input.debateId)
+    .where("d.user_id", "=", input.userId)
+    .where(
+      "f.path",
+      "in",
+      seeds.map((item) => item.path)
+    )
+    .execute();
+  const existingByPath = new Map(existingRows.map((row) => [String(row.path ?? ""), String(row.content ?? "")] as const));
+  for (const seed of seeds) {
+    const existingContent = existingByPath.get(seed.path);
+    if (existingContent !== undefined && !isPhase2LedgerPlaceholderContent(seed.path, existingContent)) {
+      continue;
+    }
+    await input.db
       .insertInto("debate_files")
       .values({
-        debate_id: debateId,
-        path: debatePath,
-        content,
-        created_at: now,
-        updated_at: now
+        debate_id: input.debateId,
+        path: seed.path,
+        content: seed.content,
+        created_at: input.now,
+        updated_at: input.now
       })
       .onConflict((oc) =>
         oc.columns(["debate_id", "path"]).doUpdateSet({
-          content,
-          updated_at: now
+          content: seed.content,
+          updated_at: input.now
         })
       )
       .execute();
@@ -2506,6 +2588,25 @@ export async function repairDebate(id: string) {
   const lifecycleRule = getDebateLifecycleRule("repair");
   const now = new Date().toISOString();
   const db = await ensureDb();
+  const current = await db
+    .selectFrom("debates")
+    .select(["id", "status"])
+    .where("id", "=", id)
+    .where("user_id", "=", session.userId)
+    .executeTakeFirst();
+  if (!current || !lifecycleRule.allowedStatuses.some((status) => status === (current.status as DebateStatus))) {
+    throw new AppError("CONFLICT", 409, lifecycleRule.conflictMessage);
+  }
+  await repairDebatePhase2Artifacts({
+    db,
+    debateId: id,
+    userId: session.userId,
+    now
+  });
+  const runtimeNoticeMessage =
+    current.status === "failed"
+      ? "该辩论已从 failed 修复为 paused；已补齐 Phase 2 ledger/workflow 状态，请确认后手动恢复运行"
+      : "该辩论已修复并切回 paused；已补齐 Phase 2 ledger/workflow 状态，请确认后手动恢复运行";
   const result = await db
     .updateTable("debates")
     .set({
@@ -2513,7 +2614,7 @@ export async function repairDebate(id: string) {
       finished_at: null,
       stopped_reason: null,
       runtime_notice_kind: "interrupted",
-      runtime_notice_message: "该辩论已从 failed 修复为 paused；请确认状态后手动恢复运行",
+      runtime_notice_message: runtimeNoticeMessage,
       runtime_notice_at: now,
       last_error_code: null,
       last_error_message: null,
@@ -2523,15 +2624,12 @@ export async function repairDebate(id: string) {
     })
     .where("id", "=", id)
     .where("user_id", "=", session.userId)
-    .where("status", "=", lifecycleRule.allowedStatuses[0])
     .returningAll()
-    .executeTakeFirst();
-  if (!result) {
-    throw new AppError("CONFLICT", 409, lifecycleRule.conflictMessage);
-  }
-  debateLogger.info("debate repaired from failed to paused", {
+    .executeTakeFirstOrThrow();
+  debateLogger.info("debate repaired and paused", {
     debateId: id,
-    userId: session.userId
+    userId: session.userId,
+    previousStatus: current.status
   });
   return toListItem(normalizeDebateRow(result));
 }
