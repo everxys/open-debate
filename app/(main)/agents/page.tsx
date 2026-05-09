@@ -1,11 +1,12 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAutoDismissToast } from "@/components/ui/use-toast";
 
 type Agent = {
   id: string;
   name: string;
+  categoryId: string | null;
   provider: string;
   model: string;
   contextLength: number | null;
@@ -19,6 +20,12 @@ type Agent = {
   usageControlMode: "none" | "coding_plan";
   quotaProfileId: string | null;
   isActive: boolean;
+};
+
+type AgentCategory = {
+  id: string;
+  name: string;
+  referencedAgentCount: number;
 };
 
 type QuotaProfileSummary = {
@@ -70,9 +77,13 @@ type OpenRouterModel = {
 };
 
 type AgentFilterTab = "all" | "enabled" | "disabled";
+type AgentCategoryFilter = "all" | "uncategorized" | string;
+type AgentMoveTarget = "uncategorized" | string;
+type CategoryStats = { total: number; enabled: number; disabled: number };
 
 const initialForm = {
   name: "",
+  categoryId: "",
   provider: "openai",
   model: "gpt-4.1-mini",
   contextLength: "",
@@ -101,14 +112,45 @@ const initialAdjustmentForm = {
   note: ""
 };
 
+function CustomCheckbox({
+  checked,
+  onChange,
+  ariaLabel,
+  className
+}: {
+  checked: boolean;
+  onChange: () => void;
+  ariaLabel: string;
+  className?: string;
+}) {
+  return (
+    <span className={["customCheckbox", className].filter(Boolean).join(" ")}>
+      <input
+        className="customCheckboxInput"
+        type="checkbox"
+        checked={checked}
+        onChange={onChange}
+        aria-label={ariaLabel}
+        draggable={false}
+      />
+      <span className="customCheckboxBox" aria-hidden="true" />
+    </span>
+  );
+}
+
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentCategories, setAgentCategories] = useState<AgentCategory[]>([]);
   const [quotaProfiles, setQuotaProfiles] = useState<QuotaProfile[]>([]);
+  const [categoryFilter, setCategoryFilter] = useState<AgentCategoryFilter>("all");
   const [filterTab, setFilterTab] = useState<AgentFilterTab>("all");
+  const [agentSearch, setAgentSearch] = useState("");
+  const [bulkMoveTarget, setBulkMoveTarget] = useState<AgentMoveTarget | "">("");
   const [form, setForm] = useState(initialForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingOriginal, setEditingOriginal] = useState<{
     name: string;
+    categoryId: string | null;
     provider: string;
     model: string;
     contextLength: number | null;
@@ -139,11 +181,18 @@ export default function AgentsPage() {
   const [debugTitle, setDebugTitle] = useState("");
   const [debugText, setDebugText] = useState("");
   const [toggleDialogAgent, setToggleDialogAgent] = useState<Agent | null>(null);
+  const [categoryFormName, setCategoryFormName] = useState("");
+  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+  const [categoryActionLoading, setCategoryActionLoading] = useState("");
+  const [draggingAgentIds, setDraggingAgentIds] = useState<string[]>([]);
+  const [dragOverCategory, setDragOverCategory] = useState<AgentCategoryFilter | null>(null);
+  const [movingAgentIds, setMovingAgentIds] = useState<string[]>([]);
   const [quotaProfileForm, setQuotaProfileForm] = useState(initialQuotaProfileForm);
   const [editingQuotaProfileId, setEditingQuotaProfileId] = useState<string | null>(null);
   const [quotaActionLoading, setQuotaActionLoading] = useState<string>("");
   const [adjustmentForm, setAdjustmentForm] = useState(initialAdjustmentForm);
   const agentEditorRef = useRef<HTMLElement | null>(null);
+  const dragImageRef = useRef<HTMLDivElement | null>(null);
   const [syncedAgentsPanelsHeight, setSyncedAgentsPanelsHeight] = useState<number | null>(null);
 
   async function readPayload(response: Response) {
@@ -188,6 +237,24 @@ export default function AgentsPage() {
     setAgents(payload.data ?? []);
   }, [showToast]);
 
+  const loadAgentCategories = useCallback(async () => {
+    let response: Response;
+    try {
+      response = await fetch("/api/agents/categories", { cache: "no-store" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showToast("error", `Failed to fetch: ${message}`);
+      return;
+    }
+
+    const payload = await readPayload(response);
+    if (!response.ok) {
+      showToast("error", payload.error?.message ?? "AI 分类加载失败");
+      return;
+    }
+    setAgentCategories(payload.data ?? []);
+  }, [showToast]);
+
   const loadQuotaProfiles = useCallback(async () => {
     let response: Response;
     try {
@@ -207,12 +274,36 @@ export default function AgentsPage() {
   }, [showToast]);
 
   const reloadAll = useCallback(async () => {
-    await Promise.all([loadAgents(), loadQuotaProfiles()]);
-  }, [loadAgents, loadQuotaProfiles]);
+    await Promise.all([loadAgents(), loadAgentCategories(), loadQuotaProfiles()]);
+  }, [loadAgents, loadAgentCategories, loadQuotaProfiles]);
 
   useEffect(() => {
     void reloadAll();
   }, [reloadAll]);
+
+  useEffect(() => {
+    return () => {
+      dragImageRef.current?.remove();
+      dragImageRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const hasCategoryFilter =
+      categoryFilter === "all" ||
+      categoryFilter === "uncategorized" ||
+      agentCategories.some((category) => category.id === categoryFilter);
+    if (!hasCategoryFilter) {
+      setCategoryFilter("all");
+    }
+    if (
+      bulkMoveTarget &&
+      bulkMoveTarget !== "uncategorized" &&
+      !agentCategories.some((category) => category.id === bulkMoveTarget)
+    ) {
+      setBulkMoveTarget("");
+    }
+  }, [agentCategories, bulkMoveTarget, categoryFilter]);
 
   async function loadCatalogModels() {
     if (openRouterLoading) return;
@@ -295,18 +386,150 @@ export default function AgentsPage() {
     return out;
   })();
 
-  const enabledAgentsCount = agents.filter((agent) => agent.isActive).length;
-  const disabledAgentsCount = agents.length - enabledAgentsCount;
+  const categoryNamesById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const category of agentCategories) map.set(category.id, category.name);
+    return map;
+  }, [agentCategories]);
+  const categoryStatsById = useMemo(() => {
+    const map = new Map<string, CategoryStats>();
+    for (const agent of agents) {
+      if (!agent.categoryId) continue;
+      const stats = map.get(agent.categoryId) ?? { total: 0, enabled: 0, disabled: 0 };
+      stats.total += 1;
+      if (agent.isActive) stats.enabled += 1;
+      else stats.disabled += 1;
+      map.set(agent.categoryId, stats);
+    }
+    return map;
+  }, [agents]);
+  const allCategoryStats = useMemo<CategoryStats>(() => {
+    let enabled = 0;
+    for (const agent of agents) {
+      if (agent.isActive) enabled += 1;
+    }
+    return {
+      total: agents.length,
+      enabled,
+      disabled: agents.length - enabled
+    };
+  }, [agents]);
+  const uncategorizedCategoryStats = useMemo<CategoryStats>(() => {
+    let total = 0;
+    let enabled = 0;
+    for (const agent of agents) {
+      if (agent.categoryId) continue;
+      total += 1;
+      if (agent.isActive) enabled += 1;
+    }
+    return {
+      total,
+      enabled,
+      disabled: total - enabled
+    };
+  }, [agents]);
+  const categoryScopedAgents = agents.filter((agent) => {
+    if (categoryFilter === "all") return true;
+    if (categoryFilter === "uncategorized") return !agent.categoryId;
+    return agent.categoryId === categoryFilter;
+  });
+  const normalizedSearch = agentSearch.trim().toLowerCase();
+  const searchedAgents = normalizedSearch
+    ? categoryScopedAgents.filter((agent) =>
+        [agent.name, agent.provider, agent.model, agent.baseUrl]
+          .some((value) => value.toLowerCase().includes(normalizedSearch))
+      )
+    : categoryScopedAgents;
+  const enabledAgentsCount = searchedAgents.filter((agent) => agent.isActive).length;
+  const disabledAgentsCount = searchedAgents.length - enabledAgentsCount;
   const editingAgent = editingId ? agents.find((agent) => agent.id === editingId) ?? null : null;
+  const editingCategory = editingCategoryId ? agentCategories.find((category) => category.id === editingCategoryId) ?? null : null;
   const selectedQuotaProfile =
     form.usageControlMode === "coding_plan"
       ? quotaProfiles.find((profile) => profile.id === form.quotaProfileId) ?? null
       : null;
-  const filteredAgents = agents.filter((agent) => {
+  const filteredAgents = searchedAgents.filter((agent) => {
     if (filterTab === "enabled") return agent.isActive;
     if (filterTab === "disabled") return !agent.isActive;
     return true;
   });
+  const filteredAgentIds = filteredAgents.map((agent) => agent.id);
+  const filteredAgentIdsKey = filteredAgentIds.join("\u0000");
+  const selectedAgentIdsInCurrentView = filteredAgentIds.filter((id) => selectedAgentIds.includes(id));
+  const selectedAgentsInCurrentView = selectedAgentIdsInCurrentView.length;
+  const areAllFilteredAgentsSelected = filteredAgents.length > 0 && selectedAgentsInCurrentView === filteredAgents.length;
+  const isMovingAgents = movingAgentIds.length > 0;
+
+  useEffect(() => {
+    const visibleIds = new Set(filteredAgentIdsKey ? filteredAgentIdsKey.split("\u0000") : []);
+    setSelectedAgentIds((current) => {
+      if (current.length === 0) return current;
+      const next = current.filter((id) => visibleIds.has(id));
+      return next.length === current.length ? current : next;
+    });
+  }, [filteredAgentIdsKey]);
+
+  function getCategoryName(categoryId: string | null) {
+    if (!categoryId) return "未分类";
+    return categoryNamesById.get(categoryId) ?? "未分类";
+  }
+
+  function getCategoryFilterName() {
+    if (categoryFilter === "all") return "全部分类";
+    if (categoryFilter === "uncategorized") return "未分类";
+    return getCategoryName(categoryFilter);
+  }
+
+  function getFilteredAgentsEmptyText() {
+    if (agents.length === 0) return "暂无 AI 配置";
+    if (searchedAgents.length === 0 && normalizedSearch) return `${getCategoryFilterName()}下没有匹配的 AI 配置`;
+    if (categoryScopedAgents.length === 0) return `${getCategoryFilterName()}下暂无 AI 配置`;
+    if (filterTab === "enabled") return `${getCategoryFilterName()}下暂无已启用的 AI 配置`;
+    if (filterTab === "disabled") return `${getCategoryFilterName()}下暂无已禁用的 AI 配置`;
+    return "暂无 AI 配置";
+  }
+
+  function getCategoryTargetId(category: AgentCategoryFilter) {
+    if (category === "all") return undefined;
+    if (category === "uncategorized") return null;
+    return category;
+  }
+
+  function getCategoryStats(category: AgentCategoryFilter) {
+    if (category === "all") return allCategoryStats;
+    if (category === "uncategorized") return uncategorizedCategoryStats;
+    return categoryStatsById.get(category) ?? { total: 0, enabled: 0, disabled: 0 };
+  }
+
+  function getDragAgentIds(agent: Agent) {
+    return selectedAgentIdsInCurrentView.includes(agent.id) ? selectedAgentIdsInCurrentView : [agent.id];
+  }
+
+  function getMovableAgentIds(agentIds: string[], category: AgentCategoryFilter) {
+    const targetId = getCategoryTargetId(category);
+    if (targetId === undefined) return [];
+    const uniqueIds = Array.from(new Set(agentIds));
+    return uniqueIds.filter((agentId) => {
+      const agent = agents.find((item) => item.id === agentId);
+      if (!agent) return false;
+      return (agent.categoryId ?? null) !== targetId;
+    });
+  }
+
+  function canDropOnCategory(category: AgentCategoryFilter) {
+    return draggingAgentIds.length > 0 && getMovableAgentIds(draggingAgentIds, category).length > 0;
+  }
+
+  function parseDraggedAgentIds(event: DragEvent) {
+    const encoded = event.dataTransfer.getData("application/x-open-debate-agent-ids");
+    if (!encoded) return draggingAgentIds;
+    try {
+      const parsed = JSON.parse(encoded);
+      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : draggingAgentIds;
+    } catch {
+      return draggingAgentIds;
+    }
+  }
 
   function formatLocalTime(value: string | null) {
     if (!value) return "";
@@ -346,6 +569,7 @@ export default function AgentsPage() {
     try {
       const body = {
         ...form,
+        categoryId: form.categoryId || null,
         contextLength: parseContextLengthInput(form.contextLength),
         maxInputTokens: parseMaxInputTokensInput(form.maxInputTokens),
         maxOutputTokens: parseMaxOutputTokensInput(form.maxOutputTokens),
@@ -378,6 +602,7 @@ export default function AgentsPage() {
     setEditingId(agent.id);
     setEditingOriginal({
       name: agent.name,
+      categoryId: agent.categoryId ?? null,
       provider: agent.provider,
       model: agent.model,
       contextLength: agent.contextLength ?? null,
@@ -389,6 +614,7 @@ export default function AgentsPage() {
     });
     setForm({
       name: agent.name,
+      categoryId: agent.categoryId ?? "",
       provider: agent.provider,
       model: agent.model,
       contextLength: agent.contextLength ? String(agent.contextLength) : "",
@@ -411,6 +637,7 @@ export default function AgentsPage() {
     if (!editingOriginal) return [];
     const changes: string[] = [];
     if (form.name !== editingOriginal.name) changes.push("名称");
+    if ((form.categoryId || null) !== (editingOriginal.categoryId ?? null)) changes.push("分类");
     if (form.provider !== editingOriginal.provider) changes.push("Provider");
     if (form.model !== editingOriginal.model) changes.push("模型");
     if (parseContextLengthInput(form.contextLength) !== (editingOriginal.contextLength ?? null)) changes.push("上下文长度");
@@ -439,6 +666,7 @@ export default function AgentsPage() {
 
     const body: Record<string, unknown> = {
       name: form.name,
+      categoryId: form.categoryId || null,
       provider: form.provider,
       model: form.model,
       contextLength: parseContextLengthInput(form.contextLength),
@@ -783,6 +1011,186 @@ export default function AgentsPage() {
     setSelectedAgentIds((current) => (current.includes(id) ? current.filter((x) => x !== id) : [...current, id]));
   }
 
+  function toggleFilteredAgentsSelected() {
+    if (filteredAgentIds.length === 0) return;
+    setSelectedAgentIds(areAllFilteredAgentsSelected ? [] : filteredAgentIds);
+  }
+
+  function getInvisibleDragImage() {
+    if (typeof document === "undefined") return null;
+    if (!dragImageRef.current) {
+      const element = document.createElement("div");
+      element.className = "agentInvisibleDragImage";
+      document.body.appendChild(element);
+      dragImageRef.current = element;
+    }
+    return dragImageRef.current;
+  }
+
+  function handleAgentDragStart(event: DragEvent<HTMLDivElement>, agent: Agent) {
+    const agentIds = getDragAgentIds(agent);
+    setDraggingAgentIds(agentIds);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-open-debate-agent-ids", JSON.stringify(agentIds));
+    event.dataTransfer.setData("text/plain", agentIds.join(","));
+    const dragImage = getInvisibleDragImage();
+    if (dragImage) {
+      event.dataTransfer.setDragImage(dragImage, 0, 0);
+    }
+  }
+
+  function handleAgentDragEnd() {
+    setDraggingAgentIds([]);
+    setDragOverCategory(null);
+  }
+
+  function handleCategoryDragOver(event: DragEvent<HTMLElement>, category: AgentCategoryFilter) {
+    if (!canDropOnCategory(category)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDragOverCategory(category);
+  }
+
+  function handleCategoryDragLeave(event: DragEvent<HTMLElement>, category: AgentCategoryFilter) {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragOverCategory((current) => (current === category ? null : current));
+  }
+
+  async function moveAgentsToCategory(agentIds: string[], category: AgentCategoryFilter) {
+    if (isMovingAgents) return;
+    const targetId = getCategoryTargetId(category);
+    if (targetId === undefined) return;
+    const movableIds = getMovableAgentIds(agentIds, category);
+    if (movableIds.length === 0) return;
+
+    setMovingAgentIds(movableIds);
+    try {
+      const response = await fetch("/api/agents/category-move", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentIds: movableIds, categoryId: targetId })
+      });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        throw new Error(payload.error?.message ?? "移动分类失败");
+      }
+      const movedAgents = Array.isArray(payload.data?.agents) ? (payload.data.agents as Agent[]) : [];
+      const movedAgentsById = new Map(movedAgents.map((agent) => [agent.id, agent]));
+      setAgents((current) => current.map((agent) => movedAgentsById.get(agent.id) ?? agent));
+      showToast("success", `已移动 ${movedAgents.length} 个配置到${getCategoryName(targetId)}`);
+    } catch (error) {
+      showToast("error", error instanceof Error ? error.message : "移动分类失败");
+      await reloadAll();
+    } finally {
+      setMovingAgentIds([]);
+      setDraggingAgentIds([]);
+      setDragOverCategory(null);
+    }
+  }
+
+  function handleCategoryDrop(event: DragEvent<HTMLElement>, category: AgentCategoryFilter) {
+    event.preventDefault();
+    const agentIds = parseDraggedAgentIds(event);
+    void moveAgentsToCategory(agentIds, category);
+  }
+
+  async function moveSelectedAgentsByToolbar() {
+    if (!bulkMoveTarget) {
+      showToast("error", "请选择目标分类");
+      return;
+    }
+    if (selectedAgentIdsInCurrentView.length === 0) {
+      showToast("error", "请先勾选要移动的 AI 配置");
+      return;
+    }
+    await moveAgentsToCategory(selectedAgentIdsInCurrentView, bulkMoveTarget);
+    setBulkMoveTarget("");
+  }
+
+  function startCategoryEdit(category: AgentCategory) {
+    setEditingCategoryId(category.id);
+    setCategoryFormName(category.name);
+  }
+
+  function selectCategoryForEdit(category: AgentCategory) {
+    setCategoryFilter(category.id);
+    startCategoryEdit(category);
+  }
+
+  function selectCategoryView(category: AgentCategoryFilter) {
+    setCategoryFilter(category);
+    cancelCategoryEdit();
+  }
+
+  function cancelCategoryEdit() {
+    setEditingCategoryId(null);
+    setCategoryFormName("");
+  }
+
+  async function saveAgentCategory() {
+    if (categoryActionLoading) return;
+    const name = categoryFormName.trim();
+    if (!name) {
+      showToast("error", "请填写分类名称");
+      return;
+    }
+
+    const mode = editingCategoryId ? `save:${editingCategoryId}` : "create";
+    setCategoryActionLoading(mode);
+    try {
+      const response = await fetch(
+        editingCategoryId ? `/api/agents/categories/${editingCategoryId}` : "/api/agents/categories",
+        {
+          method: editingCategoryId ? "PATCH" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name })
+        }
+      );
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "分类保存失败");
+        return;
+      }
+      const savedCategory = payload.data as AgentCategory | undefined;
+      showToast("success", editingCategoryId ? "分类已更新" : "分类已创建");
+      if (savedCategory?.id) {
+        setAgentCategories((current) =>
+          editingCategoryId
+            ? current.map((category) => (category.id === savedCategory.id ? savedCategory : category))
+            : [savedCategory, ...current.filter((category) => category.id !== savedCategory.id)]
+        );
+        if (!editingCategoryId) setCategoryFilter(savedCategory.id);
+      } else {
+        await loadAgentCategories();
+      }
+      cancelCategoryEdit();
+    } finally {
+      setCategoryActionLoading("");
+    }
+  }
+
+  async function deleteAgentCategory(category: AgentCategory) {
+    if (categoryActionLoading) return;
+    const ok = window.confirm(`确认删除分类“${category.name}”？该分类下的 AI 配置会移到“未分类”。`);
+    if (!ok) return;
+
+    setCategoryActionLoading(`delete:${category.id}`);
+    try {
+      const response = await fetch(`/api/agents/categories/${category.id}`, { method: "DELETE" });
+      const payload = await readPayload(response);
+      if (!response.ok) {
+        showToast("error", payload.error?.message ?? "分类删除失败");
+        return;
+      }
+      showToast("success", "分类已删除");
+      if (categoryFilter === category.id) setCategoryFilter("uncategorized");
+      cancelCategoryEdit();
+      await reloadAll();
+    } finally {
+      setCategoryActionLoading("");
+    }
+  }
+
   function encodeBase64(bytes: Uint8Array) {
     let binary = "";
     const chunk = 0x8000;
@@ -967,7 +1375,7 @@ export default function AgentsPage() {
             zIndex: 1000
           }}
         >
-          <div className="panel stack" onClick={(e) => e.stopPropagation()} style={{ width: "min(880px, 100%)" }}>
+          <div className="panel stack agentsControlScope" onClick={(e) => e.stopPropagation()} style={{ width: "min(880px, 100%)" }}>
             <div className="row" style={{ justifyContent: "space-between" }}>
               <strong>导入 / 导出（加密文件）</strong>
               <button className="btn" onClick={() => setIoOpen(false)}>
@@ -1014,15 +1422,23 @@ export default function AgentsPage() {
 
               <section className="panel stack">
                 <strong>导入</strong>
-                <input
-                  ref={ioFileInputRef}
-                  type="file"
-                  accept="application/json,.json"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0] ?? null;
-                    setIoFile(file);
-                  }}
-                />
+                <div className="customFilePicker">
+                  <input
+                    id="agentsImportFile"
+                    ref={ioFileInputRef}
+                    className="customFileInput"
+                    type="file"
+                    accept="application/json,.json"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] ?? null;
+                      setIoFile(file);
+                    }}
+                  />
+                  <label className="btn customFileButton" htmlFor="agentsImportFile">
+                    选择文件
+                  </label>
+                  <span className="muted customFileName">{ioFile?.name ?? "未选择文件"}</span>
+                </div>
                 <button className="btn btn-primary" disabled={isImporting} onClick={() => void importEncryptedFile()}>
                   {isImporting ? "导入中..." : "导入文件"}
                 </button>
@@ -1048,7 +1464,7 @@ export default function AgentsPage() {
           }}
         >
           <div
-            className="panel stack"
+            className="panel stack agentsControlScope"
             onClick={(event) => event.stopPropagation()}
             style={{ width: "min(520px, 100%)" }}
           >
@@ -1126,6 +1542,20 @@ export default function AgentsPage() {
             onChange={(event) => setForm({ ...form, name: event.target.value })}
             placeholder="例如：LongCat Flash Lite"
           />
+        </div>
+        <div className="field">
+          <label>分类</label>
+          <select
+            value={form.categoryId}
+            onChange={(event) => setForm((current) => ({ ...current, categoryId: event.target.value }))}
+          >
+            <option value="">未分类</option>
+            {agentCategories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+          </select>
         </div>
         <div className="field">
           <label>Provider</label>
@@ -1585,7 +2015,7 @@ export default function AgentsPage() {
           }}
         >
           <div
-            className="panel stack"
+            className="panel stack agentsControlScope"
             onClick={(event) => event.stopPropagation()}
             style={{ width: "min(980px, 100%)" }}
           >
@@ -1659,7 +2089,7 @@ export default function AgentsPage() {
           }}
         >
           <div
-            className="panel stack"
+            className="panel stack agentsControlScope"
             onClick={(event) => event.stopPropagation()}
             style={{ width: "min(980px, 100%)" }}
           >
@@ -1686,39 +2116,174 @@ export default function AgentsPage() {
             导入/导出
           </button>
         </div>
-        <div className="tabsBar">
-          <button
-            type="button"
-            className={`tab ${filterTab === "all" ? "tabActive" : ""}`}
-            onClick={() => setFilterTab("all")}
-          >
-            <span className="tabName">全部</span>
-            <span className="muted">{agents.length}</span>
-          </button>
-          <button
-            type="button"
-            className={`tab ${filterTab === "enabled" ? "tabActive" : ""}`}
-            onClick={() => setFilterTab("enabled")}
-          >
-            <span className="agentStatus agentStatusEnabled">
-              <span className="agentStatusDot" aria-hidden="true" />
-              已启用
-            </span>
-            <span className="muted">{enabledAgentsCount}</span>
-          </button>
-          <button
-            type="button"
-            className={`tab ${filterTab === "disabled" ? "tabActive" : ""}`}
-            onClick={() => setFilterTab("disabled")}
-          >
-            <span className="agentStatus agentStatusDisabled">
-              <span className="agentStatusDot" aria-hidden="true" />
-              已禁用
-            </span>
-            <span className="muted">{disabledAgentsCount}</span>
-          </button>
-        </div>
-        <div className="card-list agentsListViewport">
+        <div className="agentsListShell">
+          <aside className="agentCategorySidebar">
+            <div className="agentCategoryPanel">
+              <div className="agentCategoryHeader">
+                <strong>分类</strong>
+              </div>
+              <div className="agentCategoryForm">
+                <input
+                  value={categoryFormName}
+                  onChange={(event) => setCategoryFormName(event.target.value)}
+                  placeholder={editingCategoryId ? "分类名称" : "新分类名称"}
+                />
+                <div className="row" style={{ gap: 8 }}>
+                  {editingCategoryId ? (
+                    <button className="btn btn-muted" type="button" onClick={() => cancelCategoryEdit()}>
+                      取消
+                    </button>
+                  ) : null}
+                  <button
+                    className="btn"
+                    type="button"
+                    disabled={Boolean(categoryActionLoading)}
+                    onClick={() => void saveAgentCategory()}
+                  >
+                    {categoryActionLoading.startsWith("save:") || categoryActionLoading === "create"
+                      ? "保存中"
+                      : "保存"}
+                  </button>
+                  {editingCategory ? (
+                    <button
+                      className="btn btn-danger"
+                      type="button"
+                      disabled={Boolean(categoryActionLoading)}
+                      onClick={() => void deleteAgentCategory(editingCategory)}
+                    >
+                      {categoryActionLoading === `delete:${editingCategory.id}` ? "删除中" : "删除"}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <div className="agentCategoryList">
+                <button
+                  type="button"
+                  className={`agentCategoryRow ${categoryFilter === "all" ? "active" : ""}`}
+                  onClick={() => selectCategoryView("all")}
+                >
+                  <span className="agentCategoryName">全部分类</span>
+                  <span className="agentCategoryStats">
+                    <span>{allCategoryStats.total}</span>
+                    <span className="agentCategoryStatEnabled">{allCategoryStats.enabled}</span>
+                    <span className="agentCategoryStatDisabled">{allCategoryStats.disabled}</span>
+                  </span>
+                </button>
+                {agentCategories.map((category) => {
+                  const stats = getCategoryStats(category.id);
+                  const canDrop = canDropOnCategory(category.id);
+                  return (
+                    <div
+                      key={category.id}
+                      className={`agentCategoryRowWrap ${categoryFilter === category.id ? "active" : ""} ${
+                        dragOverCategory === category.id && canDrop ? "dropActive" : ""
+                      }`}
+                      onDragOver={(event) => handleCategoryDragOver(event, category.id)}
+                      onDragLeave={(event) => handleCategoryDragLeave(event, category.id)}
+                      onDrop={(event) => handleCategoryDrop(event, category.id)}
+                    >
+                      <button
+                        type="button"
+                        className="agentCategoryRowButton"
+                        onClick={() => selectCategoryForEdit(category)}
+                      >
+                        <span className="agentCategoryName">{category.name}</span>
+                        <span className="agentCategoryStats">
+                          <span>{stats.total}</span>
+                          <span className="agentCategoryStatEnabled">{stats.enabled}</span>
+                          <span className="agentCategoryStatDisabled">{stats.disabled}</span>
+                        </span>
+                      </button>
+                    </div>
+                  );
+                })}
+                <button
+                  type="button"
+                  className={`agentCategoryRow ${categoryFilter === "uncategorized" ? "active" : ""} ${
+                    dragOverCategory === "uncategorized" && canDropOnCategory("uncategorized") ? "dropActive" : ""
+                  }`}
+                  onClick={() => selectCategoryView("uncategorized")}
+                  onDragOver={(event) => handleCategoryDragOver(event, "uncategorized")}
+                  onDragLeave={(event) => handleCategoryDragLeave(event, "uncategorized")}
+                  onDrop={(event) => handleCategoryDrop(event, "uncategorized")}
+                >
+                  <span className="agentCategoryName">未分类</span>
+                  <span className="agentCategoryStats">
+                    <span>{uncategorizedCategoryStats.total}</span>
+                    <span className="agentCategoryStatEnabled">{uncategorizedCategoryStats.enabled}</span>
+                    <span className="agentCategoryStatDisabled">{uncategorizedCategoryStats.disabled}</span>
+                  </span>
+                </button>
+              </div>
+            </div>
+          </aside>
+          <div className="agentListMain">
+            <div className="agentListToolbar">
+              <input
+                value={agentSearch}
+                onChange={(event) => setAgentSearch(event.target.value)}
+                placeholder="搜索名称 / Provider / 模型 / Base URL"
+              />
+              <span className="muted">
+                已选 {selectedAgentsInCurrentView}
+              </span>
+              <button
+                className="btn btn-muted"
+                type="button"
+                disabled={filteredAgents.length === 0}
+                onClick={() => toggleFilteredAgentsSelected()}
+              >
+                {areAllFilteredAgentsSelected ? "取消全选" : "全选当前结果"}
+              </button>
+              <select
+                value={bulkMoveTarget}
+                onChange={(event) => setBulkMoveTarget(event.target.value as AgentMoveTarget | "")}
+              >
+                <option value="">移动到分类</option>
+                {agentCategories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+                <option value="uncategorized">未分类</option>
+              </select>
+              <button className="btn" type="button" disabled={isMovingAgents} onClick={() => void moveSelectedAgentsByToolbar()}>
+                {isMovingAgents ? "移动中..." : "移动"}
+              </button>
+            </div>
+            <div className="tabsBar agentStatusTabs">
+              <button
+                type="button"
+                className={`tab ${filterTab === "all" ? "tabActive" : ""}`}
+                onClick={() => setFilterTab("all")}
+              >
+                <span className="tabName">全部</span>
+                <span className="muted">{searchedAgents.length}</span>
+              </button>
+              <button
+                type="button"
+                className={`tab ${filterTab === "enabled" ? "tabActive" : ""}`}
+                onClick={() => setFilterTab("enabled")}
+              >
+                <span className="agentStatus agentStatusEnabled">
+                  <span className="agentStatusDot" aria-hidden="true" />
+                  已启用
+                </span>
+                <span className="muted">{enabledAgentsCount}</span>
+              </button>
+              <button
+                type="button"
+                className={`tab ${filterTab === "disabled" ? "tabActive" : ""}`}
+                onClick={() => setFilterTab("disabled")}
+              >
+                <span className="agentStatus agentStatusDisabled">
+                  <span className="agentStatusDot" aria-hidden="true" />
+                  已禁用
+                </span>
+                <span className="muted">{disabledAgentsCount}</span>
+              </button>
+            </div>
+            <div className="card-list agentsListViewport">
           {filteredAgents.map((agent) => {
             const agentQuotaProfile =
               agent.quotaProfileId ? quotaProfiles.find((profile) => profile.id === agent.quotaProfileId) ?? null : null;
@@ -1729,6 +2294,7 @@ export default function AgentsPage() {
                   ? "agentStatusDisabled"
                   : "";
             const summaryItems = [
+              `分类 ${getCategoryName(agent.categoryId)}`,
               agent.contextLength ? `Context ${agent.contextLength.toLocaleString()}` : null,
               agent.maxInputTokens ? `Input ${agent.maxInputTokens.toLocaleString()}` : null,
               agent.maxOutputTokens ? `Output ${agent.maxOutputTokens.toLocaleString()}` : null,
@@ -1745,20 +2311,26 @@ export default function AgentsPage() {
                   `限制原因 ${getQuotaBlockingReasonText(agentQuotaProfile.summary.blockingReason)}`
                 ]
               : [];
+            const isDragging = draggingAgentIds.includes(agent.id);
+            const isMoving = movingAgentIds.includes(agent.id);
             return (
               <div
-                className={`panel agentCard ${agent.id === editingId ? "agentCardEditing" : ""}`}
+                className={`panel agentCard ${agent.id === editingId ? "agentCardEditing" : ""} ${
+                  isDragging ? "agentCardDragging" : ""
+                } ${isMoving ? "agentCardMoving" : ""}`}
                 key={agent.id}
+                draggable={!isMovingAgents}
+                onDragStart={(event) => handleAgentDragStart(event, agent)}
+                onDragEnd={() => handleAgentDragEnd()}
               >
                 <div className="agentCardLayout">
                   <div className="stack agentCardMain">
                     <div className="row agentCardHeader">
-                      <label className="row agentCardIdentity">
-                        <input
-                          type="checkbox"
+                      <label className="row agentCardIdentity agentCardSelectionZone">
+                        <CustomCheckbox
                           checked={selectedAgentIds.includes(agent.id)}
                           onChange={() => toggleSelected(agent.id)}
-                          style={{ marginTop: 3, flex: "0 0 auto" }}
+                          ariaLabel={`选择 ${agent.name}`}
                         />
                         <span className="stack agentCardIdentityText">
                           <strong className="agentCardTitle">{agent.name}</strong>
@@ -1775,7 +2347,10 @@ export default function AgentsPage() {
 
                     <div className="agentCardMetrics">
                       {summaryItems.map((item) => (
-                        <div key={item} className="muted agentCardMetric">
+                        <div
+                          key={item}
+                          className={`muted agentCardMetric ${item.startsWith("分类 ") ? "agentCardMetricCategory" : ""}`}
+                        >
                           {item}
                         </div>
                       ))}
@@ -1840,16 +2415,10 @@ export default function AgentsPage() {
             );
           })}
           {filteredAgents.length === 0 ? (
-            <div className="muted">
-              {agents.length === 0
-                ? "暂无 AI 配置"
-                : filterTab === "enabled"
-                  ? "暂无已启用的 AI 配置"
-                  : filterTab === "disabled"
-                    ? "暂无已禁用的 AI 配置"
-                    : "暂无 AI 配置"}
-            </div>
+            <div className="muted">{getFilteredAgentsEmptyText()}</div>
           ) : null}
+            </div>
+          </div>
         </div>
       </section>
     </div>

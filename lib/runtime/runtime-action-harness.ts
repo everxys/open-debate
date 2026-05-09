@@ -807,6 +807,8 @@ export function buildRuntimeActionInstructions(input: {
   lines.push("Only the latest HARNESS_ACTION_RESULT is authoritative for file state.");
   lines.push("Do not claim a file was created, updated, appended, or section-merged unless the latest result confirmed ok:true for that exact path.");
   lines.push("If a harness write returns an error, treat the target file as unchanged.");
+  lines.push("Do not make the final human answer a tool receipt. The app records write success, versions, and ok:true separately.");
+  lines.push("After an action succeeds, final answers should focus on the useful content or next concrete decision, not on saying the action succeeded.");
   lines.push("For template Phase 2 ledger files, use write_replace first; do not use write_section until the file has stable headings and you have read them.");
   lines.push(`Allowed actions this step: ${input.policy.allowedActions.join(", ") || "none"}.`);
   lines.push(`Action policy reason: ${input.policy.reason}`);

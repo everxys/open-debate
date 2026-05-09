@@ -1,4 +1,3 @@
-import { indexDebateContextChunk } from "@/lib/retrieval";
 import {
   CONTEXT_GENERATION_DIAGNOSTICS_PATH,
   CONTEXT_USAGE_BASELINE_PATH,
@@ -503,23 +502,4 @@ export async function persistMemoryAfterTurn(input: {
     });
   }
 
-  try {
-    const summary = (await readDebateAgentFile(input.userId, input.debateAgentId, MEMORY_SUMMARY_PATH)) ?? "";
-    if (summary.trim()) {
-      await indexDebateContextChunk({
-        userId: input.userId,
-        debateId: input.debateId,
-        debateAgentId: input.debateAgentId,
-        chunkKey: `memory:${input.debateAgentId}`,
-        sourceType: "memory_summary",
-        sourcePath: MEMORY_SUMMARY_PATH,
-        turnNumberStart: input.turnNumber,
-        turnNumberEnd: input.turnNumber,
-        content: summary,
-        now: input.now
-      });
-    }
-  } catch {
-    // retrieval indexing is best-effort
-  }
 }

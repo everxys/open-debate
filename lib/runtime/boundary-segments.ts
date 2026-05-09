@@ -1,5 +1,4 @@
 import { ensureDb } from "@/lib/db";
-import { indexDebateContextChunk } from "@/lib/retrieval";
 import {
   CONTEXT_SEGMENT_PATH,
   CONTEXT_WINDOW_PATH,
@@ -134,20 +133,6 @@ export async function startAutoSegmentAtBoundary(input: {
   );
   await upsertDebateFile(input.debateId, CONTEXT_SEGMENT_PATH, checkpointContent, input.now);
   await upsertDebateFile(input.debateId, checkpointPath, checkpointContent, input.now);
-  try {
-    await indexDebateContextChunk({
-      userId: input.userId,
-      debateId: input.debateId,
-      chunkKey: `segment:shared:${seg}`,
-      sourceType: "segment",
-      sourcePath: CONTEXT_SEGMENT_PATH,
-      segmentTag: seg,
-      content: checkpointContent,
-      now: input.now
-    });
-  } catch {
-    // retrieval indexing is best-effort
-  }
 }
 
 export async function startAutoSegmentForDebateAgentAtBoundary(input: {
@@ -196,19 +181,4 @@ export async function startAutoSegmentForDebateAgentAtBoundary(input: {
   );
   await upsertDebateAgentFile(input.debateAgentId, CONTEXT_SEGMENT_PATH, checkpointContent, input.now);
   await upsertDebateAgentFile(input.debateAgentId, checkpointPath, checkpointContent, input.now);
-  try {
-    await indexDebateContextChunk({
-      userId: input.userId,
-      debateId: input.debateId,
-      debateAgentId: input.debateAgentId,
-      chunkKey: `segment:${input.debateAgentId}:${seg}`,
-      sourceType: "segment",
-      sourcePath: CONTEXT_SEGMENT_PATH,
-      segmentTag: seg,
-      content: checkpointContent,
-      now: input.now
-    });
-  } catch {
-    // retrieval indexing is best-effort
-  }
 }

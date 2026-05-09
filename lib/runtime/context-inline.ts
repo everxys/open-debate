@@ -25,7 +25,7 @@ export type ResolvedContextAccessRule = {
 export type PromptSection = {
   key: string;
   priority: 0 | 1 | 2 | 3;
-  category: "core" | "retrieved" | "recent" | "optional";
+  category: "core" | "recent" | "optional";
   content: string | null;
   preferredMaxChars?: number | null;
 };
@@ -219,10 +219,9 @@ export function planPromptContext(sections: PromptSection[], hardMaxChars: numbe
 
   const totalBudget = Math.max(2_000, hardMaxChars);
   const categoryBudgets = {
-    core: Math.max(14_000, Math.floor(totalBudget * 0.6)),
-    retrieved: Math.max(4_000, Math.floor(totalBudget * 0.2)),
-    recent: Math.max(2_500, Math.floor(totalBudget * 0.08)),
-    optional: Math.max(2_000, Math.floor(totalBudget * 0.12))
+    core: Math.max(14_000, Math.floor(totalBudget * 0.72)),
+    recent: Math.max(2_500, Math.floor(totalBudget * 0.12)),
+    optional: Math.max(2_000, Math.floor(totalBudget * 0.16))
   };
   let remainingBudget = totalBudget;
   const chosenSections: string[] = [];
@@ -270,37 +269,10 @@ export function planPromptContext(sections: PromptSection[], hardMaxChars: numbe
   }
 
   appendCategory("core", categoryBudgets.core, true);
-  appendCategory("retrieved", Math.min(categoryBudgets.retrieved + remainingBudget, totalBudget), false);
   appendCategory("recent", Math.min(categoryBudgets.recent + remainingBudget, totalBudget), false);
   appendCategory("optional", Math.min(categoryBudgets.optional + remainingBudget, totalBudget), false);
 
   return chosenSections.join("\n\n").trim();
-}
-
-export function buildRelevantHistoryInline(
-  items: Array<{
-    sourceType: string;
-    sourcePath: string | null;
-    turnNumberStart: number | null;
-    turnNumberEnd: number | null;
-    roundNumber: number | null;
-    content: string;
-    score: number;
-  }>
-) {
-  if (items.length <= 0) return null;
-  const lines = ["Relevant history (retrieved):"];
-  for (const item of items) {
-    const sourceLocation =
-      item.turnNumberStart !== null
-        ? `turn ${item.turnNumberStart}${item.turnNumberEnd && item.turnNumberEnd !== item.turnNumberStart ? `-${item.turnNumberEnd}` : ""}`
-        : item.roundNumber !== null
-          ? `round ${item.roundNumber}`
-          : item.sourcePath ?? item.sourceType;
-    lines.push(`- ${item.sourceType} · ${sourceLocation} · score=${item.score.toFixed(3)}`);
-    lines.push(clipPromptInlineContent(item.content, 2_400));
-  }
-  return lines.join("\n");
 }
 
 export function getPhaseSnapshot(

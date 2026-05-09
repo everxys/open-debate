@@ -100,6 +100,7 @@ export type AiAgentTable = {
   id: Generated<string>;
   user_id: string;
   name: string;
+  category_id: string | null;
   provider: string;
   model: string;
   context_length: number | null;
@@ -114,6 +115,15 @@ export type AiAgentTable = {
   usage_control_mode: string;
   quota_profile_id: string | null;
   is_active: boolean;
+  created_at: TimestampString;
+  updated_at: TimestampString;
+  deleted_at: NullableTimestampString;
+};
+
+export type AiAgentCategoryTable = {
+  id: Generated<string>;
+  user_id: string;
+  name: string;
   created_at: TimestampString;
   updated_at: TimestampString;
   deleted_at: NullableTimestampString;
@@ -408,52 +418,9 @@ export type DebateAgentOverrideTable = {
   updated_at: TimestampString;
 };
 
-export type RetrievalConfigTable = {
-  id: string;
-  user_id: string;
-  provider: string;
-  name: string;
-  model: string;
-  dimensions: number | null;
-  base_url: string;
-  api_key_encrypted: string;
-  api_key_masked: string;
-  is_active: boolean;
-  created_at: TimestampString;
-  updated_at: TimestampString;
-};
-
-export type DebateContextChunkTable = {
-  id: string;
-  debate_id: string;
-  debate_agent_id: string | null;
-  chunk_key: string;
-  source_type: string;
-  source_path: string | null;
-  turn_number_start: number | null;
-  turn_number_end: number | null;
-  round_number: number | null;
-  phase_kind: string | null;
-  segment_tag: string | null;
-  content: string;
-  content_hash: string;
-  created_at: TimestampString;
-  updated_at: TimestampString;
-};
-
-export type DebateContextEmbeddingTable = {
-  id: string;
-  debate_id: string;
-  chunk_id: string;
-  model: string;
-  dimensions: number | null;
-  embedding_json: unknown;
-  created_at: TimestampString;
-  updated_at: TimestampString;
-};
-
 export type OpenDebateDb = {
   ai_agents: AiAgentTable;
+  ai_agent_categories: AiAgentCategoryTable;
   ai_agent_files: AiAgentFileTable;
   ai_quota_adjustments: AiQuotaAdjustmentTable;
   ai_quota_profiles: AiQuotaProfileTable;
@@ -464,8 +431,6 @@ export type OpenDebateDb = {
   debate_agents: DebateAgentTable;
   debate_file_activity_logs: DebateFileActivityLogTable;
   debate_file_versions: DebateFileVersionTable;
-  debate_context_chunks: DebateContextChunkTable;
-  debate_context_embeddings: DebateContextEmbeddingTable;
   debate_files: DebateFileTable;
   debate_resume_jobs: DebateResumeJobTable;
   debate_summary_jobs: DebateSummaryJobTable;
@@ -475,7 +440,6 @@ export type OpenDebateDb = {
   debates: DebateTable;
   email_verification_codes: EmailVerificationCodeTable;
   rate_limit_counters: RateLimitCounterTable;
-  retrieval_configs: RetrievalConfigTable;
   strategies: StrategyTable;
   strategy_favorites: StrategyFavoriteTable;
   strategy_file_access_rules: StrategyFileAccessRuleTable;

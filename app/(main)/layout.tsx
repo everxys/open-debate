@@ -26,8 +26,7 @@ export default async function MainLayout({ children }: { children: ReactNode }) 
               { href: "/workspaces", label: "工作台" },
               { href: "/strategies", label: "策略" },
               { href: "/agents", label: "AI 配置" },
-              { href: "/playground", label: "Playground" },
-              { href: "/docs", label: "Docs" }
+              { href: "/playground", label: "Playground" }
             ]}
           />
           {user ? (

@@ -69,7 +69,6 @@ export function UserMenu(props: { email: string; role: UserRole }) {
 
           <div className="userMenuItems">
             <Link className="userMenuItem" role="menuitem" href="/settings/security">安全管理</Link>
-            <Link className="userMenuItem" role="menuitem" href="/settings/retrieval">检索配置</Link>
             {props.role === "admin" && (
               <Link className="userMenuItem" role="menuitem" href="/admin/observability">监控面板</Link>
             )}

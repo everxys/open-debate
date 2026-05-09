@@ -4,7 +4,6 @@ import { sql, type Kysely, type Transaction } from "kysely";
 
 import { ensureDb } from "@/lib/db";
 import type { OpenDebateDb } from "@/lib/db-schema";
-import { indexDebateContextChunk, splitTextIntoRetrievalChunks } from "@/lib/retrieval";
 import { appendServerLog } from "@/lib/server-log";
 import {
   describeContextAccessDenied,
@@ -854,23 +853,6 @@ export async function toolDebateFilesWrite(input: {
   });
   if ("error" in writeResult) {
     return writeResult;
-  }
-  try {
-    const chunks = splitTextIntoRetrievalChunks(writeResult.content, 1_500, 220);
-    for (let index = 0; index < chunks.length; index += 1) {
-      // eslint-disable-next-line no-await-in-loop
-      await indexDebateContextChunk({
-        userId: input.userId,
-        debateId: input.debateId,
-        chunkKey: `deliverable:${safePath}:chunk:${index + 1}`,
-        sourceType: "deliverable_file",
-        sourcePath: safePath,
-        content: chunks[index],
-        now: input.now
-      });
-    }
-  } catch {
-    // retrieval indexing is best-effort
   }
   return {
     ok: true,

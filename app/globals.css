@@ -99,6 +99,180 @@ button {
   padding-right: 6px;
 }
 
+.agentsListShell {
+  display: grid;
+  grid-template-columns: minmax(210px, 260px) minmax(0, 1fr);
+  gap: 14px;
+  min-height: 0;
+  flex: 1;
+}
+
+.agentCategorySidebar,
+.agentListMain {
+  min-width: 0;
+  min-height: 0;
+}
+
+.agentListMain {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agentListToolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto minmax(160px, 220px) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.agentListToolbar input,
+.agentListToolbar select {
+  width: 100%;
+  min-width: 0;
+}
+
+.agentStatusTabs {
+  flex-wrap: wrap;
+}
+
+.agentCategoryPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fbfdff;
+}
+
+.agentCategoryHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.agentCategoryForm {
+  display: grid;
+  gap: 8px;
+}
+
+.agentCategoryForm input {
+  width: 100%;
+  min-width: 0;
+}
+
+.agentCategoryList {
+  display: grid;
+  gap: 8px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.agentCategoryRow,
+.agentCategoryRowWrap {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  min-width: 0;
+}
+
+.agentCategoryRow,
+.agentCategoryRowButton {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.agentCategoryRowWrap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  overflow: hidden;
+}
+
+.agentCategoryRow.active,
+.agentCategoryRowWrap.active {
+  border-color: rgba(38, 99, 235, 0.55);
+  background: rgba(38, 99, 235, 0.07);
+}
+
+.agentCategoryRow.dropActive,
+.agentCategoryRowWrap.dropActive {
+  border-color: rgba(22, 163, 74, 0.72);
+  background: rgba(22, 163, 74, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(22, 163, 74, 0.22);
+}
+
+.agentCategoryName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.agentCategoryStats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.agentCategoryStats span {
+  min-width: 22px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+  text-align: center;
+  font-weight: 700;
+}
+
+.agentCategoryStats .agentCategoryStatEnabled {
+  color: #15803d;
+  background: rgba(22, 163, 74, 0.10);
+}
+
+.agentCategoryStats .agentCategoryStatDisabled {
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.10);
+}
+
+.agentCardDragging,
+.agentCardMoving {
+  opacity: 0.58;
+}
+
+.agentCard[draggable="true"] {
+  cursor: grab;
+}
+
+.agentCard[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.agentInvisibleDragImage {
+  position: fixed;
+  top: -100px;
+  left: -100px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .roleList {
   display: flex;
   flex-direction: column;
@@ -181,6 +355,196 @@ button {
   background: #f4f6fa;
   color: #3f4c5f;
   border-color: #d7dfeb;
+}
+
+.agentsPageGrid button,
+.agentsPageGrid input,
+.agentsPageGrid textarea,
+.agentsPageGrid select,
+.agentsControlScope button,
+.agentsControlScope input,
+.agentsControlScope textarea,
+.agentsControlScope select {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.agentsPageGrid input:not(.customCheckboxInput):not(.customFileInput),
+.agentsPageGrid textarea,
+.agentsPageGrid select,
+.agentsControlScope input:not(.customCheckboxInput):not(.customFileInput),
+.agentsControlScope textarea,
+.agentsControlScope select {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 1px solid #cfd8e6;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85), 0 1px 2px rgba(20, 38, 63, 0.04);
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.agentsPageGrid input:not(.customCheckboxInput):not(.customFileInput):focus,
+.agentsPageGrid textarea:focus,
+.agentsPageGrid select:focus,
+.agentsControlScope input:not(.customCheckboxInput):not(.customFileInput):focus,
+.agentsControlScope textarea:focus,
+.agentsControlScope select:focus {
+  border-color: rgba(38, 99, 235, 0.72);
+  box-shadow: 0 0 0 3px rgba(38, 99, 235, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.agentsPageGrid input:not(.customCheckboxInput):not(.customFileInput)::placeholder,
+.agentsPageGrid textarea::placeholder,
+.agentsControlScope input:not(.customCheckboxInput):not(.customFileInput)::placeholder,
+.agentsControlScope textarea::placeholder {
+  color: #8b99ab;
+}
+
+.agentsPageGrid select,
+.agentsControlScope select {
+  padding-right: 40px;
+  background-image:
+    linear-gradient(180deg, #ffffff 0%, #f8fbff 100%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%23526277' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat, no-repeat;
+  background-position: center, right 12px center;
+  background-size: auto, 18px 18px;
+}
+
+.agentsPageGrid button,
+.agentsControlScope button {
+  border-radius: 10px;
+}
+
+.agentsPageGrid .btn,
+.agentsControlScope .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  font-weight: 700;
+  line-height: 1.2;
+  box-shadow: 0 1px 2px rgba(20, 38, 63, 0.06);
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.agentsPageGrid .btn:hover:not(:disabled),
+.agentsControlScope .btn:hover:not(:disabled) {
+  border-color: rgba(38, 99, 235, 0.45);
+  background: #f8fbff;
+  box-shadow: 0 8px 18px rgba(20, 38, 63, 0.08);
+}
+
+.agentsPageGrid .btn-primary:hover:not(:disabled),
+.agentsControlScope .btn-primary:hover:not(:disabled) {
+  border-color: #1f54c9;
+  background: #1f54c9;
+  color: #fff;
+}
+
+.agentsPageGrid .btn-danger:hover:not(:disabled),
+.agentsControlScope .btn-danger:hover:not(:disabled) {
+  border-color: #e5a6a0;
+  background: #fff1f0;
+}
+
+.agentsPageGrid .btn:focus-visible,
+.agentsControlScope .btn:focus-visible,
+.customCheckboxInput:focus-visible + .customCheckboxBox {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(38, 99, 235, 0.16), 0 1px 2px rgba(20, 38, 63, 0.06);
+}
+
+.agentsPageGrid .btn:disabled,
+.agentsControlScope .btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+  box-shadow: none;
+}
+
+.customCheckbox {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+}
+
+.customCheckboxInput {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.customCheckboxBox {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  border: 1px solid #bac7d8;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #ffffff 0%, #f2f6fb 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 1px 2px rgba(20, 38, 63, 0.08);
+  transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.customCheckbox:hover .customCheckboxBox {
+  border-color: rgba(38, 99, 235, 0.58);
+}
+
+.customCheckboxInput:checked + .customCheckboxBox {
+  border-color: var(--blue);
+  background: var(--blue);
+}
+
+.customCheckboxInput:checked + .customCheckboxBox::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 5px;
+  height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.customFilePicker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.customFileInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.customFileButton {
+  cursor: pointer;
+}
+
+.customFileName {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .userMenu {
@@ -880,6 +1244,24 @@ button {
   align-items: flex-start;
 }
 
+.agentCardSelectionZone {
+  max-width: 100%;
+  margin: -6px 0 -6px -6px;
+  padding: 6px 10px 6px 6px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.agentCardSelectionZone:hover {
+  background: rgba(38, 99, 235, 0.06);
+}
+
+.agentCardSelectionZone:focus-within {
+  background: rgba(38, 99, 235, 0.07);
+  box-shadow: 0 0 0 3px rgba(38, 99, 235, 0.12);
+}
+
 .agentCardIdentityText {
   gap: 6px;
   min-width: 0;
@@ -905,6 +1287,11 @@ button {
 
 .agentCardMetricQuota {
   background: rgba(59, 130, 246, 0.06);
+}
+
+.agentCardMetricCategory {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.22);
 }
 
 .agentCardMeta {
@@ -987,6 +1374,22 @@ button {
   .agentsListPanel,
   .agentEditor {
     height: auto;
+  }
+
+  .agentsListShell {
+    grid-template-columns: 1fr;
+  }
+
+  .agentListToolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .agentCategoryPanel {
+    height: auto;
+  }
+
+  .agentCategoryList {
+    max-height: 260px;
   }
 
   .agentsListViewport {

@@ -4,11 +4,11 @@ import { decryptSecret } from "@/lib/crypto";
 import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { ensureQuotaReservationOrDelay, type QuotaReservationInput } from "@/lib/quota-control";
-import { indexDebateContextChunk } from "@/lib/retrieval";
 import {
   ENABLE_DEBATE_MEMORY,
   ROUND_SUMMARY_DIR,
   SHARED_FACTS_PATH,
+  SHARED_PROCESS_STATE_PATH,
   TURN_SUMMARY_DIR
 } from "@/lib/runtime/constants";
 import { readDebateFile, upsertDebateFile } from "@/lib/runtime/file-store";
@@ -232,7 +232,7 @@ async function writeSummarizerDebateFile(input: {
   roundNumber: number;
   path: string;
   content: string;
-  reason: "summarizer:turn_summary" | "summarizer:round_summary" | "summarizer:facts_board";
+  reason: "summarizer:turn_summary" | "summarizer:round_summary" | "summarizer:facts_board" | "summarizer:process_state";
   now: string;
 }) {
   const beforeContent = await readDebateFile(input.userId, input.debateId, input.path);
@@ -270,8 +270,55 @@ function buildDefaultFactsBoardPrompt(input: {
     "## 未决问题",
     "## 高风险漏洞",
     "## 关键文件缺口",
-    "\nMerge duplicates, remove stale points that were clearly superseded, and keep each bullet concise."
+    "\nKeep only content useful for the next participant's thinking.",
+    "Do not include process status such as write success, version numbers, ok:true, pending authorization, tool calls, or file operation receipts.",
+    "Merge duplicates, remove stale points that were clearly superseded, and keep each bullet concise."
   ].join("").trim();
+}
+
+function isProcessStatusLine(line: string) {
+  return /HARNESS_ACTION_RESULT|ok\s*:\s*true|写入确认|成功落库|已落库|文件已更新|工具调用|待Host授权|待授权|落库状态|版本号|\bv\d+\b|version/i.test(line);
+}
+
+export function removeProcessStatusLines(content: string) {
+  const lines = content.split(/\r?\n/);
+  const filtered = lines.filter((line) => !isProcessStatusLine(line));
+  return filtered.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function extractProcessStatusLines(content: string) {
+  const lines = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter(isProcessStatusLine);
+  return Array.from(new Set(lines)).slice(0, 20);
+}
+
+function buildProcessStateContent(input: {
+  now: string;
+  sourceLabel: string;
+  turnNumber?: number | null;
+  roundNumber?: number | null;
+  lines: string[];
+}) {
+  const lines: string[] = [
+    "# Process State",
+    "",
+    `- Updated at: ${input.now}`,
+    `- Source: ${input.sourceLabel}`
+  ];
+  if (input.roundNumber) lines.push(`- Round: ${input.roundNumber}`);
+  if (input.turnNumber) lines.push(`- Turn: ${input.turnNumber}`);
+  lines.push("", "## Recent Process Notes");
+  if (input.lines.length <= 0) {
+    lines.push("- No process-only notes were extracted from the latest summary.");
+  } else {
+    for (const line of input.lines) {
+      lines.push(`- ${line.replace(/^[-*]\s*/, "")}`);
+    }
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function combineSummarizerPrompt(customPrompt: string | null | undefined, basePrompt: string) {
@@ -441,21 +488,6 @@ export async function generateTurnSummary(input: {
       reason: "summarizer:turn_summary",
       now: input.now
     });
-    try {
-      await indexDebateContextChunk({
-        userId: input.userId,
-        debateId: input.debateId,
-        chunkKey: `turn_summary:${input.turnNumber}`,
-        sourceType: "turn_summary",
-        sourcePath: path,
-        turnNumberStart: input.turnNumber,
-        turnNumberEnd: input.turnNumber,
-        roundNumber: input.roundNumber,
-        content: nextContent,
-        now: input.now
-      });
-    } catch {
-    }
     await updateSummaryJob(input.debateId, {
       key,
       kind: "turn_summary",
@@ -529,7 +561,9 @@ export async function refreshFactsBoardFromSummaries(input: {
       ),
       maxTokens: 1200
     });
-    const nextContent = content?.trim() ?? "";
+    const rawNextContent = content?.trim() ?? "";
+    const processLines = extractProcessStatusLines(`${rawNextContent}\n${input.sourceSummary}`);
+    const nextContent = removeProcessStatusLines(rawNextContent);
     const invalidReason = validateSummarizerOutput("facts_board", nextContent);
     if (invalidReason) {
       await updateSummaryJob(input.debateId, {
@@ -555,21 +589,23 @@ export async function refreshFactsBoardFromSummaries(input: {
       reason: "summarizer:facts_board",
       now: input.now
     });
-    try {
-      await indexDebateContextChunk({
-        userId: input.userId,
-        debateId: input.debateId,
-        chunkKey: "shared_facts:board",
-        sourceType: "shared_facts",
-        sourcePath: boardPath,
-        turnNumberStart: input.turnNumber ?? undefined,
-        turnNumberEnd: input.turnNumber ?? undefined,
-        roundNumber: input.roundNumber ?? undefined,
-        content: nextContent,
-        now: input.now
-      });
-    } catch {
-    }
+    await writeSummarizerDebateFile({
+      userId: input.userId,
+      debateId: input.debateId,
+      debateAgentId: input.debateAgentId,
+      turnNumber: input.turnNumber ?? 0,
+      roundNumber: input.roundNumber ?? 0,
+      path: SHARED_PROCESS_STATE_PATH,
+      content: buildProcessStateContent({
+        now: input.now,
+        sourceLabel: input.sourceLabel,
+        turnNumber: input.turnNumber ?? null,
+        roundNumber: input.roundNumber ?? null,
+        lines: processLines
+      }),
+      reason: "summarizer:process_state",
+      now: input.now
+    });
     await updateSummaryJob(input.debateId, {
       key,
       kind: "facts_board",
@@ -682,19 +718,6 @@ export async function generateRoundSummary(input: {
       reason: "summarizer:round_summary",
       now: input.now
     });
-    try {
-      await indexDebateContextChunk({
-        userId: input.userId,
-        debateId: input.debate.id,
-        chunkKey: `round_summary:${input.endedRound}`,
-        sourceType: "round_summary",
-        sourcePath: roundPath,
-        roundNumber: input.endedRound,
-        content: nextContent,
-        now: input.now
-      });
-    } catch {
-    }
     await updateSummaryJob(input.debate.id, {
       key,
       kind: "round_summary",

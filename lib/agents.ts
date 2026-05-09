@@ -1,5 +1,9 @@
 import { sql } from "kysely";
 
+import {
+  ensureAgentCategoryBindingForUser,
+  getOrCreateAgentCategoryByNameForUser
+} from "@/lib/agent-categories";
 import { decryptSecret, encryptSecret, maskSecret } from "@/lib/crypto";
 import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
@@ -18,6 +22,7 @@ import {
   exportAgentsRequestSchema,
   createAgentSchema,
   importAgentsPackSchema,
+  moveAgentsCategorySchema,
   testAgentConfigSchema,
   updateAgentSchema
 } from "@/lib/validation";
@@ -27,6 +32,7 @@ function toAgentView(agent: AgentRecord) {
   return {
     id: agent.id,
     name: agent.name,
+    categoryId: agent.categoryId,
     provider: agent.provider,
     model: agent.model,
     contextLength: agent.contextLength,
@@ -67,6 +73,7 @@ function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
     id: String(row.id),
     userId: String(row.user_id),
     name: String(row.name),
+    categoryId: parseNullableString(row.category_id ?? row.categoryId),
     provider,
     model: String(row.model),
     contextLength: parseNullableInt(row.context_length ?? row.contextLength),
@@ -427,6 +434,27 @@ export async function exportAgentsPack(input: unknown) {
     }
   }
 
+  const categoryIds = Array.from(
+    new Set(
+      agents
+        .map((agent) => agent.categoryId)
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    )
+  );
+  const categoryNamesById = new Map<string, string>();
+  if (categoryIds.length > 0) {
+    const categoryRows = await db
+      .selectFrom("ai_agent_categories")
+      .select(["id", "name"])
+      .where("user_id", "=", session.userId)
+      .where("id", "in", categoryIds)
+      .where("deleted_at", "is", null)
+      .execute();
+    for (const row of categoryRows) {
+      categoryNamesById.set(String(row.id), String(row.name));
+    }
+  }
+
   let fileRows: Array<{ ai_agent_id: string; path: string; content: string }> = [];
   try {
     const filesResult = await db
@@ -467,6 +495,7 @@ export async function exportAgentsPack(input: unknown) {
       maxInputTokens: agent.maxInputTokens,
       maxOutputTokens: agent.maxOutputTokens,
       baseUrl: agent.baseUrl,
+      categoryName: agent.categoryId ? (categoryNamesById.get(agent.categoryId) ?? null) : null,
       isActive: agent.isActive,
       usageControlMode: agent.usageControlMode,
       quotaProfile:
@@ -521,12 +550,19 @@ export async function importAgentsPack(input: unknown) {
       } else {
         usageControlMode = "none";
       }
+      const category = await getOrCreateAgentCategoryByNameForUser({
+        executor: trx,
+        userId: session.userId,
+        name: item.categoryName ?? null,
+        now
+      });
 
       const inserted = await trx
         .insertInto("ai_agents")
         .values({
           user_id: session.userId,
           name: item.name,
+          category_id: category?.id ?? null,
           provider: item.provider,
           model: item.model,
           context_length: importedContextLength,
@@ -799,6 +835,7 @@ export async function duplicateAgent(id: string) {
       .values({
         user_id: session.userId,
         name: `${source.name} (copy)`,
+        category_id: source.categoryId,
         provider: source.provider,
         model: source.model,
         context_length: source.contextLength,
@@ -846,12 +883,14 @@ export async function createAgent(input: unknown) {
     data.usageControlMode,
     data.quotaProfileId ?? null
   );
+  const categoryId = await ensureAgentCategoryBindingForUser(session.userId, data.categoryId ?? null);
   const db = await ensureDb();
   const result = await db
     .insertInto("ai_agents")
     .values({
       user_id: session.userId,
       name: data.name,
+      category_id: categoryId,
       provider: data.provider,
       model: data.model,
       context_length: data.contextLength ?? null,
@@ -890,6 +929,7 @@ export async function updateAgent(id: string, input: unknown) {
   const hasApiKey = Object.prototype.hasOwnProperty.call(data, "apiKey");
   const hasUsageControlMode = Object.prototype.hasOwnProperty.call(data, "usageControlMode");
   const hasQuotaProfileId = Object.prototype.hasOwnProperty.call(data, "quotaProfileId");
+  const hasCategoryId = Object.prototype.hasOwnProperty.call(data, "categoryId");
   const contextLengthRaw = (data as { contextLength?: unknown }).contextLength;
   const maxInputTokensRaw = (data as { maxInputTokens?: unknown }).maxInputTokens;
   const maxOutputTokensRaw = (data as { maxOutputTokens?: unknown }).maxOutputTokens;
@@ -929,12 +969,17 @@ export async function updateAgent(id: string, input: unknown) {
       ? ((data as { quotaProfileId?: string | null }).quotaProfileId ?? null)
       : current.quotaProfileId;
   const quotaBinding = await ensureQuotaProfileBindingForUser(session.userId, nextUsageControlMode, nextQuotaProfileId);
+  const categoryId = await ensureAgentCategoryBindingForUser(
+    session.userId,
+    hasCategoryId ? ((data as { categoryId?: string | null }).categoryId ?? null) : current.categoryId
+  );
 
   const db = await ensureDb();
   const result = await db
     .updateTable("ai_agents")
     .set({
       name: data.name ?? current.name,
+      category_id: categoryId,
       provider: data.provider ?? current.provider,
       model: data.model ?? current.model,
       context_length: nextContextLength,
@@ -965,6 +1010,43 @@ export async function updateAgent(id: string, input: unknown) {
   }
 
   return toAgentView(normalizeAgentRow(result as Record<string, unknown>));
+}
+
+export async function moveAgentsToCategory(input: unknown) {
+  const data = moveAgentsCategorySchema.parse(input);
+  const session = await requireSessionUser();
+  const db = await ensureDb();
+  const categoryId = await ensureAgentCategoryBindingForUser(session.userId, data.categoryId ?? null);
+
+  const currentRows = await db
+    .selectFrom("ai_agents")
+    .select(["id", "category_id"])
+    .where("user_id", "=", session.userId)
+    .where("id", "in", data.agentIds)
+    .where("deleted_at", "is", null)
+    .execute();
+  if (currentRows.length !== data.agentIds.length) {
+    throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid");
+  }
+
+  const movableIds = currentRows
+    .filter((row) => (row.category_id ?? null) !== categoryId)
+    .map((row) => String(row.id));
+  if (movableIds.length === 0) return [];
+
+  const updated = await db
+    .updateTable("ai_agents")
+    .set({
+      category_id: categoryId,
+      updated_at: new Date().toISOString()
+    })
+    .where("user_id", "=", session.userId)
+    .where("id", "in", movableIds)
+    .where("deleted_at", "is", null)
+    .returningAll()
+    .execute();
+
+  return updated.map((row) => toAgentView(normalizeAgentRow(row as Record<string, unknown>)));
 }
 
 export async function deleteAgent(id: string) {

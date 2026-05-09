@@ -213,6 +213,8 @@ export function normalizeAgentRow(row: Record<string, unknown>): AgentRecord {
     id: String(row.id),
     userId: String(row.user_id),
     name: String(row.name),
+    categoryId:
+      typeof (row.category_id ?? row.categoryId) === "string" ? String(row.category_id ?? row.categoryId) : null,
     provider: row.provider as AgentRecord["provider"],
     model: String(row.model),
     contextLength:

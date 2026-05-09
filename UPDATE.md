@@ -1,5 +1,24 @@
+## 2026-05-09
+
+- `USER.md` 新增控件约定：按钮和输入框不能直接使用浏览器默认外观，需要走项目内自定义控件样式；AI 配置页同步把输入框、下拉、按钮、文件选择和配置勾选框收口到自定义视觉层，保留原有导入导出、拖拽归类、多选移动和配置编辑逻辑不变。
+- AI 配置页的多选整理继续增强：配置列表工具条新增“全选当前结果 / 取消全选”，卡片标题区域也可作为大命中区直接切换选中状态；拖动 AI 配置时不再使用浏览器默认的大卡片拖拽虚影，避免遮挡左侧分类投放目标。
+- AI 配置页分类栏继续简化：自定义分类行不再显示单独的“改 / 删”小按钮，点击分类行会直接把名称带到上方输入框进入编辑；删除按钮移动到上方“保存”旁边，只在编辑现有分类时出现。
+- 修正 AI 配置页分类切换残留编辑态的问题：从某个自定义分类切到“全部分类”或“未分类”时会退出分类编辑并清空上方输入框，不再继续显示上一次分类名。
+- 修正 AI 配置页全选在筛选后混入隐藏选中项的问题：切换分类、搜索或启用状态后会把选择范围收紧到当前结果；“全选当前结果”、拖拽移动和工具条移动也只处理当前结果内的配置，不再出现“已选 7（当前结果 2）”这类残留状态。
+- 优化 AI 配置分类 SQL 链路：批量移动分类新增单次 `PATCH /api/agents/category-move`，不再对每个 AI 配置逐个请求 `PATCH /api/agents/[id]`；创建分类返回固定 `referencedAgentCount: 0`，避免为了新分类计数扫描全部 `ai_agents`；同时补上 `ai_agents(user_id, created_at desc) where deleted_at is null` 和 `ai_agents(user_id, category_id) where deleted_at is null` 组合索引，改善列表、分类计数、删除分类和批量移动校验路径。
+- 扫描项目 SQL 后补齐一批低风险索引：`debates(user_id, created_at desc)` 覆盖个人辩论列表，`debates(updated_at, created_at) where status='running'` 覆盖运行中恢复扫描；文件树/文件夹删除/运行时上下文读取常用的 `path like 'prefix%'` 增加 `text_pattern_ops` 前缀索引；`debate_file_activity_logs` 增加按文件查看活动明细/最近事件的组合索引；`docker/init.sql` 同步补齐 summary queue 运行时已有的队列索引和 worker 表。
+- 继续优化文件状态页 SQL：`debate_file_activity_logs` 的读取次数、写入次数、最近读取、最近写入、最近事件从 4 条查询合并为 1 条聚合查询；基础文件列表也改为单条 `union all` 查询，并且状态页不再读取文件正文 `content`，只在文件详情页按需加载正文。
+- 删除应用内 Docs 页面：移除顶部导航里的 `Docs` 入口、`/docs` 与 `/docs/[slug]` 路由，以及只服务该页面的 `lib/docs*` 读取/注册代码；仓库内 Markdown 文档文件本身保留。
+- 删除“检索配置”功能：移除用户菜单入口、设置页、`/api/retrieval-config` API、`lib/retrieval.ts`、运行时长历史召回和 embedding 索引写入；数据库初始化、类型和校验也不再创建或引用 `retrieval_configs`、`debate_context_chunks`、`debate_context_embeddings`。现有数据库里的旧表不在本次自动 drop，避免误删历史数据。
+
+## 2026-05-08
+
+- AI 配置页新增持久化分类：新增 `ai_agent_categories` 表和 `ai_agents.category_id` 绑定，支持在“已有配置”里创建、重命名、删除分类；列表现在先按“全部分类 / 自定义分类 / 未分类”切换，再在当前分类下继续使用“全部 / 已启用 / 已禁用”状态筛选。新建、编辑、复制、导入导出 AI 配置都会保留分类归属，删除分类时该分类下配置会自动回到“未分类”。
+- AI 配置分类交互继续增强：`已有配置` 内部改成左侧分类栏 + 右侧配置列表，自定义分类和“未分类”都支持把单个或多选 AI 卡片拖入归类；列表顶部新增搜索、选中数量和“移动到分类”下拉，分类行也显示总数、启用数和禁用数，方便不用拖拽时快速整理配置。
+
 ## 2026-04-26
 
+- 收紧 runtime 的“说人话”输出链路：新增 `lib/runtime/human-output.ts` 检查工具回合后的最终发言，遇到只复述写入成功、版本号、`ok:true` 或高密度 `100%/闭环/落库/P0/P1/全量校验` 且缺少具体内容的回复，会要求模型重写一次；同时强化 harness 指令，文件写入状态继续由程序记录，正文必须讲具体内容、原因和下一步。`facts/board.md` 现在会过滤写入确认、版本、待授权等流程状态，流程类信息另写入 `facts/process-state.md`，避免普通参与者继续被流程话术带偏。
 - 修复 `time zone "gmt+0800" not recognized` 的真实主链：新增 `lib/timestamps.ts` 统一把数据库读出的 `Date/timestamptz` 归一成 ISO 字符串，并把 `lib/runtime/debate-file-access.ts`、`lib/runtime/runtime-action-harness.ts`、`lib/debate-resume-jobs.ts`、`lib/quota-control.ts`、`lib/summary-jobs.ts`、`lib/debates.ts` 接到这套归一化上，避免 harness mutation journal、quota/resume、summary worker 等链路把 `Date` 直接 `String(...)` 成 `GMT+0800` 后再写回 Postgres。
 - 重构辩论详情“文件”页的顶部结构：`app/(main)/debates/[id]/debate-files-panel.tsx` 里的文件工具栏不再用会互相挤压的 grid/纵向摘要布局，而是改成独立的“主信息区 + 按钮区” header，统计信息用单行 chip 式文本展示，宽度不足时按钮区整体下移而不是把标题和计数挤成竖排；`app/globals.css` 同步重写了这块 header 样式与文件页页头样式，并继续保留文件树卡片脱离全局 `treeRoot` 拉伸、按内容高度驱动滚动的布局。
 - 修复辩论详情“文件”页的双滚动条：文件树区域不再复用全局 `treeRoot` 和外层 `overflow:auto` 包裹 `react-arborist`，而是重构成 `debateFilesTreeCard -> debateFilesTreeFrame -> Tree` 的单一滚动所有权结构，外卡片只负责边框与裁剪，树组件自己负责滚动，避免同一块文件树里再出现两根垂直滚动条。

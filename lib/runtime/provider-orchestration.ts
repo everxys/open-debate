@@ -4,11 +4,13 @@ import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type Deba
 import { emitDebateLiveEvent, setDebateLiveProgress } from "@/lib/debate-live";
 import { AppError } from "@/lib/http";
 import { ensureQuotaReservationOrDelay, type QuotaReservationInput } from "@/lib/quota-control";
-import { retrieveRelevantHistory } from "@/lib/retrieval";
+import {
+  assessHumanOutput,
+  buildHumanOutputRewritePrompt
+} from "@/lib/runtime/human-output";
 import { PROMPT_HARD_MAX_CHARS_ANTHROPIC } from "@/lib/runtime/constants";
 import {
   buildContextAccessSummaryLines,
-  buildRelevantHistoryInline,
   getPromptHardMaxChars,
   hasContextAccessRules,
   isContextPathReadable,
@@ -490,62 +492,6 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
         ].join("\n")
       : null;
 
-  let relevantHistoryInline: string | null = null;
-  try {
-    const retrievalQuery = [
-      input.debate.question,
-      questionDiffInline ? summarizeOptionText(questionDiffInline, 1_200) : "",
-      currentPhase?.title ?? "",
-      currentPhase?.description ?? "",
-      openVote?.title ?? "",
-      directiveInline ? summarizeOptionText(directiveInline, 800) : "",
-      seatInline ? summarizeOptionText(seatInline, 400) : "",
-      summarizeOptionText(recentTurnsInline ?? "", 1_500)
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    const retrieved = await retrieveRelevantHistory({
-      userId: input.userId,
-      debateId: input.debate.id,
-      queryText: retrievalQuery,
-      limit: 6,
-      minTurnNumber: await loadContextWindowMinTurnNumberForDebateAgent(input.userId, input.debate.id, input.debateAgentId),
-      maxChars: 12_000
-    });
-    const gatedRetrieved = retrieved.filter((item) => {
-      if (!hasContextAccessRules(workflow)) return true;
-      if (!item.sourcePath) return true;
-      if (item.sourceType === "deliverable_file" || item.sourceType === "shared_file" || item.sourceType === "idea_bank_file") {
-        return isContextPathReadable(workflow, currentPhase?.kind ?? null, "shared", item.sourcePath);
-      }
-      if (item.sourceType === "agent_file") {
-        return isContextPathReadable(workflow, currentPhase?.kind ?? null, "seat", item.sourcePath);
-      }
-      return true;
-    });
-    await recordImplicitFileReads({
-      audit: implicitReadAudit,
-      scope: "debate",
-      paths: gatedRetrieved
-        .filter((item) => Boolean(item.sourcePath))
-        .filter((item) => item.sourceType !== "agent_file")
-        .map((item) => String(item.sourcePath ?? ""))
-    });
-    await recordImplicitFileReads({
-      audit: implicitReadAudit,
-      scope: "agent",
-      paths: gatedRetrieved.filter((item) => item.sourceType === "agent_file").map((item) => String(item.sourcePath ?? "")),
-      targetDebateAgentId: input.debateAgentId
-    });
-    relevantHistoryInline = buildRelevantHistoryInline(gatedRetrieved);
-  } catch (error) {
-    await logRuntimeEvent("warn", "retrieval history failed", {
-      debateId: input.debate.id,
-      error: describeRuntimeError(error)
-    });
-    relevantHistoryInline = null;
-  }
-
   updateLiveStage("calling_model", `组装提示词：${input.eventAgentName}`);
   const prompt = planPromptContext(
     [
@@ -592,7 +538,6 @@ async function buildProviderPromptContext(input: ProviderCallInput): Promise<Pro
       { key: "announcement", priority: 1, category: "optional", preferredMaxChars: 4_000, content: announcementInline },
       { key: "votingAction", priority: 0, category: "core", preferredMaxChars: 1_500, content: votingActionInline },
       { key: "openVote", priority: 0, category: "core", preferredMaxChars: 12_000, content: openVoteInline },
-      { key: "relevantHistory", priority: 0, category: "retrieved", preferredMaxChars: 12_000, content: relevantHistoryInline },
       { key: "recentTurns", priority: 0, category: "recent", preferredMaxChars: 6_000, content: recentTurnsInline },
       {
         key: "responseRules",
@@ -701,7 +646,9 @@ function buildHarnessAuthorityInline() {
     "Harness authority (IMPORTANT):",
     "- Only the latest HARNESS_ACTION_RESULT is the source of truth for file state.",
     "- Do not claim a file was created or updated unless that result confirmed ok:true for the exact path.",
-    "- If a harness write returns an error, treat the target file as unchanged and either retry with a new allowed action or explicitly say it was not written."
+    "- If a harness write returns an error, treat the target file as unchanged and either retry with a new allowed action or explicitly say it was not written.",
+    "- Final human-facing answers must not recap tool success, version numbers, or ok:true results. The app records that status separately.",
+    "- Final human-facing answers should say concrete useful content in plain language: what changed, why it matters, and what should happen next."
   ].join("\n");
 }
 
@@ -920,6 +867,7 @@ async function runOpenAiProviderLoop(
   const effectiveMaxInputTokens = context.agent.maxInputTokens ?? context.agent.contextLength;
   const messages = clipMessagesToInputLimit(rawMessages, effectiveMaxInputTokens, OPENAI_COMPAT_MAX_INPUT_CHARS);
   let loopState: RuntimeActionLoopState = { records: [] };
+  let finalRewriteAttempts = 0;
 
   try {
     for (let round = 0; ; round += 1) {
@@ -981,14 +929,22 @@ async function runOpenAiProviderLoop(
         throw new AppError("AI_ACTION_PROTOCOL_ERROR", 502, String(parsedAction.error));
       }
       if (!parsedAction.action) {
+        const finalText = assertNonEmptyProviderText(assistantContent, {
+          provider: context.agent.provider,
+          model: context.agent.model,
+          stage: "openai.final_text_response",
+          finishReason: streamed.finishReason ?? null,
+          toolCallsCount: totalToolCalls
+        });
+        const humanAssessment = assessHumanOutput(finalText, { toolCallsCount: totalToolCalls });
+        if (humanAssessment.needsRewrite && finalRewriteAttempts < 1) {
+          finalRewriteAttempts += 1;
+          messages.push({ role: "assistant", content: finalText });
+          messages.push({ role: "user", content: buildHumanOutputRewritePrompt(humanAssessment) });
+          continue;
+        }
         return {
-          raw: assertNonEmptyProviderText(assistantContent, {
-            provider: context.agent.provider,
-            model: context.agent.model,
-            stage: "openai.final_text_response",
-            finishReason: streamed.finishReason ?? null,
-            toolCallsCount: totalToolCalls
-          }),
+          raw: finalText,
           usage,
           promptChars,
           estimatedPromptTokens,
@@ -1141,6 +1097,7 @@ async function runAnthropicProviderLoop(
   const effectiveMaxInputTokens = context.agent.maxInputTokens ?? context.agent.contextLength;
   const messages = clipMessagesToInputLimit(rawMessages, effectiveMaxInputTokens, PROMPT_HARD_MAX_CHARS_ANTHROPIC);
   let loopState: RuntimeActionLoopState = { records: [] };
+  let finalRewriteAttempts = 0;
 
   try {
     for (let round = 0; ; round += 1) {
@@ -1197,6 +1154,13 @@ async function runAnthropicProviderLoop(
         finishReason: typeof payload?.stop_reason === "string" ? payload.stop_reason : null,
         toolCallsCount: totalToolCalls
       });
+      const humanAssessment = assessHumanOutput(content, { toolCallsCount: totalToolCalls });
+      if (humanAssessment.needsRewrite && finalRewriteAttempts < 1) {
+        finalRewriteAttempts += 1;
+        messages.push({ role: "assistant", content: [{ type: "text", text: content }] });
+        messages.push({ role: "user", content: buildHumanOutputRewritePrompt(humanAssessment) });
+        continue;
+      }
       await emitChunks(context.debate.id, context.messageNumber, context.eventAgentName, context.baseRoleName, content);
         return {
         raw: content,

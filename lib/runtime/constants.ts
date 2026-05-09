@@ -2,6 +2,7 @@ export const ENABLE_DEBATE_MEMORY = process.env.ENABLE_DEBATE_MEMORY !== "0";
 export const MEMORY_SUMMARY_PATH = "memory/summary.md";
 export const MEMORY_LOG_PATH = "memory/log.jsonl";
 export const SHARED_FACTS_PATH = "facts/board.md";
+export const SHARED_PROCESS_STATE_PATH = "facts/process-state.md";
 export const TURN_SUMMARY_DIR = "debate/turn_summaries/";
 export const ROUND_SUMMARY_DIR = "debate/round_summaries/";
 export const ANSWERS_DIR = "debate/answers/";

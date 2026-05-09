@@ -33,20 +33,19 @@ type BaseFileRow = {
   content: string;
 };
 
-type LatestActivityRow = {
-  scope: ManagedFileScope;
-  path: string;
-  target_debate_agent_id: string | null;
-  created_at: string;
-  actor_display: string | null;
-};
+type BaseFileMetadataRow = Omit<BaseFileRow, "content">;
 
-type CountActivityRow = {
+type ActivitySummaryRow = {
   scope: ManagedFileScope;
   path: string;
   target_debate_agent_id: string | null;
   read_count: number;
   write_count: number;
+  last_read_at: string | null;
+  last_read_by: string | null;
+  last_write_at: string | null;
+  last_write_by: string | null;
+  last_event_at: string | null;
 };
 
 export type DebateManagedFileStatus = {
@@ -130,110 +129,82 @@ async function requireDebateOwner(debateId: string, userId: string) {
 
 async function loadBaseManagedFiles(debateId: string) {
   const db = await ensureDb();
-  const [debateRows, agentRows] = await Promise.all([
-    db.executeQuery<BaseFileRow>(sql`
+  const result = await db.executeQuery<BaseFileMetadataRow>(sql`
+    select
+      scope,
+      path,
+      debate_agent_id,
+      created_at,
+      updated_at,
+      version
+    from (
       select
+        0 as sort_order,
         'debate'::text as scope,
         f.path,
         null::uuid as debate_agent_id,
         f.created_at,
         f.updated_at,
-        f.version,
-        f.content
+        f.version
       from debate_files f
       where f.debate_id = ${debateId}
-      order by f.path asc
-    `.compile(db)),
-    db.executeQuery<BaseFileRow>(sql`
+      union all
       select
+        1 as sort_order,
         'agent'::text as scope,
         f.path,
         f.debate_agent_id,
         f.created_at,
         f.updated_at,
-        null::int as version,
-        f.content
+        null::int as version
       from debate_agent_files f
       join debate_agents da on da.id = f.debate_agent_id
       where da.debate_id = ${debateId}
-      order by f.debate_agent_id asc, f.path asc
-    `.compile(db))
-  ]);
-
-  return [...debateRows.rows, ...agentRows.rows];
+    ) managed_files
+    order by sort_order asc, debate_agent_id asc nulls first, path asc
+  `.compile(db));
+  return result.rows;
 }
 
-async function loadManagedFileActivityCounts(debateId: string) {
+async function loadManagedFileActivitySummaries(debateId: string) {
   const db = await ensureDb();
-  const result = await db.executeQuery<CountActivityRow>(sql`
+  const actorDisplay = sql<string>`
+    case
+      when l.reason like 'summarizer:%' then '独立总结器'
+      else coalesce(da.display_name, a.name, 'Unknown')
+    end
+  `;
+  const result = await db.executeQuery<ActivitySummaryRow>(sql`
     select
       l.scope,
       l.path,
       l.target_debate_agent_id,
-      sum(case when l.action = 'write' then 1 else 0 end)::int as write_count,
-      sum(case when l.action <> 'write' then 1 else 0 end)::int as read_count
+      count(*) filter (where l.action <> 'write')::int as read_count,
+      count(*) filter (where l.action = 'write')::int as write_count,
+      (array_agg(l.created_at order by l.created_at desc, l.id desc) filter (where l.action <> 'write'))[1] as last_read_at,
+      (array_agg(${actorDisplay} order by l.created_at desc, l.id desc) filter (where l.action <> 'write'))[1] as last_read_by,
+      (array_agg(l.created_at order by l.created_at desc, l.id desc) filter (where l.action = 'write'))[1] as last_write_at,
+      (array_agg(${actorDisplay} order by l.created_at desc, l.id desc) filter (where l.action = 'write'))[1] as last_write_by,
+      (array_agg(l.created_at order by l.created_at desc, l.id desc))[1] as last_event_at
     from debate_file_activity_logs l
+    join debate_agents da on da.id = l.debate_agent_id
+    join ai_agents a on a.id = da.ai_agent_id
     where l.debate_id = ${debateId}
     group by l.scope, l.path, l.target_debate_agent_id
   `.compile(db));
   return result.rows;
 }
 
-async function loadLatestManagedFileActivity(
-  debateId: string,
-  actionFilter: "read" | "write" | "all"
-) {
-  const db = await ensureDb();
-  const whereClause =
-    actionFilter === "read"
-      ? sql`and l.action <> 'write'`
-      : actionFilter === "write"
-        ? sql`and l.action = 'write'`
-        : sql``;
-
-  const result = await db.executeQuery<LatestActivityRow>(sql`
-    select distinct on (l.scope, l.path, coalesce(l.target_debate_agent_id::text, ''))
-      l.scope,
-      l.path,
-      l.target_debate_agent_id,
-      l.created_at,
-      case
-        when l.reason like 'summarizer:%' then '独立总结器'
-        else coalesce(da.display_name, a.name, 'Unknown')
-      end as actor_display
-    from debate_file_activity_logs l
-    join debate_agents da on da.id = l.debate_agent_id
-    join ai_agents a on a.id = da.ai_agent_id
-    where l.debate_id = ${debateId}
-      ${whereClause}
-    order by l.scope, l.path, coalesce(l.target_debate_agent_id::text, ''), l.created_at desc, l.id desc
-  `.compile(db));
-  return result.rows;
-}
-
-function pickCount(
-  countsByKey: Map<string, CountActivityRow>,
+function pickSummary(
+  summariesByKey: Map<string, ActivitySummaryRow>,
   scope: ManagedFileScope,
   path: string,
   debateAgentId: string | null
 ) {
-  return countsByKey.get(toManagedKey(scope, path, debateAgentId)) ?? null;
+  return summariesByKey.get(toManagedKey(scope, path, debateAgentId)) ?? null;
 }
 
-function pickLatest(
-  latestByKey: Map<string, LatestActivityRow>,
-  scope: ManagedFileScope,
-  path: string,
-  debateAgentId: string | null
-) {
-  return latestByKey.get(toManagedKey(scope, path, debateAgentId)) ?? null;
-}
-
-function toLatestMap(rows: LatestActivityRow[]) {
-  return new Map(rows.map((row) => [toManagedKey(row.scope, row.path, row.target_debate_agent_id ?? null), row]));
-}
-
-function toCountMap(rows: CountActivityRow[]) {
+function toSummaryMap(rows: ActivitySummaryRow[]) {
   return new Map(rows.map((row) => [toManagedKey(row.scope, row.path, row.target_debate_agent_id ?? null), row]));
 }
 
@@ -241,31 +212,22 @@ export async function listDebateManagedFileStatuses(debateId: string): Promise<D
   const session = await requireSessionUser();
   await requireDebateOwner(debateId, session.userId);
 
-  const [baseRows, countRows, latestReadRows, latestWriteRows, latestEventRows] = await Promise.all([
+  const [baseRows, activitySummaryRows] = await Promise.all([
     loadBaseManagedFiles(debateId),
-    loadManagedFileActivityCounts(debateId),
-    loadLatestManagedFileActivity(debateId, "read"),
-    loadLatestManagedFileActivity(debateId, "write"),
-    loadLatestManagedFileActivity(debateId, "all")
+    loadManagedFileActivitySummaries(debateId)
   ]);
 
-  const countsByKey = toCountMap(countRows);
-  const latestReadByKey = toLatestMap(latestReadRows);
-  const latestWriteByKey = toLatestMap(latestWriteRows);
-  const latestEventByKey = toLatestMap(latestEventRows);
+  const summariesByKey = toSummaryMap(activitySummaryRows);
 
   return baseRows.map((row) => {
     const scope = row.scope;
     const path = normalizeManagedPath(row.path);
     const debateAgentId = row.debate_agent_id ? String(row.debate_agent_id) : null;
-    const counts = pickCount(countsByKey, scope, path, debateAgentId);
-    const latestRead = pickLatest(latestReadByKey, scope, path, debateAgentId);
-    const latestWrite = pickLatest(latestWriteByKey, scope, path, debateAgentId);
-    const latestEvent = pickLatest(latestEventByKey, scope, path, debateAgentId);
+    const summary = pickSummary(summariesByKey, scope, path, debateAgentId);
     const latestEventType =
-      latestEvent?.created_at === latestWrite?.created_at
+      summary?.last_event_at === summary?.last_write_at
         ? ("write" as const)
-        : latestEvent?.created_at === latestRead?.created_at
+        : summary?.last_event_at === summary?.last_read_at
           ? ("read" as const)
           : null;
 
@@ -276,14 +238,14 @@ export async function listDebateManagedFileStatuses(debateId: string): Promise<D
       version: row.version === null ? null : Number(row.version),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
-      lastReadAt: latestRead?.created_at ? String(latestRead.created_at) : null,
-      lastReadBy: latestRead?.actor_display ? String(latestRead.actor_display) : null,
-      lastWrittenAt: latestWrite?.created_at ? String(latestWrite.created_at) : null,
-      lastWrittenBy: latestWrite?.actor_display ? String(latestWrite.actor_display) : null,
-      readCount: Number(counts?.read_count ?? 0),
-      writeCount: Number(counts?.write_count ?? 0),
+      lastReadAt: summary?.last_read_at ? String(summary.last_read_at) : null,
+      lastReadBy: summary?.last_read_by ? String(summary.last_read_by) : null,
+      lastWrittenAt: summary?.last_write_at ? String(summary.last_write_at) : null,
+      lastWrittenBy: summary?.last_write_by ? String(summary.last_write_by) : null,
+      readCount: Number(summary?.read_count ?? 0),
+      writeCount: Number(summary?.write_count ?? 0),
       lastEventType: latestEventType,
-      lastEventAt: latestEvent?.created_at ? String(latestEvent.created_at) : null
+      lastEventAt: summary?.last_event_at ? String(summary.last_event_at) : null
     };
   });
 }

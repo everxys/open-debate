@@ -9,9 +9,6 @@ export type QuotaProfileType = "coding_plan";
 export type QuotaPacingMode = "percent" | "absolute";
 export type QuotaWindowType = "rolling_5h" | "week" | "month";
 
-/** Retrieval/embedding provider type */
-export type RetrievalProvider = "openai";
-
 /** Structured argument from agent output */
 export type StructuredArgument = {
   type: "support" | "rebuttal";
@@ -31,6 +28,7 @@ export type AgentRecord = {
   id: string;
   userId: string;
   name: string;
+  categoryId: string | null;
   provider: Provider;
   model: string;
   contextLength: number | null;
@@ -47,6 +45,15 @@ export type AgentRecord = {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+};
+
+export type AgentCategoryRecord = {
+  id: string;
+  userId: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
 };
 
 export type QuotaProfileRecord = {
@@ -159,22 +166,6 @@ export type AppDb = {
   debates: DebateRecord[];
   debateAgents: DebateAgentRecord[];
   turns: DebateTurnRecord[];
-};
-
-/** Retrieval/embedding configuration record */
-export type RetrievalConfigRecord = {
-  id: string;
-  userId: string;
-  provider: RetrievalProvider;
-  name: string;
-  model: string;
-  dimensions: number | null;
-  baseUrl: string;
-  apiKeyEncrypted: string;
-  apiKeyMasked: string;
-  isActive: boolean;
-  createdAt: string;
-  updatedAt: string;
 };
 
 export type WorkspaceRecord = {

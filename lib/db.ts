@@ -232,6 +232,33 @@ async function ensureSchema(pool: Pool) {
   await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists quota_profile_id uuid null");
   await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists deleted_at timestamptz null");
   await pool.query(`
+    create table if not exists ai_agent_categories (
+      id uuid primary key,
+      user_id uuid not null,
+      name text not null,
+      created_at timestamptz not null,
+      updated_at timestamptz not null,
+      deleted_at timestamptz null
+    )
+  `);
+  await alterTableIfExists("ai_agents", "alter table ai_agents add column if not exists category_id uuid null");
+  await createUniqueIndexIfClean(
+    "ai_agent_categories",
+    "create unique index if not exists idx_ai_agent_categories_user_name_active on ai_agent_categories (user_id, lower(name)) where deleted_at is null",
+    "Skipped unique ai_agent_categories(user_id, lower(name)) index because duplicate active category names need manual cleanup."
+  );
+  await pool.query("create index if not exists idx_ai_agent_categories_user_updated_at on ai_agent_categories (user_id, updated_at desc)");
+  await createIndexIfTableExists("ai_agents", "create index if not exists idx_ai_agents_user_id on ai_agents(user_id)");
+  await createIndexIfTableExists(
+    "ai_agents",
+    "create index if not exists idx_ai_agents_user_active_created_at on ai_agents(user_id, created_at desc) where deleted_at is null"
+  );
+  await createIndexIfTableExists(
+    "ai_agents",
+    "create index if not exists idx_ai_agents_user_category_active on ai_agents(user_id, category_id) where deleted_at is null"
+  );
+  await createIndexIfTableExists("ai_agents", "create index if not exists idx_ai_agents_category_id on ai_agents(category_id)");
+  await pool.query(`
     create table if not exists ai_quota_profiles (
       id uuid primary key,
       user_id uuid not null,
@@ -288,6 +315,14 @@ async function ensureSchema(pool: Pool) {
     "debates",
     "create index if not exists idx_debates_source_workspace_id on debates(source_workspace_id)"
   );
+  await createIndexIfTableExists(
+    "debates",
+    "create index if not exists idx_debates_user_created_at on debates(user_id, created_at desc)"
+  );
+  await createIndexIfTableExists(
+    "debates",
+    "create index if not exists idx_debates_running_updated_at on debates(updated_at asc, created_at asc) where status = 'running'"
+  );
   await createUniqueIndexIfClean(
     "debate_turns",
     "create unique index if not exists idx_debate_turns_debate_id_turn_number_unique on debate_turns(debate_id, turn_number)",
@@ -320,6 +355,14 @@ async function ensureSchema(pool: Pool) {
     )
   `);
   await pool.query("create index if not exists idx_debate_file_versions_debate_id_path_version on debate_file_versions (debate_id, path, version desc)");
+  await createIndexIfTableExists(
+    "debate_files",
+    "create index if not exists idx_debate_files_debate_id_path_prefix on debate_files(debate_id, path text_pattern_ops)"
+  );
+  await createIndexIfTableExists(
+    "debate_agent_files",
+    "create index if not exists idx_debate_agent_files_agent_id_path_prefix on debate_agent_files(debate_agent_id, path text_pattern_ops)"
+  );
   await pool.query(`
     create table if not exists debate_file_activity_logs (
       id uuid primary key,
@@ -497,13 +540,24 @@ async function ensureSchema(pool: Pool) {
   await pool.query("create index if not exists idx_workspaces_strategy_id_updated_at on workspaces (strategy_id, updated_at desc)");
   await pool.query("create index if not exists idx_workspace_role_bindings_workspace_id_role_order on workspace_role_bindings (workspace_id, role_order asc)");
   await pool.query("create index if not exists idx_workspace_files_workspace_id_updated_at on workspace_files (workspace_id, updated_at desc)");
+  await pool.query("create index if not exists idx_workspace_files_workspace_id_path_prefix on workspace_files (workspace_id, path text_pattern_ops)");
   await pool.query("create index if not exists idx_strategy_shared_files_strategy_id_updated_at on strategy_shared_files (strategy_id, updated_at desc)");
+  await pool.query("create index if not exists idx_strategy_shared_files_strategy_id_path_prefix on strategy_shared_files (strategy_id, path text_pattern_ops)");
+  await createIndexIfTableExists(
+    "strategy_role_files",
+    "create index if not exists idx_strategy_role_files_role_id_path_prefix on strategy_role_files(strategy_role_id, path text_pattern_ops)"
+  );
+  await createIndexIfTableExists(
+    "ai_agent_files",
+    "create index if not exists idx_ai_agent_files_agent_id_path_prefix on ai_agent_files(ai_agent_id, path text_pattern_ops)"
+  );
   await pool.query("create index if not exists idx_strategy_file_access_rules_strategy_id_scope on strategy_file_access_rules (strategy_id, scope, updated_at desc)");
   await pool.query("create index if not exists idx_strategy_file_access_rules_role_id on strategy_file_access_rules (strategy_role_id, updated_at desc)");
   await pool.query("create index if not exists idx_playground_tool_checklists_user_agent_updated_at on playground_tool_checklists (user_id, agent_id, updated_at desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_created_at on debate_file_activity_logs (debate_id, created_at desc, id desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_action_created_at on debate_file_activity_logs (debate_id, action, created_at desc, id desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_nav on debate_file_activity_logs (debate_id, debate_agent_id, round_number, turn_number, created_at desc, id desc)");
+  await pool.query("create index if not exists idx_debate_file_activity_logs_file_latest on debate_file_activity_logs (debate_id, scope, path, target_debate_agent_id, created_at desc, id desc)");
   await pool.query(`
     create table if not exists debate_summary_jobs (
       id uuid primary key,
@@ -902,57 +956,6 @@ async function ensureSchema(pool: Pool) {
       end if;
     end $$;
   `);
-  await pool.query(`
-    create table if not exists retrieval_configs (
-      id uuid primary key,
-      user_id uuid not null unique,
-      provider text not null,
-      name text not null,
-      model text not null,
-      dimensions int null,
-      base_url text not null,
-      api_key_encrypted text not null,
-      api_key_masked text not null,
-      is_active boolean not null default true,
-      created_at timestamptz not null,
-      updated_at timestamptz not null
-    )
-  `);
-  await pool.query(`
-    create table if not exists debate_context_chunks (
-      id uuid primary key,
-      debate_id uuid not null,
-      debate_agent_id uuid null,
-      chunk_key text not null,
-      source_type text not null,
-      source_path text null,
-      turn_number_start int null,
-      turn_number_end int null,
-      round_number int null,
-      phase_kind text null,
-      segment_tag text null,
-      content text not null,
-      content_hash text not null,
-      created_at timestamptz not null,
-      updated_at timestamptz not null,
-      unique (debate_id, chunk_key)
-    )
-  `);
-  await pool.query(`
-    create table if not exists debate_context_embeddings (
-      id uuid primary key,
-      debate_id uuid not null,
-      chunk_id uuid not null unique,
-      model text not null,
-      dimensions int null,
-      embedding_json jsonb not null,
-      created_at timestamptz not null,
-      updated_at timestamptz not null
-    )
-  `);
-  await pool.query("create index if not exists idx_debate_context_chunks_debate_id on debate_context_chunks (debate_id)");
-  await pool.query("create index if not exists idx_debate_context_chunks_source_type on debate_context_chunks (source_type)");
-  await pool.query("create index if not exists idx_debate_context_embeddings_debate_id on debate_context_embeddings (debate_id)");
   // Per-seat identity (cannot rely on ai_agents.name because same config can be reused).
   await pool.query("alter table debate_agents add column if not exists display_name text null");
   await pool.query("alter table debates add column if not exists auto_recover_once_on_failed boolean not null default false");

@@ -11,7 +11,6 @@ import {
 import { AppError } from "@/lib/http";
 import { pauseDebateForQuotaWait } from "@/lib/debate-resume-jobs";
 import { isQuotaDelayError } from "@/lib/quota-control";
-import { indexDebateContextChunk, splitTextIntoRetrievalChunks } from "@/lib/retrieval";
 import {
   ANSWERS_DIR,
   DELIVERABLE_REPLACE_SHRINK_MIN_CHARS,
@@ -782,30 +781,6 @@ export async function runDebate(id: string, userId: string) {
         continue;
       }
       await markRuntimeTurnMutationsCommitted(mutationJournalIds, createdAt).catch(() => null);
-
-      try {
-        const turnChunks = splitTextIntoRetrievalChunks(persistedResponse.content, 1_200, 180);
-        for (let chunkIndex = 0; chunkIndex < turnChunks.length; chunkIndex += 1) {
-          // eslint-disable-next-line no-await-in-loop
-          await indexDebateContextChunk({
-            userId,
-            debateId: id,
-            debateAgentId: String(currentParticipant.id),
-            chunkKey: `turn:${messageNumber}:chunk:${chunkIndex + 1}`,
-            sourceType: "turn",
-            turnNumberStart: messageNumber,
-            turnNumberEnd: messageNumber,
-            roundNumber,
-            content: turnChunks[chunkIndex],
-            now: createdAt
-          });
-        }
-      } catch (error) {
-        await logRuntimeEvent("warn", "turn retrieval indexing failed", {
-          debateId: id,
-          error: describeRuntimeError(error)
-        });
-      }
 
       try {
         await appendGenerationDiagnostics({

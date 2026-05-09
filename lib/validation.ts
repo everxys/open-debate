@@ -6,6 +6,7 @@ import { getProviderMaxOutputTokensLimit } from "@/lib/token-limits";
 const usageControlModeSchema = z.enum(["none", "coding_plan"]);
 const quotaPacingModeSchema = z.enum(["percent", "absolute"]);
 const quotaWindowTypeSchema = z.enum(["rolling_5h", "week", "month"]);
+const agentCategoryNameSchema = z.string().trim().min(1).max(80);
 
 function isValidTimeZone(value: string) {
   try {
@@ -29,6 +30,10 @@ const quotaProfileSnapshotBaseSchema = z.object({
 const quotaBindingSchema = z.object({
   usageControlMode: usageControlModeSchema.optional().default("none"),
   quotaProfileId: z.string().uuid().nullable().optional()
+});
+
+const agentCategoryBindingSchema = z.object({
+  categoryId: z.string().uuid().nullable().optional()
 });
 
 function withQuotaBindingValidation<T extends z.ZodTypeAny>(schema: T) {
@@ -98,6 +103,7 @@ const agentSchemaBase = z.object({
   maxOutputTokens: z.number().int().min(1).max(2_000_000).nullable().optional(),
   baseUrl: z.string().url().min(1),
   apiKey: z.string().min(1),
+  categoryId: agentCategoryBindingSchema.shape.categoryId,
   usageControlMode: quotaBindingSchema.shape.usageControlMode,
   quotaProfileId: quotaBindingSchema.shape.quotaProfileId
 });
@@ -139,22 +145,14 @@ export const updateAgentSchema = withAgentValidation(agentSchemaBase.partial().e
   isActive: z.boolean().optional()
 }));
 
-// === Retrieval config schemas ===
-
-export const createRetrievalConfigSchema = z.object({
-  name: z.string().min(1).max(50),
-  provider: z.literal("openai"),
-  model: z.string().min(1).max(100),
-  dimensions: z.number().int().min(1).max(10_000).nullable().optional(),
-  baseUrl: z.string().url().min(1),
-  apiKey: z.string().min(1)
+export const moveAgentsCategorySchema = z.object({
+  agentIds: z.array(z.string().uuid()).min(1).max(500).transform((ids) => Array.from(new Set(ids))),
+  categoryId: agentCategoryBindingSchema.shape.categoryId
 });
 
-export const updateRetrievalConfigSchema = createRetrievalConfigSchema.partial();
+export const createAgentCategorySchema = z.object({ name: agentCategoryNameSchema });
 
-export const testRetrievalConfigSchema = createRetrievalConfigSchema
-  .pick({ provider: true, model: true, dimensions: true, baseUrl: true })
-  .extend({ apiKey: z.string().min(1).optional() });
+export const updateAgentCategorySchema = createAgentCategorySchema;
 
 // === File path schemas ===
 
@@ -187,6 +185,7 @@ export const agentPortableSchema = withProviderMaxOutputValidation(z.object({
   maxInputTokens: z.number().int().min(1).max(2_000_000).nullable().optional(),
   maxOutputTokens: z.number().int().min(1).max(2_000_000).nullable().optional(),
   baseUrl: z.string().url().min(1),
+  categoryName: agentCategoryNameSchema.nullable().optional(),
   isActive: z.boolean().optional().default(true),
   apiKey: z.string().min(1),
   files: z.array(agentFileUpsertSchema).optional().default([]),
