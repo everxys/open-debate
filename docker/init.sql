@@ -1,4 +1,5 @@
 create extension if not exists pgcrypto;
+create extension if not exists pg_stat_statements;
 
 create table if not exists users (
   id uuid primary key default gen_random_uuid(),
@@ -224,16 +225,16 @@ create index if not exists idx_ai_agents_user_active_created_at
 create index if not exists idx_ai_agents_user_category_active
   on ai_agents(user_id, category_id)
   where deleted_at is null;
-create index if not exists idx_debates_user_id on debates(user_id);
 create index if not exists idx_debates_user_created_at on debates(user_id, created_at desc);
 create index if not exists idx_debates_running_updated_at
   on debates(updated_at asc, created_at asc)
   where status = 'running';
 create index if not exists idx_debates_source_workspace_id on debates(source_workspace_id);
 create index if not exists idx_debates_is_shared_updated_at on debates(is_shared, updated_at desc);
-create index if not exists idx_debate_agents_debate_id on debate_agents(debate_id);
-create index if not exists idx_debate_turns_debate_id on debate_turns(debate_id);
 create unique index if not exists idx_debate_turns_debate_id_turn_number_unique on debate_turns(debate_id, turn_number);
+create index if not exists idx_debate_agents_ai_agent_id on debate_agents(ai_agent_id);
+create index if not exists idx_debate_turns_ai_agent_id on debate_turns(ai_agent_id);
+create index if not exists idx_debate_turns_debate_agent_id on debate_turns(debate_agent_id);
 create index if not exists idx_ai_agents_quota_profile_id on ai_agents(quota_profile_id);
 create index if not exists idx_ai_agents_category_id on ai_agents(category_id);
 
@@ -360,6 +361,8 @@ alter table playground_tool_checklists add column if not exists last_progress_me
 
 create index if not exists idx_playground_tool_checklists_user_agent_updated_at
   on playground_tool_checklists (user_id, agent_id, updated_at desc);
+create index if not exists idx_playground_tool_checklists_agent_id
+  on playground_tool_checklists (agent_id);
 
 create table if not exists strategies (
   id uuid primary key default gen_random_uuid(),
@@ -402,9 +405,6 @@ create table if not exists strategy_roles (
   unique (strategy_id, role_order)
 );
 
-create index if not exists idx_strategy_roles_strategy_id_role_order
-  on strategy_roles (strategy_id, role_order);
-
 create table if not exists strategy_role_files (
   id uuid primary key default gen_random_uuid(),
   strategy_role_id uuid not null references strategy_roles(id) on delete cascade,
@@ -419,6 +419,8 @@ create index if not exists idx_strategy_role_files_role_id_updated_at
   on strategy_role_files (strategy_role_id, updated_at desc);
 create index if not exists idx_strategy_role_files_role_id_path_prefix
   on strategy_role_files (strategy_role_id, path text_pattern_ops);
+create index if not exists idx_strategy_role_files_role_id_lower_path
+  on strategy_role_files (strategy_role_id, lower(path) text_pattern_ops);
 
 create table if not exists workspaces (
   id uuid primary key default gen_random_uuid(),
@@ -441,6 +443,9 @@ create index if not exists idx_workspaces_owner_user_id_updated_at
   on workspaces (owner_user_id, updated_at desc);
 create index if not exists idx_workspaces_strategy_id_updated_at
   on workspaces (strategy_id, updated_at desc);
+create index if not exists idx_workspaces_summary_ai_agent_id
+  on workspaces (summary_ai_agent_id)
+  where summary_ai_agent_id is not null;
 
 create table if not exists workspace_role_bindings (
   id uuid primary key default gen_random_uuid(),
@@ -455,8 +460,12 @@ create table if not exists workspace_role_bindings (
   unique (workspace_id, role_order)
 );
 
-create index if not exists idx_workspace_role_bindings_workspace_id_role_order
-  on workspace_role_bindings (workspace_id, role_order asc);
+create index if not exists idx_workspace_role_bindings_ai_agent_id
+  on workspace_role_bindings (ai_agent_id)
+  where ai_agent_id is not null;
+create index if not exists idx_workspace_role_bindings_source_strategy_role_id
+  on workspace_role_bindings (source_strategy_role_id)
+  where source_strategy_role_id is not null;
 
 create table if not exists workspace_files (
   id uuid primary key default gen_random_uuid(),
@@ -601,6 +610,13 @@ create table if not exists debate_file_activity_logs (
   after_content text null,
   target_heading text null,
   reason text null,
+  activity_bucket text generated always as (
+    case
+      when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
+      when action = 'write' then 'write'
+      else 'read'
+    end
+  ) stored,
   created_at timestamptz not null default now()
 );
 
@@ -609,7 +625,17 @@ create index if not exists idx_debate_file_activity_logs_debate_id_created_at
 
 create index if not exists idx_debate_file_activity_logs_debate_id_action_created_at
   on debate_file_activity_logs (debate_id, action, created_at desc, id desc);
+create index if not exists idx_debate_file_activity_logs_debate_bucket
+  on debate_file_activity_logs (debate_id, activity_bucket);
 create index if not exists idx_debate_file_activity_logs_nav
   on debate_file_activity_logs (debate_id, debate_agent_id, round_number, turn_number, created_at desc, id desc);
 create index if not exists idx_debate_file_activity_logs_file_latest
   on debate_file_activity_logs (debate_id, scope, path, target_debate_agent_id, created_at desc, id desc);
+create index if not exists idx_debate_file_activity_logs_debate_agent_id
+  on debate_file_activity_logs (debate_agent_id);
+create index if not exists idx_debate_file_activity_logs_target_debate_agent_id
+  on debate_file_activity_logs (target_debate_agent_id)
+  where target_debate_agent_id is not null;
+create index if not exists idx_debate_file_versions_created_by_debate_agent_id
+  on debate_file_versions (created_by_debate_agent_id)
+  where created_by_debate_agent_id is not null;

@@ -10,10 +10,19 @@ import { useAutoDismissToast } from "@/components/ui/use-toast";
 type Agent = {
   id: string;
   name: string;
+  categoryId: string | null;
   provider: string;
   model: string;
   isActive?: boolean;
 };
+
+type AgentCategory = {
+  id: string;
+  name: string;
+  referencedAgentCount: number;
+};
+
+type AgentCategoryScope = "" | "uncategorized" | string;
 
 type WorkspaceDetail = {
   id: string;
@@ -53,6 +62,12 @@ function pickRandomAgentId(agentIds: string[]) {
   return agentIds[Math.floor(Math.random() * agentIds.length)] ?? "";
 }
 
+function agentMatchesCategory(agent: Agent, categoryId: AgentCategoryScope) {
+  if (!categoryId) return false;
+  if (categoryId === "uncategorized") return !agent.categoryId;
+  return agent.categoryId === categoryId;
+}
+
 function normalizeBindings(bindings: WorkspaceDetail["bindings"]) {
   return bindings
     .map((binding) => ({
@@ -72,6 +87,8 @@ export default function WorkspaceDetailPage() {
   const { toast, showToast } = useAutoDismissToast(1200);
   const [detail, setDetail] = useState<WorkspaceDetail | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentCategories, setAgentCategories] = useState<AgentCategory[]>([]);
+  const [autoAssignCategoryId, setAutoAssignCategoryId] = useState<AgentCategoryScope>("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [question, setQuestion] = useState("");
@@ -84,18 +101,25 @@ export default function WorkspaceDetailPage() {
 
   useEffect(() => {
     void (async () => {
-      const [detailResponse, agentsResponse] = await Promise.all([
+      const [detailResponse, agentsResponse, categoriesResponse] = await Promise.all([
         fetch(`/api/workspaces/${params.id}`, { cache: "no-store" }),
-        fetch("/api/agents", { cache: "no-store" })
+        fetch("/api/agents", { cache: "no-store" }),
+        fetch("/api/agents/categories", { cache: "no-store" })
       ]);
       const detailPayload = await detailResponse.json().catch(() => ({}));
       const agentsPayload = await agentsResponse.json().catch(() => ({}));
+      const categoriesPayload = await categoriesResponse.json().catch(() => ({}));
       if (!detailResponse.ok) {
         showToast("error", detailPayload.error?.message ?? "加载工作台失败");
         return;
       }
       if (agentsResponse.ok) {
         setAgents(Array.isArray(agentsPayload.data) ? agentsPayload.data : []);
+      }
+      if (categoriesResponse.ok) {
+        setAgentCategories(Array.isArray(categoriesPayload.data) ? categoriesPayload.data : []);
+      } else {
+        showToast("error", categoriesPayload.error?.message ?? "加载 AI 分类失败");
       }
       const next = detailPayload.data as WorkspaceDetail;
       setDetail(next);
@@ -110,7 +134,33 @@ export default function WorkspaceDetailPage() {
   }, [params.id, showToast]);
 
   const enabledBindings = bindings.filter((binding) => binding.agentId && binding.sourceStrategyRoleId);
-  const activeAgents = agents.filter((agent) => agent.isActive !== false);
+  const activeAgents = useMemo(() => agents.filter((agent) => agent.isActive !== false), [agents]);
+  const activeAgentCountsByCategory = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const agent of activeAgents) {
+      const key = agent.categoryId ?? "uncategorized";
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [activeAgents]);
+  const assignableAgents = useMemo(
+    () => activeAgents.filter((agent) => agentMatchesCategory(agent, autoAssignCategoryId)),
+    [activeAgents, autoAssignCategoryId]
+  );
+  const assignableAgentIds = useMemo(() => assignableAgents.map((agent) => agent.id), [assignableAgents]);
+  const autoAssignCategoryName = useMemo(() => {
+    if (!autoAssignCategoryId) return "";
+    if (autoAssignCategoryId === "uncategorized") return "未分类";
+    return agentCategories.find((category) => category.id === autoAssignCategoryId)?.name ?? "所选分类";
+  }, [agentCategories, autoAssignCategoryId]);
+
+  useEffect(() => {
+    if (!autoAssignCategoryId || autoAssignCategoryId === "uncategorized") return;
+    if (!agentCategories.some((category) => category.id === autoAssignCategoryId)) {
+      setAutoAssignCategoryId("");
+    }
+  }, [agentCategories, autoAssignCategoryId]);
+
   const isDirty = useMemo(() => {
     if (!detail) return false;
     return JSON.stringify({
@@ -145,6 +195,18 @@ export default function WorkspaceDetailPage() {
     !isCreatingDebate;
 
   const unlimitedRounds = maxTurns === 0;
+
+  function getAssignableAgentIds() {
+    if (!autoAssignCategoryId) {
+      showToast("error", "请先选择 AI 分类");
+      return null;
+    }
+    if (assignableAgentIds.length === 0) {
+      showToast("error", `${autoAssignCategoryName}下没有已启用的 AI 配置`);
+      return null;
+    }
+    return assignableAgentIds;
+  }
 
   useEffect(() => {
     if (!isDirty) return;
@@ -325,16 +387,26 @@ export default function WorkspaceDetailPage() {
       <section className="panel stack">
         <div className="row" style={{ justifyContent: "space-between" }}>
           <strong>默认 AI 绑定</strong>
-          <div className="row" style={{ gap: 8 }}>
+          <div className="row" style={{ gap: 8, alignItems: "flex-end" }}>
+            <div className="field" style={{ minWidth: 240 }}>
+              <label>自动分配分类</label>
+              <select value={autoAssignCategoryId} onChange={(event) => setAutoAssignCategoryId(event.target.value)}>
+                <option value="">选择分类</option>
+                {agentCategories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}（启用 {activeAgentCountsByCategory.get(category.id) ?? 0}）
+                  </option>
+                ))}
+                <option value="uncategorized">未分类（启用 {activeAgentCountsByCategory.get("uncategorized") ?? 0}）</option>
+              </select>
+            </div>
             <button
               className="btn"
               type="button"
               onClick={() => {
-                if (activeAgents.length === 0) {
-                  showToast("error", "还没有可用的 AI 配置");
-                  return;
-                }
-                const next = assignAgentsEvenly(bindings, activeAgents.map((agent) => agent.id));
+                const agentIds = getAssignableAgentIds();
+                if (!agentIds) return;
+                const next = assignAgentsEvenly(bindings, agentIds);
                 setBindings(next);
                 showToast("success", "已均匀分配 AI");
               }}
@@ -345,11 +417,9 @@ export default function WorkspaceDetailPage() {
               className="btn"
               type="button"
               onClick={() => {
-                if (activeAgents.length === 0) {
-                  showToast("error", "还没有可用的 AI 配置");
-                  return;
-                }
-                setSummaryAgentId(pickRandomAgentId(activeAgents.map((agent) => agent.id)));
+                const agentIds = getAssignableAgentIds();
+                if (!agentIds) return;
+                setSummaryAgentId(pickRandomAgentId(agentIds));
               }}
             >
               总结器随机 AI

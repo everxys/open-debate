@@ -5,5 +5,3 @@
 - 当要求时，才能更新 `README.md`
 
 ## SKILL
-
-- `skills/refactor.md`：重构代码

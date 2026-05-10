@@ -9,10 +9,19 @@ import { useAutoDismissToast } from "@/components/ui/use-toast";
 type Agent = {
   id: string;
   name: string;
+  categoryId: string | null;
   provider: string;
   model: string;
   isActive?: boolean;
 };
+
+type AgentCategory = {
+  id: string;
+  name: string;
+  referencedAgentCount: number;
+};
+
+type AgentCategoryFilter = "" | "uncategorized" | string;
 
 const QUESTION_HISTORY_STORAGE_KEY = "open-debate:new-debate-question-history";
 const QUESTION_HISTORY_LIMIT = 12;
@@ -29,11 +38,19 @@ function summarizeQuestionHistoryItem(value: string) {
   return normalized.length > 80 ? `${normalized.slice(0, 80)}...` : normalized;
 }
 
+function agentMatchesCategory(agent: Agent, categoryId: AgentCategoryFilter) {
+  if (!categoryId) return false;
+  if (categoryId === "uncategorized") return !agent.categoryId;
+  return agent.categoryId === categoryId;
+}
+
 export default function NewDebatePage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { toast, showToast } = useAutoDismissToast(1200);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentCategories, setAgentCategories] = useState<AgentCategory[]>([]);
+  const [selectedAgentCategoryId, setSelectedAgentCategoryId] = useState<AgentCategoryFilter>("");
   const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
   const [form, setForm] = useState(initialForm);
   const [questionZoomOpen, setQuestionZoomOpen] = useState(false);
@@ -49,13 +66,22 @@ export default function NewDebatePage() {
   }, [router, searchParams]);
 
   const loadAgents = useCallback(async () => {
-    const response = await fetch("/api/agents");
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      showToast("error", payload.error?.message ?? "加载 AI 配置失败");
+    const [agentsResponse, categoriesResponse] = await Promise.all([
+      fetch("/api/agents", { cache: "no-store" }),
+      fetch("/api/agents/categories", { cache: "no-store" })
+    ]);
+    const agentsPayload = await agentsResponse.json().catch(() => ({}));
+    const categoriesPayload = await categoriesResponse.json().catch(() => ({}));
+    if (!agentsResponse.ok) {
+      showToast("error", agentsPayload.error?.message ?? "加载 AI 配置失败");
       return;
     }
-    setAgents(Array.isArray(payload.data) ? payload.data : []);
+    setAgents(Array.isArray(agentsPayload.data) ? agentsPayload.data : []);
+    if (categoriesResponse.ok) {
+      setAgentCategories(Array.isArray(categoriesPayload.data) ? categoriesPayload.data : []);
+    } else {
+      showToast("error", categoriesPayload.error?.message ?? "加载 AI 分类失败");
+    }
   }, [showToast]);
 
   useEffect(() => {
@@ -63,15 +89,34 @@ export default function NewDebatePage() {
   }, [loadAgents]);
 
   const activeAgents = useMemo(() => agents.filter((agent) => agent.isActive !== false), [agents]);
-  const activeAgentIds = useMemo(() => activeAgents.map((agent) => agent.id), [activeAgents]);
+  const activeAgentCountsByCategory = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const agent of activeAgents) {
+      const key = agent.categoryId ?? "uncategorized";
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [activeAgents]);
+  const scopedActiveAgents = useMemo(
+    () => activeAgents.filter((agent) => agentMatchesCategory(agent, selectedAgentCategoryId)),
+    [activeAgents, selectedAgentCategoryId]
+  );
+  const scopedActiveAgentIds = useMemo(() => scopedActiveAgents.map((agent) => agent.id), [scopedActiveAgents]);
 
   useEffect(() => {
-    const activeIdSet = new Set(activeAgentIds);
+    if (!selectedAgentCategoryId || selectedAgentCategoryId === "uncategorized") return;
+    if (!agentCategories.some((category) => category.id === selectedAgentCategoryId)) {
+      setSelectedAgentCategoryId("");
+    }
+  }, [agentCategories, selectedAgentCategoryId]);
+
+  useEffect(() => {
+    const activeIdSet = new Set(scopedActiveAgentIds);
     setSelectedAgentIds((current) => {
       const next = current.filter((id) => activeIdSet.has(id));
       return next.length === current.length ? current : next;
     });
-  }, [activeAgentIds]);
+  }, [scopedActiveAgentIds]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -93,14 +138,21 @@ export default function NewDebatePage() {
   }, []);
 
   function toggleAgent(id: string) {
+    if (!scopedActiveAgentIds.includes(id)) return;
     setSelectedAgentIds((current) =>
       current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
     );
   }
 
+  function handleAgentCategoryChange(categoryId: AgentCategoryFilter) {
+    setSelectedAgentCategoryId(categoryId);
+    setSelectedAgentIds(activeAgents.filter((agent) => agentMatchesCategory(agent, categoryId)).map((agent) => agent.id));
+  }
+
   const canSubmit =
     form.question.trim().length >= 10 &&
     (form.unlimitedTurns || (Number.isFinite(form.maxTurns) && form.maxTurns >= 1 && form.maxTurns <= 200)) &&
+    Boolean(selectedAgentCategoryId) &&
     selectedAgentIds.length >= 2 &&
     !isSubmitting;
 
@@ -115,6 +167,7 @@ export default function NewDebatePage() {
           question: form.question,
           maxTurns: form.unlimitedTurns ? 0 : form.maxTurns,
           enableSharedFacts: false,
+          agentCategoryId: selectedAgentCategoryId === "uncategorized" ? null : selectedAgentCategoryId,
           agentIds: selectedAgentIds
         })
       });
@@ -317,11 +370,24 @@ export default function NewDebatePage() {
         </label>
 
         <div className="stack">
+          <div className="field">
+            <label>AI 分类</label>
+            <select value={selectedAgentCategoryId} onChange={(event) => handleAgentCategoryChange(event.target.value)}>
+              <option value="">选择分类</option>
+              {agentCategories.map((category) => (
+                <option key={category.id} value={category.id}>
+                  {category.name}（启用 {activeAgentCountsByCategory.get(category.id) ?? 0}）
+                </option>
+              ))}
+              <option value="uncategorized">未分类（启用 {activeAgentCountsByCategory.get("uncategorized") ?? 0}）</option>
+            </select>
+            <div className="muted">切换分类后，会默认选中该分类下所有已启用的 AI。</div>
+          </div>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <label style={{ fontWeight: 600 }}>参与 AI（已选 {selectedAgentIds.length}）</label>
             <span className="muted">至少选择 2 个</span>
           </div>
-          {activeAgents.map((agent) => (
+          {scopedActiveAgents.map((agent) => (
             <label key={agent.id} className="row">
               <input checked={selectedAgentIds.includes(agent.id)} type="checkbox" onChange={() => toggleAgent(agent.id)} />
               <span>
@@ -329,9 +395,11 @@ export default function NewDebatePage() {
               </span>
             </label>
           ))}
-          {activeAgents.length === 0 ? (
+          {!selectedAgentCategoryId ? (
+            <div className="muted">先选择分类，再从该分类已启用 AI 中创建辩论。</div>
+          ) : scopedActiveAgents.length === 0 ? (
             <div className="muted">
-              还没有已启用的 AI 配置。先去 <Link href="/agents">AI 配置</Link> 创建或启用。
+              该分类下没有已启用的 AI 配置。先去 <Link href="/agents">AI 配置</Link> 创建、启用或调整分类。
             </div>
           ) : null}
         </div>

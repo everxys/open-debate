@@ -469,16 +469,25 @@ async function insertDebateAgent(input: {
     .executeTakeFirstOrThrow();
 }
 
-async function validateOwnedAgents(userId: string, agentIds: string[]) {
+async function validateOwnedAgents(
+  userId: string,
+  agentIds: string[],
+  options?: { categoryId?: string | null }
+) {
   const db = await ensureDb();
-  const agents = await db
+  let query = db
     .selectFrom("ai_agents")
     .select("id")
     .where("user_id", "=", userId)
     .where("deleted_at", "is", null)
     .where("is_active", "=", true)
-    .where("id", "in", agentIds)
-    .execute();
+    .where("id", "in", agentIds);
+  if (options?.categoryId === null) {
+    query = query.where("category_id", "is", null);
+  } else if (typeof options?.categoryId === "string") {
+    query = query.where("category_id", "=", options.categoryId);
+  }
+  const agents = await query.execute();
   if (agents.length !== agentIds.length) {
     throw new AppError("VALIDATION_ERROR", 400, "Selected agents are invalid or disabled");
   }
@@ -765,10 +774,11 @@ async function createDebateWithAgents(
     question: string;
     maxTurns: number;
     enableSharedFacts: boolean;
+    agentCategoryId?: string | null;
     agentIds: string[];
   }
 ) {
-  await validateOwnedAgents(userId, data.agentIds);
+  await validateOwnedAgents(userId, data.agentIds, { categoryId: data.agentCategoryId });
 
   const now = new Date().toISOString();
   const debate = await insertPendingDebate({
@@ -1906,20 +1916,11 @@ export async function listDebateFileActivity(
 
     const countsResult = await db.executeQuery<{ action: string; count: number }>(sql`
       select
-        case
-          when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
-          when action = 'write' then 'write'
-          else 'read'
-        end as action,
+        activity_bucket as action,
         count(*)::int as count
         from debate_file_activity_logs
        where debate_id = ${debateId}
-       group by
-        case
-          when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
-          when action = 'write' then 'write'
-          else 'read'
-        end
+       group by activity_bucket
     `.compile(db));
 
     const hasMore = result.rows.length > limit;
@@ -2029,20 +2030,11 @@ export async function listDebateFileActivityNav(debateId: string, options?: { ac
     `.compile(db));
     const countsResult = await db.executeQuery<{ action: string; count: number }>(sql`
       select
-        case
-          when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
-          when action = 'write' then 'write'
-          else 'read'
-        end as action,
+        activity_bucket as action,
         count(*)::int as count
         from debate_file_activity_logs
        where debate_id = ${debateId}
-       group by
-        case
-          when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
-          when action = 'write' then 'write'
-          else 'read'
-        end
+       group by activity_bucket
     `.compile(db));
 
     const roleAssignments = await loadDebateParticipantRoleTypes(session.userId, debateId);

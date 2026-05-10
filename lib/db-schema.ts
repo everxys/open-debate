@@ -408,6 +408,7 @@ export type DebateFileActivityLogTable = {
   after_content: string | null;
   target_heading: string | null;
   reason: string | null;
+  activity_bucket: ColumnType<string, never, never>;
   created_at: TimestampString;
 };
 

@@ -323,11 +323,14 @@ async function ensureSchema(pool: Pool) {
     "debates",
     "create index if not exists idx_debates_running_updated_at on debates(updated_at asc, created_at asc) where status = 'running'"
   );
+  await createIndexIfTableExists("debate_agents", "create index if not exists idx_debate_agents_ai_agent_id on debate_agents(ai_agent_id)");
   await createUniqueIndexIfClean(
     "debate_turns",
     "create unique index if not exists idx_debate_turns_debate_id_turn_number_unique on debate_turns(debate_id, turn_number)",
     "Skipped unique debate_turns(debate_id, turn_number) index because existing duplicate turns need manual cleanup."
   );
+  await createIndexIfTableExists("debate_turns", "create index if not exists idx_debate_turns_ai_agent_id on debate_turns(ai_agent_id)");
+  await createIndexIfTableExists("debate_turns", "create index if not exists idx_debate_turns_debate_agent_id on debate_turns(debate_agent_id)");
   await pool.query(`
     do $$
     begin
@@ -381,9 +384,29 @@ async function ensureSchema(pool: Pool) {
       after_content text null,
       target_heading text null,
       reason text null,
+      activity_bucket text generated always as (
+        case
+          when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
+          when action = 'write' then 'write'
+          else 'read'
+        end
+      ) stored,
       created_at timestamptz not null
     )
   `);
+  await alterTableIfExists(
+    "debate_file_activity_logs",
+    `
+      alter table debate_file_activity_logs
+      add column if not exists activity_bucket text generated always as (
+        case
+          when action = 'write' and reason like 'summarizer:%' then 'summarizer_write'
+          when action = 'write' then 'write'
+          else 'read'
+        end
+      ) stored
+    `
+  );
   await pool.query(`
     create table if not exists debate_turn_mutations (
       id uuid primary key,
@@ -538,7 +561,9 @@ async function ensureSchema(pool: Pool) {
   await alterTableIfExists("playground_tool_checklists", "alter table playground_tool_checklists add column if not exists last_progress_message text null");
   await pool.query("create index if not exists idx_workspaces_owner_user_id_updated_at on workspaces (owner_user_id, updated_at desc)");
   await pool.query("create index if not exists idx_workspaces_strategy_id_updated_at on workspaces (strategy_id, updated_at desc)");
-  await pool.query("create index if not exists idx_workspace_role_bindings_workspace_id_role_order on workspace_role_bindings (workspace_id, role_order asc)");
+  await pool.query("create index if not exists idx_workspaces_summary_ai_agent_id on workspaces (summary_ai_agent_id) where summary_ai_agent_id is not null");
+  await pool.query("create index if not exists idx_workspace_role_bindings_ai_agent_id on workspace_role_bindings (ai_agent_id) where ai_agent_id is not null");
+  await pool.query("create index if not exists idx_workspace_role_bindings_source_strategy_role_id on workspace_role_bindings (source_strategy_role_id) where source_strategy_role_id is not null");
   await pool.query("create index if not exists idx_workspace_files_workspace_id_updated_at on workspace_files (workspace_id, updated_at desc)");
   await pool.query("create index if not exists idx_workspace_files_workspace_id_path_prefix on workspace_files (workspace_id, path text_pattern_ops)");
   await pool.query("create index if not exists idx_strategy_shared_files_strategy_id_updated_at on strategy_shared_files (strategy_id, updated_at desc)");
@@ -548,16 +573,34 @@ async function ensureSchema(pool: Pool) {
     "create index if not exists idx_strategy_role_files_role_id_path_prefix on strategy_role_files(strategy_role_id, path text_pattern_ops)"
   );
   await createIndexIfTableExists(
+    "strategy_role_files",
+    "create index if not exists idx_strategy_role_files_role_id_lower_path on strategy_role_files(strategy_role_id, lower(path) text_pattern_ops)"
+  );
+  await createIndexIfTableExists(
     "ai_agent_files",
     "create index if not exists idx_ai_agent_files_agent_id_path_prefix on ai_agent_files(ai_agent_id, path text_pattern_ops)"
   );
   await pool.query("create index if not exists idx_strategy_file_access_rules_strategy_id_scope on strategy_file_access_rules (strategy_id, scope, updated_at desc)");
   await pool.query("create index if not exists idx_strategy_file_access_rules_role_id on strategy_file_access_rules (strategy_role_id, updated_at desc)");
   await pool.query("create index if not exists idx_playground_tool_checklists_user_agent_updated_at on playground_tool_checklists (user_id, agent_id, updated_at desc)");
+  await pool.query("create index if not exists idx_playground_tool_checklists_agent_id on playground_tool_checklists (agent_id)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_created_at on debate_file_activity_logs (debate_id, created_at desc, id desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_debate_id_action_created_at on debate_file_activity_logs (debate_id, action, created_at desc, id desc)");
+  await pool.query("create index if not exists idx_debate_file_activity_logs_debate_bucket on debate_file_activity_logs (debate_id, activity_bucket)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_nav on debate_file_activity_logs (debate_id, debate_agent_id, round_number, turn_number, created_at desc, id desc)");
   await pool.query("create index if not exists idx_debate_file_activity_logs_file_latest on debate_file_activity_logs (debate_id, scope, path, target_debate_agent_id, created_at desc, id desc)");
+  await pool.query("create index if not exists idx_debate_file_activity_logs_debate_agent_id on debate_file_activity_logs (debate_agent_id)");
+  await pool.query("create index if not exists idx_debate_file_activity_logs_target_debate_agent_id on debate_file_activity_logs (target_debate_agent_id) where target_debate_agent_id is not null");
+  await createIndexIfTableExists(
+    "debate_file_versions",
+    "create index if not exists idx_debate_file_versions_created_by_debate_agent_id on debate_file_versions (created_by_debate_agent_id) where created_by_debate_agent_id is not null"
+  );
+  await pool.query("drop index if exists idx_debates_user_id");
+  await pool.query("drop index if exists idx_debate_agents_debate_id");
+  await pool.query("drop index if exists idx_debate_turns_debate_id");
+  await pool.query("drop index if exists idx_strategy_roles_strategy_id_role_order");
+  await pool.query("drop index if exists idx_workspace_role_bindings_workspace_id_role_order");
+  await pool.query("drop index if exists idx_debate_context_chunks_debate_id");
   await pool.query(`
     create table if not exists debate_summary_jobs (
       id uuid primary key,
@@ -911,6 +954,110 @@ async function ensureSchema(pool: Pool) {
     exception when undefined_table then
       null;
     when duplicate_object then
+      null;
+    end $$;
+  `);
+  await pool.query(`
+    do $$
+    begin
+      if to_regclass('public.debate_context_embeddings') is not null
+         and to_regclass('public.debate_context_chunks') is not null then
+        execute '
+          delete from debate_context_embeddings e
+           where not exists (
+             select 1 from debate_context_chunks c where c.id = e.chunk_id
+           )
+        ';
+      end if;
+
+      if to_regclass('public.debate_context_embeddings') is not null then
+        execute '
+          delete from debate_context_embeddings e
+           where not exists (
+             select 1 from debates d where d.id = e.debate_id
+           )
+        ';
+      end if;
+
+      if to_regclass('public.debate_context_chunks') is not null then
+        execute '
+          delete from debate_context_chunks c
+           where not exists (
+             select 1 from debates d where d.id = c.debate_id
+           )
+        ';
+        execute '
+          update debate_context_chunks c
+             set debate_agent_id = null
+           where c.debate_agent_id is not null
+             and not exists (
+               select 1 from debate_agents da where da.id = c.debate_agent_id
+             )
+        ';
+
+        if not exists (
+          select 1 from pg_constraint where conname = 'debate_context_chunks_debate_id_fkey'
+        ) then
+          execute '
+            alter table debate_context_chunks
+              add constraint debate_context_chunks_debate_id_fkey
+              foreign key (debate_id) references debates(id) on delete cascade
+          ';
+        end if;
+        if not exists (
+          select 1 from pg_constraint where conname = 'debate_context_chunks_debate_agent_id_fkey'
+        ) then
+          execute '
+            alter table debate_context_chunks
+              add constraint debate_context_chunks_debate_agent_id_fkey
+              foreign key (debate_agent_id) references debate_agents(id) on delete set null
+          ';
+        end if;
+
+        execute 'create index if not exists idx_debate_context_chunks_debate_updated_at on debate_context_chunks (debate_id, updated_at desc)';
+        execute 'create index if not exists idx_debate_context_chunks_source_type on debate_context_chunks (source_type)';
+      end if;
+
+      if to_regclass('public.debate_context_embeddings') is not null
+         and to_regclass('public.debate_context_chunks') is not null then
+        if not exists (
+          select 1 from pg_constraint where conname = 'debate_context_embeddings_chunk_id_fkey'
+        ) then
+          execute '
+            alter table debate_context_embeddings
+              add constraint debate_context_embeddings_chunk_id_fkey
+              foreign key (chunk_id) references debate_context_chunks(id) on delete cascade
+          ';
+        end if;
+        if not exists (
+          select 1 from pg_constraint where conname = 'debate_context_embeddings_debate_id_fkey'
+        ) then
+          execute '
+            alter table debate_context_embeddings
+              add constraint debate_context_embeddings_debate_id_fkey
+              foreign key (debate_id) references debates(id) on delete cascade
+          ';
+        end if;
+      end if;
+
+      if to_regclass('public.retrieval_configs') is not null then
+        execute '
+          delete from retrieval_configs r
+           where not exists (
+             select 1 from users u where u.id = r.user_id
+           )
+        ';
+        if not exists (
+          select 1 from pg_constraint where conname = 'retrieval_configs_user_id_fkey'
+        ) then
+          execute '
+            alter table retrieval_configs
+              add constraint retrieval_configs_user_id_fkey
+              foreign key (user_id) references users(id) on delete cascade
+          ';
+        end if;
+      end if;
+    exception when undefined_table or duplicate_object then
       null;
     end $$;
   `);
