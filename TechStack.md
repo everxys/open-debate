@@ -65,11 +65,15 @@
 - ESLint
 - eslint-config-next
 - TypeScript strict mode
+- 构建阶段不忽略 TypeScript 或 ESLint 错误
 - npm scripts 统一封装开发、构建、迁移、测试和校验命令
 
 ## 部署与本地环境
 
 - Docker multi-stage build
+- Docker 生产镜像只安装 production dependencies
+- Docker 运行阶段使用非 root 用户
 - docker-compose
+- docker-compose 中的敏感应用密钥通过环境变量注入
 - 应用服务 + PostgreSQL 服务
 - 启动时执行必要的数据库迁移检查

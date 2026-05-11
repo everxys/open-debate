@@ -34,8 +34,8 @@ services:
     environment:
       DATABASE_URL: postgres://open_debate:open_debate@postgres:5432/open_debate
       APP_URL: http://localhost:3000
-      SESSION_SECRET: replace-this-with-a-long-random-secret
-      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      SESSION_SECRET: "${SESSION_SECRET:?SESSION_SECRET is required}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}"
     ports:
       - "3000:3000"
 

@@ -9,12 +9,6 @@ const nextConfig = {
   typedRoutes: true,
   outputFileTracingRoot: __dirname,
   distDir,
-  eslint: {
-    ignoreDuringBuilds: true
-  },
-  typescript: {
-    ignoreBuildErrors: true
-  },
   webpack(config, { dev }) {
     if (dev) {
       config.cache = {
