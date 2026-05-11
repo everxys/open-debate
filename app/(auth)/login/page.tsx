@@ -4,6 +4,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
+import { Button } from "@/components/ui/button";
+import { Alert } from "@/components/ui/feedback";
+import { Field } from "@/components/ui/surface";
+
 function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
 }
@@ -49,8 +53,7 @@ export default function LoginPage() {
       <p className="authSubtitle">输入邮箱和密码。</p>
 
       <div className="stack" style={{ marginTop: 14 }}>
-        <div className="field">
-          <label>邮箱</label>
+        <Field label="邮箱">
           <input
             autoComplete="email"
             inputMode="email"
@@ -58,9 +61,8 @@ export default function LoginPage() {
             onChange={(e) => setEmail(e.target.value)}
             placeholder="you@company.com"
           />
-        </div>
-        <div className="field">
-          <label>密码</label>
+        </Field>
+        <Field label="密码">
           <input
             type="password"
             autoComplete="current-password"
@@ -69,24 +71,22 @@ export default function LoginPage() {
             placeholder="你的密码"
           />
           <div className="hint">密码错误累计 5 次会临时锁定。</div>
-        </div>
+        </Field>
 
-        <button
-          className="btn btn-primary"
+        <Button
+          variant="primary"
           disabled={!canSubmit || loading}
           onClick={() => void submit()}
         >
           {loading ? "登录中..." : "登录"}
-        </button>
+        </Button>
 
         <div className="hint">
           没有账号？<Link className="authLink" href="/signup">去注册</Link>
         </div>
 
         {message ? (
-          <div className={`alert ${message.type === "error" ? "alert-error" : "alert-success"}`}>
-            {message.text}
-          </div>
+          <Alert tone={message.type}>{message.text}</Alert>
         ) : null}
       </div>
     </section>

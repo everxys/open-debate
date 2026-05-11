@@ -3,17 +3,21 @@ import type { ReactNode } from "react";
 
 import { UserMenu } from "@/components/auth/user-menu";
 import { MainNav } from "@/components/nav/main-nav";
+import { VersionMenu } from "@/components/nav/version-menu";
 import { getOptionalUser } from "@/lib/auth";
+import { getCurrentRelease } from "@/lib/version";
 
 export default async function MainLayout({ children }: { children: ReactNode }) {
   const user = await getOptionalUser();
+  const currentRelease = getCurrentRelease();
 
   return (
     <div className="shell">
       <div className="topbar">
         <div>
-          <Link href="/debates">
-            <strong>Open Debate V1</strong>
+          <Link className="topbarBrand" href="/debates">
+            <strong>Open Debate</strong>
+            <span className="topbarVersion">{currentRelease.version}</span>
           </Link>
           <div className="muted">
             {user ? `已登录: ${user.email}` : "Docker Compose + Next.js + Postgres"}
@@ -29,6 +33,7 @@ export default async function MainLayout({ children }: { children: ReactNode }) 
               { href: "/playground", label: "Playground" }
             ]}
           />
+          <VersionMenu currentVersion={currentRelease.version} />
           {user ? (
             <UserMenu email={user.email} role={user.role} />
           ) : (

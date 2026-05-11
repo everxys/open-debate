@@ -1,10 +1,11 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ComponentProps } from "react";
 
-type NavItem = { href: ComponentProps<typeof Link>["href"]; label: string };
+import { ButtonLink } from "@/components/ui/button";
+
+type NavItem = { href: ComponentProps<typeof ButtonLink>["href"]; label: string };
 
 /** Check if nav item is active based on current pathname */
 function isActive(pathname: string, href: string): boolean {
@@ -20,14 +21,14 @@ export function MainNav({ items }: { items: NavItem[] }) {
     const hrefString = typeof item.href === "string" ? item.href : item.href.pathname ?? "";
     const active = isActive(pathname, hrefString);
     return (
-      <Link
+      <ButtonLink
         key={hrefString}
-        className={`btn ${active ? "btn-active" : ""}`}
         href={item.href}
+        active={active}
         aria-current={active ? "page" : undefined}
       >
         {item.label}
-      </Link>
+      </ButtonLink>
     );
   });
 }

@@ -1,0 +1,9 @@
+---
+date: 2026-05-12
+type: Internal
+title: 抽取通用 BackgroundJob
+scope: jobs
+order: 1300
+---
+
+将后台任务中心拆成通用 `BackgroundJob` 模型和可替换 adapter，并把当前 summary/resume 任务接入为 Open Debate 的实现。管理后台继续展示任务、队列和 worker 状态，后续模板复用时只需要替换 adapter。

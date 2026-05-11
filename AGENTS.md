@@ -5,3 +5,5 @@
 - 当要求时，才能更新 `README.md`
 
 ## SKILL
+
+- 写版本更新、更新日志或 changelog 条目时，使用本地 skill `open-debate-changelog`

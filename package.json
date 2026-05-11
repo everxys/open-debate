@@ -3,11 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "node scripts/dev-with-summary-worker.cjs",
+    "dev": "npm run db:migrate && node scripts/dev-with-summary-worker.cjs",
     "build": "next build",
-    "start": "node scripts/ensure-next-build.cjs && next start",
-    "worker:summary": "tsx scripts/summary-worker.ts",
-    "test": "node --import tsx --test tests/**/*.test.ts",
+    "start": "node scripts/ensure-next-build.cjs && npm run db:migrate && next start",
+    "worker:summary": "npm run db:migrate && tsx scripts/summary-worker.ts",
+    "db:migrate": "tsx scripts/db-migrate.ts up",
+    "db:migrate:check": "tsx scripts/db-migrate.ts check",
+    "test": "npm run changelog:check && node --import tsx --test tests/**/*.test.ts",
+    "changelog:generate": "tsx scripts/changelog.ts generate",
+    "changelog:check": "tsx scripts/changelog.ts check",
     "lint": "next lint",
     "migrate:workflow-phase-1-5": "node scripts/migrate-workflow-phase-1-5.cjs",
     "repair:duplicate-turns": "node scripts/repair-duplicate-debate-turns.cjs",
@@ -25,6 +29,7 @@
     "react": "19.0.0",
     "react-arborist": "^3.4.3",
     "react-dom": "19.0.0",
+    "tsx": "^4.21.0",
     "zod": "3.24.2"
   },
   "devDependencies": {
@@ -35,7 +40,6 @@
     "@types/react-dom": "19.0.4",
     "eslint": "^8.57.1",
     "eslint-config-next": "^15.5.15",
-    "tsx": "^4.21.0",
     "typescript": "5.8.2"
   },
   "overrides": {

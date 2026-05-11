@@ -4,6 +4,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
+import { Button } from "@/components/ui/button";
+import { Alert } from "@/components/ui/feedback";
+import { Field } from "@/components/ui/surface";
+
 function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
 }
@@ -100,8 +104,7 @@ export default function SignupPage() {
       <p className="authSubtitle">邮箱 + 验证码 + 密码。</p>
 
       <div className="stack" style={{ marginTop: 14 }}>
-        <div className="field">
-          <label>邮箱</label>
+        <Field label="邮箱">
           <input
             autoComplete="email"
             inputMode="email"
@@ -109,14 +112,13 @@ export default function SignupPage() {
             onChange={(e) => setEmail(e.target.value)}
             placeholder="you@company.com"
           />
-        </div>
+        </Field>
 
-        <button className="btn" disabled={!canSend || sending} onClick={() => void sendCode()}>
+        <Button disabled={!canSend || sending} onClick={() => void sendCode()}>
           {sending ? "发送中..." : cooldownSeconds > 0 ? `重新发送 (${cooldownSeconds}s)` : "发送验证码"}
-        </button>
+        </Button>
 
-        <div className="field">
-          <label>验证码</label>
+        <Field label="验证码">
           <input
             inputMode="numeric"
             value={code}
@@ -127,10 +129,9 @@ export default function SignupPage() {
           />
           <div className="hint">有效期 10 分钟，提交时会校验。</div>
           {debugCode ? <div className="hint">本地调试验证码：{debugCode}</div> : null}
-        </div>
+        </Field>
 
-        <div className="field">
-          <label>密码</label>
+        <Field label="密码">
           <input
             type="password"
             autoComplete="new-password"
@@ -139,10 +140,9 @@ export default function SignupPage() {
             placeholder="至少 10 位，包含字母和数字"
           />
           <div className="hint">要求：至少 10 位，且包含字母与数字。</div>
-        </div>
+        </Field>
 
-        <div className="field">
-          <label>确认密码</label>
+        <Field label="确认密码">
           <input
             type="password"
             autoComplete="new-password"
@@ -155,24 +155,22 @@ export default function SignupPage() {
               两次输入不一致
             </div>
           ) : null}
-        </div>
+        </Field>
 
-        <button
-          className="btn btn-primary"
+        <Button
+          variant="primary"
           disabled={!canSubmit || submitting}
           onClick={() => void submit()}
         >
           {submitting ? "创建中..." : "创建账号"}
-        </button>
+        </Button>
 
         <div className="hint">
           已有账号？<Link className="authLink" href="/login">去登录</Link>
         </div>
 
         {message ? (
-          <div className={`alert ${message.type === "error" ? "alert-error" : "alert-success"}`}>
-            {message.text}
-          </div>
+          <Alert tone={message.type}>{message.text}</Alert>
         ) : null}
       </div>
     </section>

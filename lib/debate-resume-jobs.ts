@@ -19,6 +19,7 @@ type ResumeJobRecord = {
   resumeAt: string;
   reason: string;
   status: string;
+  attemptCount: number;
   lockedBy: string | null;
   lockedAt: string | null;
   lastError: string | null;
@@ -40,6 +41,7 @@ function parseResumeJobRow(row: Row): ResumeJobRecord {
     resumeAt: normalizeTimestampString(row.resume_at),
     reason: String(row.reason ?? "quota_wait"),
     status: String(row.status ?? "pending"),
+    attemptCount: Number(row.attempt_count ?? 0),
     lockedBy: parseNullableString(row.locked_by),
     lockedAt: parseNullableString(row.locked_at),
     lastError: parseNullableString(row.last_error),
@@ -235,6 +237,7 @@ async function claimDueResumeJobs(workerId: string, limit: number) {
     )
     update debate_resume_jobs j
        set status = 'running',
+           attempt_count = coalesce(j.attempt_count, 0) + 1,
            locked_by = ${workerId},
            locked_at = now(),
            updated_at = now()

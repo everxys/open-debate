@@ -11,6 +11,7 @@ export const FACTS_BOARD_DEBOUNCE_MS = 8_000;
 export const SUMMARY_WORKER_NOTIFY_CHANNEL = "open_debate_summary_jobs";
 export const SUMMARY_JOB_LEASE_HEARTBEAT_MS = 15_000;
 export const SUMMARY_JOB_STALE_AFTER_MS = 45_000;
+export const SUMMARY_JOB_MAX_ATTEMPTS = 8;
 
 export type DebateSummaryJobStatus =
   | "queued"
@@ -478,7 +479,7 @@ export async function scheduleDebateSummaryJobRetry(input: {
 }) {
   const nextAttemptCount = input.attemptCount + 1;
   const nextRetryAt = new Date(Date.now() + getSummaryJobRetryDelayMs(nextAttemptCount)).toISOString();
-  const nextStatus: DebateSummaryJobStatus = nextAttemptCount >= 8 ? "dead_letter" : "retry_wait";
+  const nextStatus: DebateSummaryJobStatus = nextAttemptCount >= SUMMARY_JOB_MAX_ATTEMPTS ? "dead_letter" : "retry_wait";
   const db = await ensureDb();
   const now = new Date().toISOString();
   const result = await db.executeQuery<SummaryJobRow>(sql`

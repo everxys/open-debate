@@ -3,7 +3,7 @@ import { sql } from "kysely";
 
 import { requireSessionUser } from "@/lib/auth";
 import { getDebateParticipantRoleType, loadDebateParticipantRoleTypes, type DebateParticipantRoleType } from "@/lib/debate-role-types";
-import { ensureDb, ensureDebateAutoRecoverColumns } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { buildLineDiffRows, summarizeLineDiffRows } from "@/lib/line-diff";
 import { createServerLogger } from "@/lib/logger/server";
@@ -1317,17 +1317,7 @@ export async function updateDebateAutoRecover(id: string, input: unknown) {
       .executeTakeFirst();
   }
 
-  let result;
-  try {
-    result = await executeUpdate();
-  } catch (error) {
-    if (isMissingColumnError(error, "auto_recover_once_on_failed")) {
-      await ensureDebateAutoRecoverColumns();
-      result = await executeUpdate();
-    } else {
-      throw error;
-    }
-  }
+  const result = await executeUpdate();
   if (!result) {
     throw new AppError("NOT_FOUND", 404, "Debate not found");
   }

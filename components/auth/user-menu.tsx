@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import type { UserRole } from "@/lib/roles";
@@ -15,10 +15,15 @@ function getAvatarInitial(email: string): string {
 /** User dropdown menu with avatar, settings links, and logout */
 export function UserMenu(props: { email: string; role: UserRole }) {
   const router = useRouter();
+  const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const menuId = useId();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const avatar = useMemo(() => getAvatarInitial(props.email), [props.email]);
+
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
 
   // Close menu on outside click or Escape key
   useEffect(() => {
@@ -42,10 +47,13 @@ export function UserMenu(props: { email: string; role: UserRole }) {
   }, [open]);
 
   const handleLogout = async () => {
+    setOpen(false);
     await fetch("/api/auth/logout", { method: "POST" });
     router.push("/login");
     router.refresh();
   };
+
+  const closeMenu = () => setOpen(false);
 
   return (
     <div className="userMenu" ref={rootRef}>
@@ -68,9 +76,12 @@ export function UserMenu(props: { email: string; role: UserRole }) {
           </div>
 
           <div className="userMenuItems">
-            <Link className="userMenuItem" role="menuitem" href="/settings/security">安全管理</Link>
+            <Link className="userMenuItem" role="menuitem" href="/settings/security" onClick={closeMenu}>安全管理</Link>
             {props.role === "admin" && (
-              <Link className="userMenuItem" role="menuitem" href="/admin/observability">监控面板</Link>
+              <>
+                <Link className="userMenuItem" role="menuitem" href="/admin/observability" onClick={closeMenu}>监控面板</Link>
+                <Link className="userMenuItem" role="menuitem" href="/admin/feedback" onClick={closeMenu}>反馈与建议</Link>
+              </>
             )}
             <button className="userMenuItem userMenuDanger" role="menuitem" onClick={handleLogout}>退出</button>
           </div>

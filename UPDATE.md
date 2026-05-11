@@ -1,11 +1,103 @@
+## 2026-05-12
+
+### 抽取通用 BackgroundJob
+
+类型：Internal · 范围：jobs · 版本：v2026.05.12.3
+
+将后台任务中心拆成通用 `BackgroundJob` 模型和可替换 adapter，并把当前 summary/resume 任务接入为 Open Debate 的实现。管理后台继续展示任务、队列和 worker 状态，后续模板复用时只需要替换 adapter。
+
+## 2026-05-12
+
+### 抽取通用 FileWorkspace
+
+类型：Internal · 范围：files · 版本：v2026.05.12.2
+
+将 AI 文件、策略共享文件、策略角色文件、草稿角色文件和工作台文件的树、右键菜单、标签页、Monaco 编辑器、拖拽移动、保存与删除流程合并到通用 `FileWorkspace`。各业务入口现在只保留 adapter、路径徽章、额外菜单和只读状态配置，后续模板复用时可以替换文件接口而不用复制整套文件管理器。
+
+## 2026-05-12
+
+### 抽取通用 UI 组件底座
+
+类型：Internal · 范围：ui · 版本：v2026.05.12.1
+
+将按钮、字段、面板、徽章、标签页、上下文菜单、提示和 toast 的通用样式迁入 `components/ui`，并新增可复用组件入口。业务页面继续保留自身布局和状态样式，后续模板化时可以直接复用这层 UI 基础组件。
+
+## 2026-05-11
+
+### 抽取模板底座 core 模块
+
+类型：Internal · 范围：core · 版本：v2026.05.11.1
+
+新增 `lib/core` 底座目录，把 API 错误响应、数据库迁移、日志、认证会话和更新日志生成逻辑整理成可复用入口；旧 `lib/*` 路径继续兼容，现有业务代码无需同步改动即可逐步迁移到通用模板结构。
+
 ## 2026-05-10
 
+### 新增后台任务中心
+
+类型：Added · 范围：observability · 版本：v2026.05.10.7
+
+监控面板新增后台任务中心，统一展示 summary worker 与恢复任务的状态、重试次数、失败原因、耗时和调度时间，并支持管理员手动重新排队执行失败或已完成的后台任务。
+
+## 2026-05-10
+
+### 补充数据库迁移协作约定
+
+类型：Changed · 范围：database · 版本：v2026.05.10.6
+
+`USER.md` 新增数据库变更规则：AI 修改 SQL、schema、表结构、索引、约束或种子数据时，必须同步维护 `migrations/*.sql` 并运行迁移与检查命令，避免重新把 schema 修补写回应用启动逻辑。
+
+## 2026-05-10
+
+### 建立正式数据库迁移系统
+
+类型：Changed · 范围：database · 版本：v2026.05.10.5
+
+数据库 schema 初始化和历史升级改为 `migrations/*.sql` 与 `schema_migrations` 记录管理；启动时只检查迁移是否已应用，不再在运行过程中自动修补表结构。`npm run dev`、`npm start` 和 summary worker 会先执行 `npm run db:migrate`，旧库升级、生成物记录和迁移校验都走同一套流程。
+
+## 2026-05-10
+
+### 修正同日更新日志版本号顺序
+
+类型：Fixed · 范围：changelog · 版本：v2026.05.10.4
+
+修正同一天多条更新的版本号生成逻辑：页面仍按最新更新在上展示，但 `vYYYY.MM.DD.N` 的 `N` 会按时间从旧到新递增，避免最新条目显示成 `.1`、较旧条目反而显示成更大版本号。
+
+## 2026-05-10
+
+### 补充更新日志写作约定与技能
+
+类型：Changed · 范围：changelog · 版本：v2026.05.10.3
+
+`USER.md` 中的版本更新规则改为新增 `changelog/entries/YYYY/MM/*.md` 条目后运行 `npm run changelog:generate`，不再要求手写 `UPDATE.md`；同时新增本地 `open-debate-changelog` skill，后续 AI 写更新日志时会按条目源文件、生成物和校验脚本的流程执行。
+
+## 2026-05-10
+
+### 改造更新日志为条目生成模式
+
+类型：Changed · 范围：changelog · 版本：v2026.05.10.2
+
+更新日志改为 `changelog/entries/YYYY/MM/*.md` 小条目维护，生成脚本统一输出 `public/changelog` 分页 JSON、当前版本 JSON 和归档 `UPDATE.md`；运行时顶部版本号和 `/changelog` 页面不再解析完整 Markdown，降低多年、多团队维护时的冲突和读取成本。
+
+## 2026-05-10
+
+### 2026-05-10 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.05.10.1
+
+- 反馈与建议去掉“相关页面”字段，提交和管理员查看都只保留类型、标题、内容；底层 `user_feedback.page_path` 也会在启动迁移中删除。更新日志版本号改为 `vYYYY.MM.DD.N`，同一天多次更新按从上到下编号，并把更新日志页改为每页 5 个版本块分页渲染，避免日志增长后一次性渲染过多 Markdown。
+- 修复头像个人菜单跳转后不消失的问题：菜单项点击时会立即关闭，路由变化后也会兜底重置打开状态，避免跳到安全管理、监控面板或反馈页后旧下拉框继续悬停在页面上。
+- 修正顶部“更多”下拉入口：按钮不再直接显示当前版本号，当前版本保留在下拉面板与更新日志页内；同时补上按钮到下拉框之间的 hover 缓冲区，避免移动鼠标准备点击菜单项时菜单提前消失。
+- 新增版本与反馈入口：顶部导航新增当前日期版本号下拉，`/changelog` 直接展示 `UPDATE.md` 更新日志；普通用户可在 `/feedback` 提交反馈与建议，管理员菜单新增后台汇总页并落库保存所有反馈。
 - 工作台的“均匀分配 AI”和“总结器随机 AI”新增分类选择：必须先选自定义分类或“未分类”，再只从该分类下已启用的 AI 配置里自动分配；裸辩论创建页也改为先选 AI 分类，切换分类时默认选中该分类下所有已启用 AI，并在提交时校验所选 AI 仍属于该分类。
 - 修复 SQL 扫描暴露的数据库问题：旧检索表如果还残留在老库里，会在启动迁移中清理没有父 `debates` / `users` / chunk 的孤儿记录，并补上级联外键，避免删除辩论后继续留下不可达的 `debate_context_chunks`；同时补齐外键侧索引，删除确定被组合/唯一索引覆盖的重复索引。
 - 优化文件活动日志统计：`debate_file_activity_logs` 新增生成列 `activity_bucket` 和 `(debate_id, activity_bucket)` 索引，活动列表/导航计数不再每次用 `case + reason like` 现算分桶；`docker/init.sql` 与运行时迁移同步。
 - Docker Postgres 默认启用 `pg_stat_statements` 和 `track_io_timing`，新环境可以直接抓真实 SQL 热点；策略角色文件的 `lower(path)` 读取路径补上表达式索引，避免后续文件量上来后绕开现有 path 前缀索引。
 
 ## 2026-05-09
+
+### 2026-05-09 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.05.09.1
 
 - `USER.md` 新增控件约定：按钮和输入框不能直接使用浏览器默认外观，需要走项目内自定义控件样式；AI 配置页同步把输入框、下拉、按钮、文件选择和配置勾选框收口到自定义视觉层，保留原有导入导出、拖拽归类、多选移动和配置编辑逻辑不变。
 - AI 配置页的多选整理继续增强：配置列表工具条新增“全选当前结果 / 取消全选”，卡片标题区域也可作为大命中区直接切换选中状态；拖动 AI 配置时不再使用浏览器默认的大卡片拖拽虚影，避免遮挡左侧分类投放目标。
@@ -20,10 +112,18 @@
 
 ## 2026-05-08
 
+### 2026-05-08 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.05.08.1
+
 - AI 配置页新增持久化分类：新增 `ai_agent_categories` 表和 `ai_agents.category_id` 绑定，支持在“已有配置”里创建、重命名、删除分类；列表现在先按“全部分类 / 自定义分类 / 未分类”切换，再在当前分类下继续使用“全部 / 已启用 / 已禁用”状态筛选。新建、编辑、复制、导入导出 AI 配置都会保留分类归属，删除分类时该分类下配置会自动回到“未分类”。
 - AI 配置分类交互继续增强：`已有配置` 内部改成左侧分类栏 + 右侧配置列表，自定义分类和“未分类”都支持把单个或多选 AI 卡片拖入归类；列表顶部新增搜索、选中数量和“移动到分类”下拉，分类行也显示总数、启用数和禁用数，方便不用拖拽时快速整理配置。
 
 ## 2026-04-26
+
+### 2026-04-26 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.04.26.1
 
 - 收紧 runtime 的“说人话”输出链路：新增 `lib/runtime/human-output.ts` 检查工具回合后的最终发言，遇到只复述写入成功、版本号、`ok:true` 或高密度 `100%/闭环/落库/P0/P1/全量校验` 且缺少具体内容的回复，会要求模型重写一次；同时强化 harness 指令，文件写入状态继续由程序记录，正文必须讲具体内容、原因和下一步。`facts/board.md` 现在会过滤写入确认、版本、待授权等流程状态，流程类信息另写入 `facts/process-state.md`，避免普通参与者继续被流程话术带偏。
 - 修复 `time zone "gmt+0800" not recognized` 的真实主链：新增 `lib/timestamps.ts` 统一把数据库读出的 `Date/timestamptz` 归一成 ISO 字符串，并把 `lib/runtime/debate-file-access.ts`、`lib/runtime/runtime-action-harness.ts`、`lib/debate-resume-jobs.ts`、`lib/quota-control.ts`、`lib/summary-jobs.ts`、`lib/debates.ts` 接到这套归一化上，避免 harness mutation journal、quota/resume、summary worker 等链路把 `Date` 直接 `String(...)` 成 `GMT+0800` 后再写回 Postgres。
@@ -36,6 +136,10 @@
 - 删除死掉的 workflow `voting.custom.minOptions/maxOptions` 配置：`lib/workflow.ts` 的 schema/default/normalize/canonical 输出与示例 workflow 文件现在都只保留仍然生效的 `voting.governance`，避免 GUI/JSON 继续暴露一组根本不会影响 runtime 的伪配置。
 
 ## 2026-04-25
+
+### 2026-04-25 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.04.25.1
 
 - Playground 工具验收台把“全选测试集”从整行复选项收成了标题区小按钮，减少占位，同时保留一键选满和回退默认测试集的逻辑。
 - 修复 Playground checklist 运行时落库失败：`playground_tool_checklists.tool_name` 的数据库 check constraint 之前还停留在旧工具名单，新增的 `harness_read / harness_write / harness_vote_cast` 会直接触发约束错误；现在 `lib/db.ts` 启动时会自动重建 `playground_tool_checklists_tool_name_check` 到新名单，`docker/init.sql` 也已同步，老库和新库都能正常记录 harness checklist 结果。
@@ -85,6 +189,10 @@
 
 ## 2026-04-24
 
+### 2026-04-24 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.04.24.1
+
 - AI 配置新增 `Coding Plan` 限额治理：`ai_agents` 现在支持 `usageControlMode` 和共享 `quotaProfileId` 绑定；新增计划池 CRUD/API、导入导出快照复用、5 小时/周/月请求数窗口、平滑节流、手工外部消耗校正，以及 AI 测试/调试在受限时返回结构化 `QUOTA_THROTTLED`。
 - 运行时所有真实 provider HTTP 请求现在都会先走统一配额保留：debate 主流程、summary generation、vote announcement、AI 配置页 test/debug 都会按请求次数计费；超过 60 秒等待时会暂停 debate、延后 summary job，并由新的 `debate_resume_jobs` 后台恢复机制自动续跑。
 - 辩论与 AI 配置可观测性补强：AI 配置页新增 Coding Plan 管理区、计划池摘要和限额模式显示；debate `runtimeNotice` 新增 `quota_wait`；结构化日志补上 `quota.reserve / wait_inline / pause_debate / defer_summary_job / resume_debate / manual_adjustment`，并带计划池、已用配额、恢复时间等上下文。
@@ -92,6 +200,10 @@
 - 调整 AI 配置页布局：`已有配置` 恢复到右侧主区域，`Coding Plan 池管理` 改为整行放在下方；AI 配置卡片操作按钮改成可换行，长 `Base URL`/文案允许断行，避免卡片边框被撑爆；同时移除了卡片里的“文件”入口，避免把 AI 配置页做成混杂的文件管理入口。
 
 ## 2026-04-23
+
+### 2026-04-23 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.04.23.1
 
 - 修复浏览器错误日志只显示 `{}` 的问题：logger 现在会规范化空错误对象和 DOMException/AbortError 这类非枚举浏览器错误，并把结构化字段序列化进首行日志；辩论详情页读取发言正文失败时会额外记录 action、debateId、turnNumber、HTTP status 和 API error，避免 `failed to load turn detail {}` 无法定位。
 - 继续拆分 `lib/runtime-main.ts`：把官方投票公告生成抽到 `lib/runtime/vote-announcement.ts`，保留原先的 Seat-1 公告席位选择、provider 调用、fallback 公告和文件落盘逻辑；`runtime-main` 只保留 facade 转发与主循环调用，当前主文件降到约 1225 行。
@@ -116,9 +228,17 @@
 
 ## 2026-04-19
 
+### 2026-04-19 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.04.19.1
+
 - 修复 summary worker 在本地 Postgres 重启/恢复期的进程级崩溃：`pg Pool` 现在会显式监听并吞掉空闲连接上的 `error` 事件，避免 `ECONNRESET` / `57P03 the database system is in recovery mode` 直接作为未处理事件把 Node 进程打死；同时数据库单例会在这类连接级故障后自动失效并重建，`ensureDbReady()` 的 schema 初始化失败也不再把 rejected promise 永久缓存住，数据库恢复后后续请求与 summary worker tick 可以自行重连继续跑。
 
 ## 2026-04-18
+
+### 2026-04-18 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.04.18.1
 
 - 调整辩论页状态栏信息层级：failed 且已显示失败原因时不再重复显示 `停止原因: runtime error`；轮次 / token / 共识 / 阶段快照改成更醒目的彩色状态标签；问题区改为较短的预览框并引导通过“放大”查看完整内容，避免问题正文挤占整块侧栏。
 - 新增辩论页“一次性自动恢复”按钮：手动启用后，下一次如果辩论进入 `failed`，后端会自动把该辩论从 `failed` 修复回 `running` 并立即重试一次，同时立刻消耗掉这次机会；如果再次失败，将正常停留在 `failed`，不会无限循环重试。该设置是持久化的，刷新页面或关闭标签页不会丢。
@@ -138,12 +258,20 @@
 
 ## 2026-04-13
 
+### 2026-04-13 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.04.13.1
+
 - 辩论列表页的“清空已停止辩论”现在会同时纳入 `failed` 状态：后端清理条件已扩展为 `status in ('stopped', 'failed')`，前端统计与确认文案也同步改成“已停止/失败辩论”，避免失败辩论留在批量清理之外。
 - 移除运行时所有 demo fallback：OpenAI / Anthropic provider 在空正文、伪工具调用补救失败、无工具降级仍无正文时不再伪造正常发言，而是统一抛出 `AI_EMPTY_RESPONSE`；开发环境中的 `demo-*` key 也不再返回模板内容，改为直接报配置错误。
 - 辩论主循环的 provider 重试文案改为显式失败提示；当单席位连续 3 次调用都失败时，现在会追加一条 `context/generation_diagnostics.jsonl` 失败诊断记录，但不会写入 `debate_turns`、检索索引、memory 或 summary，避免假成功内容污染后续上下文。
 - 新增最小 provider 守门测试：补上 `node:test + tsx` 的 `npm test` 脚本，并为“空输出必须失败 / demo key 禁用”添加单测，确保后续不会把伪成功 fallback 悄悄加回来。
 
 ## 2026-04-11
+
+### 2026-04-11 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.04.11.1
 
 - 辩论页开始/暂停/恢复/终止按钮的 POST 请求新增 XHR 兜底：正常仍走 `fetch`，但当浏览器扩展或网络层让 `window.fetch` 直接抛出 `Failed to fetch` 时，会自动重试一次，减少控制按钮被拦截卡死的问题。
 - 修复 OpenAI 兼容接口在历史消息里携带工具调用时偶发缺少 `tool_calls[].type` 的问题：现在 provider 边界会统一补齐 `type: "function"`，并在重新启动辩论时清理旧的运行错误提示，避免已修复问题继续残留在页面上。
@@ -159,6 +287,10 @@
 - AI 配置卡片和筛选 tab 都补上了更明显的状态标识：启用显示绿点，禁用显示红点，状态一眼可见。
 
 ## 2026-04-02
+
+### 2026-04-02 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.04.02.1
 
 - 新增“工作台”项目层：现在可以先基于共享策略创建私有工作台，再在工作台里保存题目、原始点子库、私有说明和默认 AI 绑定，最后从工作台创建辩论。工作台对应新增 `workspaces / workspace_role_bindings / workspace_files` 表、相关 API 与页面入口，策略页主按钮也已从“直接创建辩论”改成“创建工作台”。
 - 工作台默认私有文件结构补齐为完整的 `debate/ideas/*` 工作目录，加上 `debate/notes/project-brief.md` 和 `debate/reference/private-materials.md`。这样原始点子池和筛选工作文件归工作台所有，不再跟着共享策略一起传播。
@@ -176,6 +308,10 @@
 - 新增 `app/api/debates/[id]/summary-jobs` 接口，支持查看总结任务列表以及手动执行 `retry_failed / rebuild_turn / rebuild_round / rebuild_facts`，为后续更完整的总结控制台打下基础。
 
 ## 2026-03-31
+
+### 2026-03-31 更新汇总
+
+类型：Changed · 范围：project · 版本：v2026.03.31.1
 
 - 原始发言归档继续细化：运行时不再把一整轮都塞进单个 `debate/answers/round-<n>.md`，而是进一步拆成 `debate/answers/round-<n>/turn-<m>.md`，做到每一回一个文件，避免单轮文件继续膨胀。
 - 重做辩论摘要体系：新增由策略 workflow 声明、在创建辩论时单独绑定 AI 的独立总结器；每回自动写入 `debate/turn_summaries/turn-<n>.md`，每轮只基于这些回摘要生成 `debate/round_summaries/round-<n>.md`，并把 `facts/board.md` 改成结构化事实板而不再逐回追加摘录。同时 SSE / 发言目录新增“AI 总结中...”状态，便于在两回之间观察总结进度。

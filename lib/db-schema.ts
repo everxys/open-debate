@@ -196,6 +196,19 @@ export type UserTable = {
   role: string;
 };
 
+export type UserFeedbackTable = {
+  id: string;
+  user_id: string;
+  category: string;
+  title: string;
+  message: string;
+  status: string;
+  reviewed_by_user_id: string | null;
+  reviewed_at: NullableTimestampString;
+  created_at: TimestampString;
+  updated_at: TimestampString;
+};
+
 export type RateLimitCounterTable = {
   key: string;
   window_id: number;
@@ -246,6 +259,7 @@ export type DebateResumeJobTable = {
   resume_at: TimestampString;
   reason: string;
   status: string;
+  attempt_count: number;
   locked_by: string | null;
   locked_at: NullableTimestampString;
   last_error: string | null;
@@ -447,6 +461,7 @@ export type OpenDebateDb = {
   strategy_role_files: StrategyRoleFileTable;
   strategy_shared_files: StrategySharedFileTable;
   strategy_roles: StrategyRoleTable;
+  user_feedback: UserFeedbackTable;
   users: UserTable;
   workspace_files: WorkspaceFileTable;
   workspace_role_bindings: WorkspaceRoleBindingTable;

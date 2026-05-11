@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { JobDashboard } from "./job-dashboard";
 import { requireAdmin } from "@/lib/auth";
 import { query } from "@/lib/db";
 
@@ -140,6 +141,8 @@ export default async function ObservabilityPage() {
         </div>
       </div>
 
+      <JobDashboard />
+
       <div className="panel">
         <h3 style={{ marginTop: 0 }}>最近失败的辩论</h3>
         {snapshot.recentFailures.length === 0 ? (
@@ -169,4 +172,3 @@ export default async function ObservabilityPage() {
     </section>
   );
 }
-

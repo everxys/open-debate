@@ -2,6 +2,10 @@
 
 import { useMemo, useState } from "react";
 
+import { Button } from "@/components/ui/button";
+import { Alert } from "@/components/ui/feedback";
+import { Field } from "@/components/ui/surface";
+
 export default function SecurityPage() {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -49,8 +53,7 @@ export default function SecurityPage() {
       </p>
 
       <div className="stack" style={{ marginTop: 14, maxWidth: 520 }}>
-        <div className="field">
-          <label>当前密码</label>
+        <Field label="当前密码">
           <input
             type="password"
             autoComplete="current-password"
@@ -58,9 +61,8 @@ export default function SecurityPage() {
             onChange={(e) => setCurrentPassword(e.target.value)}
             placeholder="当前密码"
           />
-        </div>
-        <div className="field">
-          <label>新密码</label>
+        </Field>
+        <Field label="新密码">
           <input
             type="password"
             autoComplete="new-password"
@@ -68,9 +70,8 @@ export default function SecurityPage() {
             onChange={(e) => setNewPassword(e.target.value)}
             placeholder="新密码"
           />
-        </div>
-        <div className="field">
-          <label>确认新密码</label>
+        </Field>
+        <Field label="确认新密码">
           <input
             type="password"
             autoComplete="new-password"
@@ -83,19 +84,16 @@ export default function SecurityPage() {
               两次输入不一致
             </div>
           ) : null}
-        </div>
+        </Field>
 
-        <button className="btn btn-primary" disabled={!canSubmit || loading} onClick={() => void submit()}>
+        <Button variant="primary" disabled={!canSubmit || loading} onClick={() => void submit()}>
           {loading ? "提交中..." : "更新密码"}
-        </button>
+        </Button>
 
         {message ? (
-          <div className={`alert ${message.type === "error" ? "alert-error" : "alert-success"}`}>
-            {message.text}
-          </div>
+          <Alert tone={message.type}>{message.text}</Alert>
         ) : null}
       </div>
     </section>
   );
 }
-

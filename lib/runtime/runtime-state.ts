@@ -1,6 +1,6 @@
 import { sql } from "kysely";
 
-import { ensureDb, ensureDebateAutoRecoverColumns } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 import { describeRuntimeError } from "@/lib/runtime/provider-shared";
 import { normalizeDebateRow } from "@/lib/runtime/runtime-parsing";
 import type { DebateRecord } from "@/lib/types";
@@ -89,18 +89,7 @@ export async function autoRecoverFailedDebateOnce(input: {
       .executeTakeFirst();
   }
 
-  let row;
-  try {
-    row = await executeRecover();
-  } catch (error) {
-    const details = describeRuntimeError(error);
-    if (String(details.code ?? "") === "42703" && String(details.message ?? "").toLowerCase().includes("auto_recover_once_on_failed")) {
-      await ensureDebateAutoRecoverColumns();
-      row = await executeRecover();
-    } else {
-      throw error;
-    }
-  }
+  const row = await executeRecover();
   return row ? normalizeDebateRow(row as Record<string, unknown>) : null;
 }
 
