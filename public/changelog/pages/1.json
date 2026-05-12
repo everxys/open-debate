@@ -2,20 +2,53 @@
   "schemaVersion": 1,
   "page": 1,
   "pageSize": 5,
-  "totalReleases": 23,
-  "totalPages": 5,
+  "totalReleases": 26,
+  "totalPages": 6,
   "current": {
     "date": "2026-05-12",
     "type": "Internal",
-    "title": "抽取通用 BackgroundJob",
-    "scope": "jobs",
-    "order": 1300,
-    "slug": "2026-05-12-background-job-template",
-    "body": "将后台任务中心拆成通用 `BackgroundJob` 模型和可替换 adapter，并把当前 summary/resume 任务接入为 Open Debate 的实现。管理后台继续展示任务、队列和 worker 状态，后续模板复用时只需要替换 adapter。",
-    "sequence": 3,
-    "version": "v2026.05.12.3"
+    "title": "明确启动方式文档同步规则",
+    "scope": "docs",
+    "order": 1700,
+    "slug": "2026-05-12-readme-startup-guidance",
+    "body": "项目协作规则新增启动文档同步要求：只要本地、生产或 Docker 的启动方式、启动命令、环境变量要求或部署入口发生变化，就必须同步更新 README。后续启动流程调整不应只改脚本或 compose 配置，避免文档和实际运行方式再次脱节。",
+    "sequence": 6,
+    "version": "v2026.05.12.6"
   },
   "releases": [
+    {
+      "date": "2026-05-12",
+      "type": "Internal",
+      "title": "明确启动方式文档同步规则",
+      "scope": "docs",
+      "order": 1700,
+      "slug": "2026-05-12-readme-startup-guidance",
+      "body": "项目协作规则新增启动文档同步要求：只要本地、生产或 Docker 的启动方式、启动命令、环境变量要求或部署入口发生变化，就必须同步更新 README。后续启动流程调整不应只改脚本或 compose 配置，避免文档和实际运行方式再次脱节。",
+      "sequence": 6,
+      "version": "v2026.05.12.6"
+    },
+    {
+      "date": "2026-05-12",
+      "type": "Added",
+      "title": "补充项目启动说明",
+      "scope": "docs",
+      "order": 1600,
+      "slug": "2026-05-12-readme-startup-guide",
+      "body": "README 现在补充了本地开发、非 Docker 生产启动和 Docker Compose 单机生产部署流程，明确必填环境变量、Caddy 自动 HTTPS、PostgreSQL 内部网络访问、数据库维护命令和常用校验命令。新环境可以直接按文档选择启动方式，不再需要从脚本和 compose 文件里反推部署步骤。",
+      "sequence": 5,
+      "version": "v2026.05.12.5"
+    },
+    {
+      "date": "2026-05-12",
+      "type": "Changed",
+      "title": "加固单机生产 Docker 部署",
+      "scope": "deploy",
+      "order": 1500,
+      "slug": "2026-05-12-production-compose-hardening",
+      "body": "单机 Docker Compose 部署改为由 Caddy 对外提供自动 HTTPS，应用和 PostgreSQL 默认只在内部网络通信，数据库密码和应用密钥都改为环境变量注入。新增 `.dockerignore` 降低构建上下文泄漏风险，并收紧项目规则：部署、运维、技术栈、数据库和项目流程变更也必须补充 changelog 条目。",
+      "sequence": 4,
+      "version": "v2026.05.12.4"
+    },
     {
       "date": "2026-05-12",
       "type": "Internal",
@@ -37,39 +70,6 @@
       "body": "将 AI 文件、策略共享文件、策略角色文件、草稿角色文件和工作台文件的树、右键菜单、标签页、Monaco 编辑器、拖拽移动、保存与删除流程合并到通用 `FileWorkspace`。各业务入口现在只保留 adapter、路径徽章、额外菜单和只读状态配置，后续模板复用时可以替换文件接口而不用复制整套文件管理器。",
       "sequence": 2,
       "version": "v2026.05.12.2"
-    },
-    {
-      "date": "2026-05-12",
-      "type": "Internal",
-      "title": "抽取通用 UI 组件底座",
-      "scope": "ui",
-      "order": 1100,
-      "slug": "2026-05-12-ui-component-foundation",
-      "body": "将按钮、字段、面板、徽章、标签页、上下文菜单、提示和 toast 的通用样式迁入 `components/ui`，并新增可复用组件入口。业务页面继续保留自身布局和状态样式，后续模板化时可以直接复用这层 UI 基础组件。",
-      "sequence": 1,
-      "version": "v2026.05.12.1"
-    },
-    {
-      "date": "2026-05-11",
-      "type": "Internal",
-      "title": "抽取模板底座 core 模块",
-      "scope": "core",
-      "order": 1100,
-      "slug": "2026-05-11-core-template-foundation",
-      "body": "新增 `lib/core` 底座目录，把 API 错误响应、数据库迁移、日志、认证会话和更新日志生成逻辑整理成可复用入口；旧 `lib/*` 路径继续兼容，现有业务代码无需同步改动即可逐步迁移到通用模板结构。",
-      "sequence": 1,
-      "version": "v2026.05.11.1"
-    },
-    {
-      "date": "2026-05-10",
-      "type": "Added",
-      "title": "新增后台任务中心",
-      "scope": "observability",
-      "order": 2500,
-      "slug": "2026-05-10-job-dashboard",
-      "body": "监控面板新增后台任务中心，统一展示 summary worker 与恢复任务的状态、重试次数、失败原因、耗时和调度时间，并支持管理员手动重新排队执行失败或已完成的后台任务。",
-      "sequence": 7,
-      "version": "v2026.05.10.7"
     }
   ]
 }

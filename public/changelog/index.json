@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
   "pageSize": 5,
-  "totalReleases": 23,
-  "totalPages": 5,
+  "totalReleases": 26,
+  "totalPages": 6,
   "current": {
     "date": "2026-05-12",
     "type": "Internal",
-    "title": "抽取通用 BackgroundJob",
-    "scope": "jobs",
-    "order": 1300,
-    "slug": "2026-05-12-background-job-template",
-    "body": "将后台任务中心拆成通用 `BackgroundJob` 模型和可替换 adapter，并把当前 summary/resume 任务接入为 Open Debate 的实现。管理后台继续展示任务、队列和 worker 状态，后续模板复用时只需要替换 adapter。",
-    "sequence": 3,
-    "version": "v2026.05.12.3"
+    "title": "明确启动方式文档同步规则",
+    "scope": "docs",
+    "order": 1700,
+    "slug": "2026-05-12-readme-startup-guidance",
+    "body": "项目协作规则新增启动文档同步要求：只要本地、生产或 Docker 的启动方式、启动命令、环境变量要求或部署入口发生变化，就必须同步更新 README。后续启动流程调整不应只改脚本或 compose 配置，避免文档和实际运行方式再次脱节。",
+    "sequence": 6,
+    "version": "v2026.05.12.6"
   },
   "pages": [
     {
@@ -38,7 +38,12 @@
     {
       "page": 5,
       "path": "pages/5.json",
-      "releaseCount": 3
+      "releaseCount": 5
+    },
+    {
+      "page": 6,
+      "path": "pages/6.json",
+      "releaseCount": 1
     }
   ]
 }

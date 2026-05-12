@@ -2,20 +2,53 @@
   "schemaVersion": 1,
   "page": 2,
   "pageSize": 5,
-  "totalReleases": 23,
-  "totalPages": 5,
+  "totalReleases": 26,
+  "totalPages": 6,
   "current": {
     "date": "2026-05-12",
     "type": "Internal",
-    "title": "抽取通用 BackgroundJob",
-    "scope": "jobs",
-    "order": 1300,
-    "slug": "2026-05-12-background-job-template",
-    "body": "将后台任务中心拆成通用 `BackgroundJob` 模型和可替换 adapter，并把当前 summary/resume 任务接入为 Open Debate 的实现。管理后台继续展示任务、队列和 worker 状态，后续模板复用时只需要替换 adapter。",
-    "sequence": 3,
-    "version": "v2026.05.12.3"
+    "title": "明确启动方式文档同步规则",
+    "scope": "docs",
+    "order": 1700,
+    "slug": "2026-05-12-readme-startup-guidance",
+    "body": "项目协作规则新增启动文档同步要求：只要本地、生产或 Docker 的启动方式、启动命令、环境变量要求或部署入口发生变化，就必须同步更新 README。后续启动流程调整不应只改脚本或 compose 配置，避免文档和实际运行方式再次脱节。",
+    "sequence": 6,
+    "version": "v2026.05.12.6"
   },
   "releases": [
+    {
+      "date": "2026-05-12",
+      "type": "Internal",
+      "title": "抽取通用 UI 组件底座",
+      "scope": "ui",
+      "order": 1100,
+      "slug": "2026-05-12-ui-component-foundation",
+      "body": "将按钮、字段、面板、徽章、标签页、上下文菜单、提示和 toast 的通用样式迁入 `components/ui`，并新增可复用组件入口。业务页面继续保留自身布局和状态样式，后续模板化时可以直接复用这层 UI 基础组件。",
+      "sequence": 1,
+      "version": "v2026.05.12.1"
+    },
+    {
+      "date": "2026-05-11",
+      "type": "Internal",
+      "title": "抽取模板底座 core 模块",
+      "scope": "core",
+      "order": 1100,
+      "slug": "2026-05-11-core-template-foundation",
+      "body": "新增 `lib/core` 底座目录，把 API 错误响应、数据库迁移、日志、认证会话和更新日志生成逻辑整理成可复用入口；旧 `lib/*` 路径继续兼容，现有业务代码无需同步改动即可逐步迁移到通用模板结构。",
+      "sequence": 1,
+      "version": "v2026.05.11.1"
+    },
+    {
+      "date": "2026-05-10",
+      "type": "Added",
+      "title": "新增后台任务中心",
+      "scope": "observability",
+      "order": 2500,
+      "slug": "2026-05-10-job-dashboard",
+      "body": "监控面板新增后台任务中心，统一展示 summary worker 与恢复任务的状态、重试次数、失败原因、耗时和调度时间，并支持管理员手动重新排队执行失败或已完成的后台任务。",
+      "sequence": 7,
+      "version": "v2026.05.10.7"
+    },
     {
       "date": "2026-05-10",
       "type": "Changed",
@@ -37,38 +70,6 @@
       "body": "数据库 schema 初始化和历史升级改为 `migrations/*.sql` 与 `schema_migrations` 记录管理；启动时只检查迁移是否已应用，不再在运行过程中自动修补表结构。`npm run dev`、`npm start` 和 summary worker 会先执行 `npm run db:migrate`，旧库升级、生成物记录和迁移校验都走同一套流程。",
       "sequence": 5,
       "version": "v2026.05.10.5"
-    },
-    {
-      "date": "2026-05-10",
-      "type": "Fixed",
-      "title": "修正同日更新日志版本号顺序",
-      "scope": "changelog",
-      "order": 2100,
-      "slug": "2026-05-10-changelog-version-sequence",
-      "body": "修正同一天多条更新的版本号生成逻辑：页面仍按最新更新在上展示，但 `vYYYY.MM.DD.N` 的 `N` 会按时间从旧到新递增，避免最新条目显示成 `.1`、较旧条目反而显示成更大版本号。",
-      "sequence": 4,
-      "version": "v2026.05.10.4"
-    },
-    {
-      "date": "2026-05-10",
-      "type": "Changed",
-      "title": "补充更新日志写作约定与技能",
-      "scope": "changelog",
-      "order": 2000,
-      "slug": "2026-05-10-changelog-guidance-skill",
-      "body": "`USER.md` 中的版本更新规则改为新增 `changelog/entries/YYYY/MM/*.md` 条目后运行 `npm run changelog:generate`，不再要求手写 `UPDATE.md`；同时新增本地 `open-debate-changelog` skill，后续 AI 写更新日志时会按条目源文件、生成物和校验脚本的流程执行。",
-      "sequence": 3,
-      "version": "v2026.05.10.3"
-    },
-    {
-      "date": "2026-05-10",
-      "type": "Changed",
-      "title": "改造更新日志为条目生成模式",
-      "scope": "changelog",
-      "slug": "2026-05-10-999-changelog-entry-generation",
-      "body": "更新日志改为 `changelog/entries/YYYY/MM/*.md` 小条目维护，生成脚本统一输出 `public/changelog` 分页 JSON、当前版本 JSON 和归档 `UPDATE.md`；运行时顶部版本号和 `/changelog` 页面不再解析完整 Markdown，降低多年、多团队维护时的冲突和读取成本。",
-      "sequence": 2,
-      "version": "v2026.05.10.2"
     }
   ]
 }

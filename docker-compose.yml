@@ -1,4 +1,19 @@
 services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      APP_DOMAIN: "${APP_DOMAIN:?APP_DOMAIN is required}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
   postgres:
     image: postgres:18-alpine
     restart: unless-stopped
@@ -11,9 +26,7 @@ services:
     environment:
       POSTGRES_DB: open_debate
       POSTGRES_USER: open_debate
-      POSTGRES_PASSWORD: open_debate
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
@@ -32,12 +45,14 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://open_debate:open_debate@postgres:5432/open_debate
-      APP_URL: http://localhost:3000
+      DATABASE_URL: "postgres://open_debate:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/open_debate"
+      APP_URL: "${APP_URL:?APP_URL is required}"
       SESSION_SECRET: "${SESSION_SECRET:?SESSION_SECRET is required}"
       ENCRYPTION_KEY: "${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}"
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
 
 volumes:
   postgres_data:
+  caddy_data:
+  caddy_config:

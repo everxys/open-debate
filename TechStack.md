@@ -74,6 +74,8 @@
 - Docker 生产镜像只安装 production dependencies
 - Docker 运行阶段使用非 root 用户
 - docker-compose
-- docker-compose 中的敏感应用密钥通过环境变量注入
+- Caddy：单机生产反向代理和自动 HTTPS/TLS
+- docker-compose 中的数据库密码和敏感应用密钥通过环境变量注入
+- PostgreSQL 默认只暴露在 Docker Compose 内部网络，不映射宿主机端口
 - 应用服务 + PostgreSQL 服务
 - 启动时执行必要的数据库迁移检查
